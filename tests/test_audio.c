@@ -93,8 +93,10 @@ done:
     avcodec_free_context(&ctx);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     SDL_setenv("SDL_AUDIODRIVER", "dummy", 1);
     ph_audio *audio = ph_audio_create();
     CHECK(audio);

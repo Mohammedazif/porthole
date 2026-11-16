@@ -43,6 +43,22 @@ target_link_libraries(test_metrics PRIVATE porthole_core)
 porthole_set_warnings(test_metrics)
 add_test(NAME metrics COMMAND test_metrics)
 
+add_executable(test_dnssd_records test_dnssd_records.c
+    ${PROJECT_SOURCE_DIR}/src/airplay/dnssd_records.c)
+target_include_directories(test_dnssd_records PRIVATE ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/third_party/UxPlay/lib)
+porthole_set_warnings(test_dnssd_records)
+add_test(NAME dnssd_records COMMAND test_dnssd_records)
+
+add_executable(test_dnssd_native test_dnssd_native.c
+    ${PROJECT_SOURCE_DIR}/src/airplay/dnssd_records.c
+    ${PROJECT_SOURCE_DIR}/src/airplay/dnssd_win.c)
+target_include_directories(test_dnssd_native PRIVATE ${PROJECT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/third_party/UxPlay/lib)
+target_compile_definitions(test_dnssd_native PRIVATE PORTHOLE_TEST_NATIVE_DNSSD=1)
+porthole_set_warnings(test_dnssd_native)
+add_test(NAME dnssd_native COMMAND test_dnssd_native)
+
 add_executable(test_pointer test_pointer.c)
 target_link_libraries(test_pointer PRIVATE porthole_core)
 porthole_set_warnings(test_pointer)

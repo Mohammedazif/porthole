@@ -27,21 +27,29 @@
       "cacheVariables": { "PORTHOLE_WITH_AIRPLAY": "OFF" }
     },
     {
+      "name": "windows-release",
+      "inherits": "release",
+      "displayName": "Windows Wi-Fi mirror (native mDNS, no Bonjour SDK)",
+      "cacheVariables": { "PORTHOLE_WITH_AIRPLAY": "ON" }
+    },
+    {
       "name": "release-no-airplay",
       "inherits": "release",
-      "displayName": "Release without the AirPlay core (used by Windows CI until native mDNS lands)",
+      "displayName": "Minimal CLI without the AirPlay core (toolchain smoke check)",
       "cacheVariables": { "PORTHOLE_WITH_AIRPLAY": "OFF" }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
+    { "name": "windows-release", "configurePreset": "windows-release" },
     { "name": "debug-no-airplay", "configurePreset": "debug-no-airplay" },
     { "name": "release-no-airplay", "configurePreset": "release-no-airplay" }
   ],
   "testPresets": [
     { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
     { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
+    { "name": "windows-release", "configurePreset": "windows-release", "output": { "outputOnFailure": true } },
     { "name": "debug-no-airplay", "configurePreset": "debug-no-airplay", "output": { "outputOnFailure": true } },
     { "name": "release-no-airplay", "configurePreset": "release-no-airplay", "output": { "outputOnFailure": true } }
   ]

@@ -21,4 +21,4 @@ pacman -S --needed --noconfirm \
     mingw-w64-ucrt-x86_64-ffmpeg \
     mingw-w64-ucrt-x86_64-libusb
 
-echo "Done. Build with: cmake --preset release-no-airplay && cmake --build --preset release-no-airplay"
+echo "Done. Build the Wi-Fi mirror with: cmake --preset windows-release && cmake --build --preset windows-release"

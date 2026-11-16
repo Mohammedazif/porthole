@@ -55,10 +55,12 @@ if(PORTHOLE_WITH_AIRPLAY)
     porthole_set_warnings(porthole_app)
 
     target_link_libraries(porthole PRIVATE porthole_app)
-    target_compile_definitions(porthole PRIVATE
-        PORTHOLE_HAVE_AIRPLAY=1
+    target_compile_definitions(porthole PRIVATE PORTHOLE_HAVE_AIRPLAY=1)
+    if(NOT WIN32)
+        target_compile_definitions(porthole PRIVATE
         # Development default; an installed build will look next to the executable.
         PORTHOLE_BLE_HELPER="${PROJECT_SOURCE_DIR}/helpers/ble-bluez/porthole_ble.py")
+    endif()
 endif()
 
 if(MINGW)

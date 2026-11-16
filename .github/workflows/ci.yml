@@ -28,10 +28,7 @@ jobs:
         run: ctest --preset release
 
   windows:
-    # Builds without the AirPlay core for now: UxPlay needs Apple's Bonjour SDK on
-    # Windows, which CI can't download. This switches to the full build once
-    # Porthole's native Windows mDNS backend is in (Phase 1).
-    name: Windows (MSYS2 UCRT64)
+    name: Windows Wi-Fi mirror (MSYS2 UCRT64)
     runs-on: windows-2022
     defaults:
       run:
@@ -50,17 +47,54 @@ jobs:
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-libplist
+            mingw-w64-ucrt-x86_64-SDL2
+            mingw-w64-ucrt-x86_64-ffmpeg
 
       - name: Configure
-        run: cmake --preset release-no-airplay -DPORTHOLE_WARNINGS_AS_ERRORS=ON
+        run: cmake --preset windows-release -DPORTHOLE_WARNINGS_AS_ERRORS=ON
 
       - name: Build
-        run: cmake --build --preset release-no-airplay
+        run: cmake --build --preset windows-release
 
       - name: Test
-        run: ctest --preset release-no-airplay
+        run: ctest --preset windows-release
+
+      - name: Package portable mirror and matching source archives
+        run: bash scripts/package-windows.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: porthole-windows-x64
-          path: build/release-no-airplay/src/porthole.exe
+          path: out/porthole-windows-x64/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porthole-windows-x64-sources
+          path: out/porthole-windows-x64-sources/
+          compression-level: 0
+          if-no-files-found: error
+
+  windows-minimal:
+    name: Windows minimal CLI
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+      - run: cmake --preset release-no-airplay -DPORTHOLE_WARNINGS_AS_ERRORS=ON
+      - run: cmake --build --preset release-no-airplay
+      - run: ctest --preset release-no-airplay

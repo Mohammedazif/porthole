@@ -19,7 +19,34 @@ set(NO_MARCH_NATIVE ON CACHE BOOL "Disable -march=native in UxPlay's core" FORCE
 set(_uxplay_bin ${CMAKE_BINARY_DIR}/third_party/uxplay)
 add_subdirectory(${UXPLAY_DIR}/lib/llhttp   ${_uxplay_bin}/llhttp   EXCLUDE_FROM_ALL)
 add_subdirectory(${UXPLAY_DIR}/lib/playfair ${_uxplay_bin}/playfair EXCLUDE_FROM_ALL)
-add_subdirectory(${UXPLAY_DIR}/lib          ${_uxplay_bin}/airplay  EXCLUDE_FROM_ALL)
+if(WIN32)
+    # Upstream's CMake requires Apple's Bonjour SDK and its dnssd.c loads dnssd.dll.
+    # Keep the pinned sources intact and replace only discovery with the Windows
+    # DNS API. The rest of UxPlay already supports MinGW/winpthreads.
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(UXPLAY_PLIST REQUIRED IMPORTED_TARGET libplist-2.0)
+    find_package(OpenSSL 1.1.1 REQUIRED)
+    find_package(Threads REQUIRED)
+    file(GLOB _uxplay_sources CONFIGURE_DEPENDS ${UXPLAY_DIR}/lib/*.c)
+    list(REMOVE_ITEM _uxplay_sources ${UXPLAY_DIR}/lib/dnssd.c)
+    add_library(airplay STATIC ${_uxplay_sources}
+        ${PROJECT_SOURCE_DIR}/src/airplay/dnssd_records.c
+        ${PROJECT_SOURCE_DIR}/src/airplay/dnssd_win.c)
+    target_include_directories(airplay PRIVATE ${UXPLAY_DIR}/lib
+        ${UXPLAY_DIR}/lib/playfair ${UXPLAY_DIR}/lib/llhttp ${PROJECT_SOURCE_DIR}/src)
+    target_compile_definitions(airplay PRIVATE WIN32=1 _WIN32_WINNT=0x0A00 NOHOLD
+        STANDALONE OPENSSL_API_COMPAT=0x10101000L)
+    if(UXPLAY_PLIST_VERSION VERSION_GREATER_EQUAL 2.1)
+        target_compile_definitions(airplay PRIVATE PLIST_210)
+    endif()
+    if(UXPLAY_PLIST_VERSION VERSION_GREATER_EQUAL 2.3)
+        target_compile_definitions(airplay PRIVATE PLIST_230)
+    endif()
+    target_link_libraries(airplay PUBLIC playfair llhttp Threads::Threads
+        PkgConfig::UXPLAY_PLIST OpenSSL::Crypto ws2_32 iphlpapi dnsapi)
+else()
+    add_subdirectory(${UXPLAY_DIR}/lib ${_uxplay_bin}/airplay EXCLUDE_FROM_ALL)
+endif()
 
 if(UNIX AND NOT APPLE)
     # playfair calls sin(); UxPlay's own app only gets libm indirectly through GStreamer.
