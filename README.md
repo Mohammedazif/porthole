@@ -10,6 +10,7 @@ Free and open source (GPL-3.0). Nothing to install on the iPhone: it uses built-
 > window. Keyboard shortcuts and wheel scrolling have been tested on the iPhone. Continuous
 > pointer tracking, taps, secondary clicks and drags have been verified with the C controller
 > on the live iPhone. Integrated mouse, click, drag and scroll checks also pass in the app.
+> Audio playback through the PC is implemented and verified on the live iPhone.
 > USB capture and the Windows receiver remain planned.
 > See [PLAN.md](PLAN.md) for the full plan, feature list and roadmap.
 >
@@ -62,6 +63,11 @@ Command on the iPhone. **F1** opens local controls and setup help; input is paus
 is open. The waiting screen shows mirroring and Bluetooth setup steps, and a status banner
 identifies when the mirror is available without controls.
 
+Mirrored iPhone audio plays through the PC's default speakers. AAC-ELD, AAC-LC and ALAC
+are decoded with FFmpeg and played through SDL; AirPlay volume changes are respected.
+Use `--no-audio` to mute playback on the PC. The playback queue is bounded to avoid
+accumulating audible lag; precise audio/video synchronization remains on the roadmap.
+
 Mouse movement over the phone picture now drives a continuous pointer controller. Left click
 queues a tap, right click queues a secondary click, and holding and dragging queues a swipe.
 Video feedback confirms the pointer position before a button is pressed; losing focus or
@@ -70,16 +76,31 @@ four targets within 1.4 pixels, entered `7 + 8 = 15` in Calculator, opened a nat
 menu and performed a vertical drag. Integrated window tests also verified real PC mouse
 alignment, Calculator clicks, right-click, dragging in both directions and scrolling to
 page edges. The two live drag endpoints were within 1 pixel, and both completed their
-button releases. Wheel input uses the same target position before scrolling.
+button releases. Wheel positioning accepts a small confirmed offset so scrolling need not
+wait for click-level precision; taps and held drags retain their stricter alignment.
 Scrolling now watches the native iOS scroll indicator and stops continued input at an edge;
-normal wheel travel is faster, with smaller steps near the boundary. This was checked in
-Settings; custom scroll views without an indicator still need testing.
+normal wheel travel is faster, with smaller steps near the boundary. A stopped edge stays
+blocked through the bounce animation and mouse repositioning; reverse the wheel to move
+away. A new gesture after a pause rechecks the bounds with a one-unit probe, so navigation
+on the phone or a changing device list cannot leave an old edge permanently latched.
+One unchanged frame cannot prove an edge. Navigation clears the learned bounds.
+The release build reached both actual ends of the long Bluetooth device list and stopped
+sustained input at each edge. Earlier Settings checks also covered cursor movement after
+stopping. Custom scroll views without an indicator and rapid cursor changes during pointer
+recovery need further live testing.
 
-The prototype reads pointer calibration from the per-user `pointer-scale` file (on Linux,
-`~/.config/porthole/pointer-scale`). It contains X and Y movement multipliers, for example
-`1.0 1.0`, and seeds the movement model at startup. Calibration depends on the phone's
-AssistiveTouch tracking sensitivity; video feedback corrects placement, and a guided
-calibration UI remains planned.
+The mouse controller uses the previous video-confirmed movement path. Each move is checked
+against the mirrored pointer before the next correction or button press. Keyboard and
+consumer reports keep their separate queue, and the faster input loop and rendering changes
+are retained. Experimental streamed hover and automatic curve fitting have been withdrawn
+after unstable calibration during scrolling; their findings are preserved in the M5 section
+of [PLAN.md](PLAN.md).
+
+The restored controller reads and saves per-axis calibration in `pointer-scale` (on Linux,
+`~/.config/porthole/pointer-scale`); it ignores the experimental `pointer-curve` file.
+Keep AssistiveTouch Tracking Sensitivity consistent, or recalibrate after changing it.
+For everyday use build the optimized `release` preset (`cmake --preset release`);
+`debug` is compiled without optimization.
 
 ### Windows (MSYS2)
 
