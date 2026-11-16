@@ -1,0 +1,30 @@
+# Builds UxPlay's AirPlay receiver core (third_party/UxPlay/lib) as the static library `airplay`
+# and exposes it to Porthole as the interface target `porthole_airplay_core`.
+#
+# Only UxPlay's protocol core is used (RTSP server, pairing, FairPlay, stream decryption);
+# its GStreamer renderers and uxplay.cpp front end are not built.
+# UxPlay is GPL-3.0, which is why Porthole is GPL-3.0 too (see third_party/UxPlay/LICENSE).
+
+set(UXPLAY_DIR ${PROJECT_SOURCE_DIR}/third_party/UxPlay)
+
+if(NOT EXISTS ${UXPLAY_DIR}/lib/raop.h)
+    message(FATAL_ERROR
+        "UxPlay sources not found in ${UXPLAY_DIR}.\n"
+        "Run: git submodule update --init --recursive")
+endif()
+
+# Release binaries must run on other PCs, so never let UxPlay add -march=native.
+set(NO_MARCH_NATIVE ON CACHE BOOL "Disable -march=native in UxPlay's core" FORCE)
+
+set(_uxplay_bin ${CMAKE_BINARY_DIR}/third_party/uxplay)
+add_subdirectory(${UXPLAY_DIR}/lib/llhttp   ${_uxplay_bin}/llhttp   EXCLUDE_FROM_ALL)
+add_subdirectory(${UXPLAY_DIR}/lib/playfair ${_uxplay_bin}/playfair EXCLUDE_FROM_ALL)
+add_subdirectory(${UXPLAY_DIR}/lib          ${_uxplay_bin}/airplay  EXCLUDE_FROM_ALL)
+
+if(UNIX AND NOT APPLE)
+    target_compile_definitions(airplay PRIVATE SUPPRESS_AVAHI_COMPAT_WARNING)
+endif()
+
+add_library(porthole_airplay_core INTERFACE)
+target_link_libraries(porthole_airplay_core INTERFACE airplay)
+target_include_directories(porthole_airplay_core SYSTEM INTERFACE ${UXPLAY_DIR}/lib)

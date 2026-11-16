@@ -1,0 +1,48 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}"
+    },
+    {
+      "name": "debug",
+      "inherits": "base",
+      "displayName": "Debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "release",
+      "inherits": "base",
+      "displayName": "Release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "debug-no-airplay",
+      "inherits": "debug",
+      "displayName": "Debug without the AirPlay core (minimal dependencies)",
+      "cacheVariables": { "PORTHOLE_WITH_AIRPLAY": "OFF" }
+    },
+    {
+      "name": "release-no-airplay",
+      "inherits": "release",
+      "displayName": "Release without the AirPlay core (used by Windows CI until native mDNS lands)",
+      "cacheVariables": { "PORTHOLE_WITH_AIRPLAY": "OFF" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "debug-no-airplay", "configurePreset": "debug-no-airplay" },
+    { "name": "release-no-airplay", "configurePreset": "release-no-airplay" }
+  ],
+  "testPresets": [
+    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
+    { "name": "debug-no-airplay", "configurePreset": "debug-no-airplay", "output": { "outputOnFailure": true } },
+    { "name": "release-no-airplay", "configurePreset": "release-no-airplay", "output": { "outputOnFailure": true } }
+  ]
+}
