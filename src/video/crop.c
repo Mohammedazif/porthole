@@ -1,0 +1,84 @@
+#include "video/crop.h"
+
+#include <math.h>
+#include <stdlib.h>
+
+#define BLACK_MAX_Y 32       /* limited-range black is 16, full-range 0; allow encoder noise */
+#define BLACK_MAX_CHROMA 12  /* |U-128|, |V-128| */
+#define SAMPLE_STEP 4        /* check every 4th row/column */
+#define MAX_NON_BLACK 0.005  /* tolerate 0.5% stray pixels */
+#define EDGE_MARGIN 2        /* ignore columns right next to the content edge (blur) */
+
+static bool pixel_is_black(const ph_yuv_planes *p, int x, int y)
+{
+    int luma = p->y[y * p->y_stride + x];
+    int cu = p->u[(y / 2) * p->uv_stride + x / 2] - 128;
+    int cv = p->v[(y / 2) * p->uv_stride + x / 2] - 128;
+    return luma <= BLACK_MAX_Y && abs(cu) <= BLACK_MAX_CHROMA && abs(cv) <= BLACK_MAX_CHROMA;
+}
+
+/* True if columns [x0, x1) are (almost) entirely black. */
+static bool columns_black(const ph_yuv_planes *p, int x0, int x1)
+{
+    long total = 0, non_black = 0;
+
+    if (x1 <= x0)
+        return false;
+    for (int y = 0; y < p->height; y += SAMPLE_STEP) {
+        for (int x = x0; x < x1; x += SAMPLE_STEP) {
+            total++;
+            non_black += !pixel_is_black(p, x, y);
+        }
+    }
+    return total > 0 && non_black <= (long)(MAX_NON_BLACK * (double)total);
+}
+
+static bool column_black(const ph_yuv_planes *p, int x)
+{
+    return columns_black(p, x, x + 1);
+}
+
+static ph_rect make_rect(int left, int right, int height)
+{
+    /* Even offsets keep the crop aligned with the half-resolution chroma planes. */
+    ph_rect r;
+    r.x = left & ~1;
+    r.w = ((right - r.x) + 1) & ~1;
+    r.y = 0;
+    r.h = height;
+    return r;
+}
+
+ph_rect ph_video_content_rect(const ph_yuv_planes *p, double portrait_aspect)
+{
+    ph_rect full = {0, 0, p->width, p->height};
+    int W = p->width, H = p->height;
+
+    if (W <= H || H <= 0)
+        return full; /* portrait-shaped frames are sent without bars */
+
+    if (portrait_aspect > 0.2 && portrait_aspect < 1.0) {
+        int content_w = (int)lround(H * portrait_aspect);
+        int bar = (W - content_w) / 2;
+        if (bar < 8)
+            return full;
+        if (columns_black(p, 0, bar - EDGE_MARGIN) &&
+            columns_black(p, W - bar + EDGE_MARGIN, W))
+            return make_rect(bar, W - bar, H);
+        return full;
+    }
+
+    /* Unknown phone shape: scan in from both edges for the first non-black column. */
+    {
+        int left = 0, right = W - 1;
+        while (left < W / 2 && column_black(p, left))
+            left++;
+        while (right > W / 2 && column_black(p, right))
+            right--;
+        if (left < 8 || W - 1 - right < 8 || abs(left - (W - 1 - right)) > 8)
+            return full; /* no bars, or not centred: real landscape content */
+        if ((double)(right - left + 1) / H < 0.35 || (double)(right - left + 1) / H > 0.75)
+            return full; /* not phone-shaped */
+        return make_rect(left, right + 1, H);
+    }
+}

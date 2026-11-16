@@ -22,7 +22,8 @@ add_subdirectory(${UXPLAY_DIR}/lib/playfair ${_uxplay_bin}/playfair EXCLUDE_FROM
 add_subdirectory(${UXPLAY_DIR}/lib          ${_uxplay_bin}/airplay  EXCLUDE_FROM_ALL)
 
 if(UNIX AND NOT APPLE)
-    target_compile_definitions(airplay PRIVATE SUPPRESS_AVAHI_COMPAT_WARNING)
+    # playfair calls sin(); UxPlay's own app only gets libm indirectly through GStreamer.
+    target_link_libraries(playfair PUBLIC m)
 endif()
 
 add_library(porthole_airplay_core INTERFACE)

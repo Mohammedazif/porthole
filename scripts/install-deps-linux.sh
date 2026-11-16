@@ -21,6 +21,10 @@ packages=(
     bluez python3-dbus python3-gi
 )
 
-apt-get update
+if ! apt-get update; then
+    # Often caused by an unrelated third-party repository (e.g. a missing signing key);
+    # the packages below come from the distribution's own repositories.
+    echo "Warning: 'apt-get update' reported errors; continuing with the current package lists." >&2
+fi
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
 echo "Done. Build with: cmake --preset debug && cmake --build --preset debug"

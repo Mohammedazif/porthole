@@ -2,13 +2,24 @@ configure_file(core/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/core/vers
 
 # Platform-independent code shared by the app and the tests.
 add_library(porthole_core STATIC
+    core/config.c
+    control/keyboard.c
+    control/input.c
+    control/pointer.c
+    control/scroll.c
     core/log.c
     hid/hid_reports.c
+    video/crop.c
+    video/scrollbar.c
+    video/cursor.c
 )
 target_include_directories(porthole_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
+if(UNIX)
+    target_link_libraries(porthole_core PUBLIC m)
+endif()
 porthole_set_warnings(porthole_core)
 
 add_executable(porthole main.c)
@@ -16,8 +27,35 @@ target_link_libraries(porthole PRIVATE porthole_core)
 porthole_set_warnings(porthole)
 
 if(PORTHOLE_WITH_AIRPLAY)
-    target_link_libraries(porthole PRIVATE porthole_airplay_core)
-    target_compile_definitions(porthole PRIVATE PORTHOLE_HAVE_AIRPLAY=1)
+    # The full app: AirPlay receiver -> FFmpeg decoder -> SDL2 window.
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
+    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
+    find_package(OpenSSL REQUIRED)
+    find_package(Threads REQUIRED)
+
+    add_library(porthole_app STATIC
+        app.c
+        airplay/receiver.c
+        hid/link.c
+        ui/window.c
+        video/decoder.c
+    )
+    target_link_libraries(porthole_app PUBLIC
+        porthole_core
+        porthole_airplay_core
+        PkgConfig::SDL2
+        PkgConfig::FFMPEG
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    porthole_set_warnings(porthole_app)
+
+    target_link_libraries(porthole PRIVATE porthole_app)
+    target_compile_definitions(porthole PRIVATE
+        PORTHOLE_HAVE_AIRPLAY=1
+        # Development default; an installed build will look next to the executable.
+        PORTHOLE_BLE_HELPER="${PROJECT_SOURCE_DIR}/helpers/ble-bluez/porthole_ble.py")
 endif()
 
 if(MINGW)

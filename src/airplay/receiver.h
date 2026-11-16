@@ -1,0 +1,41 @@
+#ifndef PORTHOLE_AIRPLAY_RECEIVER_H
+#define PORTHOLE_AIRPLAY_RECEIVER_H
+
+/* Wi-Fi screen receiver: makes this PC show up in the iPhone's Screen Mirroring list and
+ * delivers the mirrored screen as an H.264 byte stream. Built on UxPlay's AirPlay core. */
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+typedef struct ph_receiver ph_receiver;
+
+typedef struct ph_receiver_callbacks {
+    void *user;
+    /* One H.264 access unit in Annex-B format (start codes; SPS/PPS precede keyframes).
+     * Called on a network thread; `data` is only valid during the call. */
+    void (*video)(void *user, const uint8_t *data, size_t len, uint64_t timestamp_ns);
+    /* A device started a mirroring session. Called on a network thread. */
+    void (*connected)(void *user, const char *name, const char *model);
+    /* The mirroring session ended or was reset. Called on a network thread. */
+    void (*disconnected)(void *user);
+} ph_receiver_callbacks;
+
+typedef struct ph_receiver_options {
+    const char *name;     /* shown in the iPhone's Screen Mirroring list */
+    unsigned short width; /* display size advertised to the iPhone (it scales to fit) */
+    unsigned short height;
+    unsigned short max_fps;
+    bool fixed_ports; /* TCP 7000/7001/7100 and UDP 6000/6001/7011, for firewall rules */
+    bool debug;       /* verbose protocol logging */
+} ph_receiver_options;
+
+/* Starts advertising and accepting connections. Returns NULL on failure (logged). */
+ph_receiver *ph_receiver_start(const ph_receiver_options *opt, const ph_receiver_callbacks *cb);
+
+/* Call regularly from the main thread: restarts the server after a dropped connection. */
+void ph_receiver_poll(ph_receiver *r);
+
+void ph_receiver_stop(ph_receiver *r);
+
+#endif

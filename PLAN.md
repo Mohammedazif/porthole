@@ -211,7 +211,7 @@ porthole/
 | **S2** | Can Windows act as a BLE mouse/keyboard for the iPhone? | Small WinRT/C# or Python (`bless`) GATT server advertising HID 0x1812 | iPhone pairs; pointer moves; text types |
 | **S3** ✅ | Can we hit an exact screen spot? | Corner-anchor + step moves; check whether the pointer appears in the AirPlay video; try an absolute-pointer descriptor | Tap lands within ~10 px of target. **Passed 2026-11-16**: Calculator `AC 7 + 8 =` → 15, every tap first attempt, ≤ 4.6 px error (absolute-pointer descriptor not tried yet) |
 | **S4** | Can we grab USB video on Windows without breaking Apple's driver? | libusb + WinUSB on the capture interface only | Frames received over USB on Windows |
-| S5 (partial) | Do extra mouse buttons / consumer keys trigger Home, Control Center…? | Configure AssistiveTouch buttons, send HID reports | Each action works on iOS 26. **So far:** Home (0x223) ✅, ⌘+Space Spotlight ✅, typing/Enter ✅. Extra-button actions (App Switcher, Control Center, …) not tested yet |
+| **S5** ✅ (Lock not tested) | Do extra mouse buttons / consumer keys trigger Home, Control Center…? | Configure AssistiveTouch buttons, send HID reports | Each action works on iOS 26. **Passed 2026-11-16:** Home (0x223), ⌘+Space, typing, ⌘+[ (Back), Escape; buttons 2–5 → Secondary Click, App Switcher, Control Center, Notification Center. Button 6 → Screenshot works (saved to Photos; iOS just doesn't show the preview in the mirror). Lock Screen deliberately not tested |
 
 If S2 fails → use the ESP32 dongle as the default control path. If S4 fails → ship Wi-Fi first and
 keep researching USB.
@@ -248,6 +248,24 @@ keep researching USB.
   captures showed stale frames → restarting UxPlay brought it back to ~0.1 s. (`-vsync no`
   broke mirroring entirely in UxPlay 1.68 here.) The real app needs a frame-freshness check
   before trusting the video for positioning.
+- **S5 (2026-11-16, 17:05–17:17):** configured entirely from the PC through the mirror
+  (Spotlight → AssistiveTouch settings, wheel scrolling, screen-guarded taps, ⌘+[ for Back).
+  *Customize Additional Buttons…* shows "Press a button on your pointer device"; pressing a
+  button adds a "Button N" row (button 2 defaults to **Secondary Click**, which is iOS's real
+  right-click: it opens app quick-action menus). Buttons 3–6 were set to App Switcher, Control
+  Center, Notification Center, Screenshot; all of 2–6 verified working (the screenshot landed in
+  Photos, though its preview never appears in the mirror). Other findings:
+  - The **mouse wheel** scrolls, with natural direction (positive wheel moves content up) and
+    only a few px per report, so the app must send many reports and invert/scale the PC wheel.
+  - **Escape** dismisses menus (and is "clear" in Calculator); **⌘+[** goes Back in Settings.
+  - The **AssistiveTouch floating button** sits on a screen edge and intercepts clicks near it
+    (a right-click meant for the Calculator display opened the AssistiveTouch menu). The app
+    should detect it in the video and keep clicks clear of it, or the wizard should suggest
+    turning *Always Show Menu* off.
+  - Spotlight's top hit can be a web suggestion: never press Enter without checking the
+    highlighted result.
+  - The action list includes **Restart** and **SOS**; the setup wizard must never be able to
+    assign those by mistake.
 - **Pointer appearance:** with Dwell off the pointer is a ~22 px grey dot (the ~55 px ring
   earlier was Dwell's countdown). It is still easy to detect on the black Calculator keypad
   (contrast 61 vs threshold 24).
@@ -256,6 +274,127 @@ keep researching USB.
   changed from 500×1080 to 500×1095 during this session). The tap script now rejects a resized
   mirror, invalid coordinates, a missing pointer, and positioning errors over 5 px even after
   exhausting retries. Regression checks: `python3 -m unittest discover -s tests -p test_tap_test.py -v`.
+
+### Linux first (decided 2026-11-16)
+The complete app (Phases 1–2) gets built and working in the Linux VM first, then ported to
+Windows. Platform-specific code stays behind small interfaces so the port only swaps backends.
+
+| Milestone | Delivers | Linux backend | Windows backend (later) |
+|---|---|---|---|
+| **M1** Mirror window | `porthole` shows the iPhone screen: UxPlay core → FFmpeg decode → SDL2 window | Avahi mDNS | Windows mDNS API |
+| **M2** Keyboard & shortcuts | typing, Home/App Switcher/Control Center/… hotkeys, scroll wheel, right-click | BLE helper: Python + BlueZ (from the spike) | BLE helper: WinRT |
+| **M3** Pointer | the phone pointer follows the PC cursor over the window; clicks and drags land where you click; drift corrected from the decoded video | same helper | same helper |
+| **M4** Polish | status/help overlay, reconnect handling, setup checks (AssistiveTouch on, Dwell off) | — | — |
+
+**Bluetooth helper protocol:** the main app starts the helper and writes framed HID reports to
+its stdin (`type, length, payload`; types = keyboard / mouse / consumer). The helper sends them
+at a fixed 15 ms pace (the acceleration model depends on it) and prints status lines
+(connected, subscribed) on stdout. The ESP32 dongle can reuse the same framing.
+
+#### M2 input fixes and live results (2026-11-16)
+- Keyboard handling now uses the current modifier snapshot, including Ctrl held before the
+  window receives focus. Key releases are handled across Alt shortcuts, including releasing
+  Alt before the shortcut key or before another modifier. Focus loss releases keyboard and
+  shortcut mouse buttons.
+- Extra-button shortcuts hold their button until key release and ignore duplicate key-down
+  events. Live PC-input tests now verify **Alt+S keeps App Switcher open** and **Alt+C keeps
+  Control Center open**, including captures several seconds after releasing the keys. The
+  phone's saved button 3–6 assignments were inspected and are correct.
+- The BlueZ sender now waits for each notification callback to finish before spacing the next
+  report. Previously a busy GLib loop could flush queued reports together; the live trace
+  showed two mouse reports only about 1 ms apart. Sync acknowledgements now follow actual
+  dispatch. A regression test fails on the old sender and passes with this change.
+- Bluetooth readiness now requires fresh **keyboard, mouse and consumer** subscriptions.
+  Waiting only for the mouse could show control as "on" while keyboard reports went nowhere.
+  Reconnect recovery checks all three reports and disconnects a stale link if re-registering
+  alone fails. Ctrl+A was verified selecting Spotlight text with Ctrl held before window
+  focus, then typing replaced the selected text.
+- The earlier wheel-only routing used coordinates from each SDL wheel event and ignored
+  positions outside the phone picture. It anchored once, followed changed targets relatively,
+  and tolerated 20 model pixels of jitter. It did not handle ordinary mouse motion, so it
+  could not keep the two pointers aligned. M3 replaces that position estimate with a shared
+  continuous pointer controller and video feedback.
+- **Overscroll correction (2026-11-16, 20:31):** reducing wheel sensitivity alone did not
+  fix the reported problem: repeated input could stretch nearly the whole Settings page out
+  of view, leaving empty space. Turning off Perform Touch Gestures did not prevent it; that
+  setting was restored. Decoded frames now locate the native scroll indicator. A pinned or
+  compressed indicator stops further input into that edge, drops pending movement, and
+  allows reversal. Batches wait briefly for video feedback; a missing frame has a timeout.
+  Normal vertical notches use three unit reports, falling to one near the approaching edge.
+  Repeated notches no longer send artificial +/-1 pointer movements or a 60 ms delay.
+  One notch is in flight, at most four wait, and reversal replaces old queued movement.
+  The **actual C controller** was connected to the existing live Bluetooth helper for a
+  sustained down/up test: it stopped at the bottom, reversed, and stopped at the top, without
+  the large empty area. Small native bounce remains. Custom scroll views without a detectable
+  indicator are not yet covered by the boundary guard. The updated app has been launched.
+- After a fresh Bluetooth connection, the earlier **2.0 / 2.0 calibration was wrong**: it
+  placed the pointer around halfway to the target. Re-measuring with **1.0 / 1.0** reached
+  (251.5, 699.5) for a (250, 700) target; a subsequent guarded tap was 2.7 px from its target.
+  The corrected values are saved in the local per-user
+  `pointer-scale` file (two positive numbers, X then Y); absent a file, the S3 model uses 1.0.
+  Changing tracking sensitivity requires recalibration. The M3 implementation below adds
+  continuous correction; a guided calibration wizard remains pending.
+- Bluetooth helper failures now retry every five seconds while the existing mirror window,
+  receiver and decoder keep running. Keyboard input is discarded until Bluetooth is ready;
+  reconnect begins with released reports so old key presses are not replayed. A headless
+  integration test exits the first helper and confirms a second helper starts while the
+  mirror components are created only once. Service restarts and adapter removal exit the
+  helper so the app can retry; an unbuffered stdin reader avoids a Python shutdown crash.
+- Validation before the M3 changes: full debug build with warnings as errors and all
+  **10 CTest checks** pass;
+  the build without AirPlay and its **8 CTest checks** also pass. Tests cover modifier
+  snapshots, shortcut repetition/release order, focus loss, scrolling batches and calibration,
+  sender ordering, partial subscriptions, helper shutdown and reconnect lifecycle. Added
+  scrollbar detection (light/dark, cropped frames, faded and compressed indicators), edge
+  suppression/reversal, frame pacing/timeouts, and wheel-only follow-up regressions.
+- The VM restart interrupted testing, but the Intel AX211 adapter is now passed through and
+  both mirroring and Bluetooth control are running. An initial advertising timeout was
+  resolved by cycling the guest Bluetooth radio.
+
+#### M3/M4 implementation and controller validation
+- Added a continuous pointer controller for ordinary mouse motion, shared with wheel
+  positioning. Decoded video locates the AssistiveTouch dot so the controller can correct
+  drift instead of relying on the saved movement multiplier alone. A queued button press
+  waits for a fresh position confirmation; missing feedback must not become an estimated tap.
+- Left/right button events preserve their target coordinates while positioning completes.
+  Queued down/up events support short clicks and drags, preserve a held button during motion,
+  and release it on focus loss, cancellation or disconnection. Motion coalesces while a
+  report batch is in flight. Cursor detection handles mixed icon/background edges; during a
+  drag, a 40-pixel search region and movement plausibility checks prevent moving icons from
+  being accepted as the pointer. Unit coverage includes landscape mapping and edge clamps.
+- **Live C-controller checks:** attached the actual controller to the existing Bluetooth
+  helper. Four target positions were within **1.0–1.4 px**. Calculator `AC 7 + 8 =` produced
+  **15**, with all five taps **1.0–3.6 px** from their targets. A secondary click on the Phone
+  dock icon opened its native context menu (**1.4 px** error). A vertical App Library drag
+  from y=450 to y=850 ended at **(249, 850)** for a **(250, 850)** target (**1 px** error).
+- Added local **F1 help**, a waiting/setup screen and a view-only connection banner without
+  another font dependency. Help lists controls, shortcuts, Bluetooth pairing, AssistiveTouch,
+  Dwell Control and button assignments. Opening help blocks phone coordinate mapping so
+  clicks cannot pass through it. The window API exposes status, help toggling and help state.
+- The window changes pass a debug build and isolated SDL renderer checks for readable help,
+  resize/letterbox mapping, blocked mapping during help/unavailable controls, and restoration
+  after help closes or controls return. All **14 full-build** and **10 minimal-build** checks
+  pass. F1 help was also opened and closed through real SDL key events in the running app.
+  Bluetooth reconnected after a guest radio reset and fresh subscriptions. The integrated
+  SDL mouse-event checks are now complete. A guided multi-step pairing/calibration wizard
+  remains part of the later roadmap; the current Linux mouse controls and local help work.
+- The first integrated mouse check exposed an idle-video timing bug: the final pointer image
+  can arrive before the HID acknowledgement, with no later decoded frame. Pointer feedback
+  now polls the retained image after acknowledgement, rejects images predating movement,
+  caches cursor searches, and requires a stable position before acting. A real-app SDL
+  regression publishes only the pre-acknowledgement image and verifies an aligned click and
+  release; removing the retained-image polling reproduces the timeout. This test uses an
+  isolated configuration directory and also passes sanitizers.
+- **Integrated window checks:** real PC mouse events aligned four positions within
+  **0–3.2 px**, and five real PC clicks entered `7 + 8 = 15` in Calculator. Native secondary
+  click opened the Phone context menu. Eighty wheel events in each direction reached the
+  Touch settings boundaries and stopped without the large empty stretch. The held-cursor
+  size contracts during dragging; detection now searches both hover and pressed sizes.
+  Pressed-dot regressions cover odd/even sample positions, and a full-app drag test checks
+  a validated button-up acknowledgement so timeout cleanup cannot count as a successful
+  drag. The corrected running app passed real PC drags in both directions: (250,450) to
+  (250,850) ended at (250,849), and the reverse ended at (251,450). Both were within **1 px**
+  and completed a queued, acknowledged button release rather than timeout cleanup.
 
 ### Phase 1: Wi-Fi mirror app (v0.1-alpha)
 - Project skeleton, CMake, CI for Linux + Windows
@@ -306,7 +445,11 @@ keep researching USB.
 1. ~~**S1:** run `uxplay` in the VM and mirror the iPhone (iOS 26.6.1).~~ ✅ Works.
 2. ~~Initialize git repo + project skeleton.~~ ✅ Done (CMake, UxPlay submodule, HID reports, tests, CI).
 3. ~~**S3:** guarded Calculator tap test.~~ ✅ `7 + 8 = 15`, ≤ 4.6 px error.
-4. **S5 (rest):** AssistiveTouch extra mouse buttons → App Switcher, Control Center,
-   Notification Center, Lock, Screenshot.
-5. **S2:** the same Bluetooth device on the Windows host with the WinRT GATT server (fast
-   advertising, LE-only, re-subscribe handling).
+4. ~~**S5:** AssistiveTouch extra mouse buttons.~~ ✅ Buttons 2–6 verified (Lock Screen untested
+   on purpose).
+5. ~~Finish the **integrated app mouse-event check on Linux**.~~ ✅ Pointer alignment,
+   taps, secondary-click, drags in both directions and wheel boundaries verified live.
+   The current Linux controls are complete; a guided pairing/calibration wizard remains
+   on the later roadmap before the Windows port.
+6. **S2:** the same Bluetooth device on the Windows host with the WinRT GATT server (fast
+   advertising, LE-only, re-subscribe handling), as part of the Windows port.

@@ -1,0 +1,30 @@
+#ifndef PORTHOLE_VIDEO_DECODER_H
+#define PORTHOLE_VIDEO_DECODER_H
+
+/* H.264 decoder on its own thread. Packets go in from any thread; only the newest decoded
+ * picture is kept, so the display never falls behind the phone. */
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+struct AVFrame;
+
+typedef struct ph_decoder ph_decoder;
+
+/* `on_frame` is called on the decoder thread whenever a new picture is ready. */
+ph_decoder *ph_decoder_start(void (*on_frame)(void *user), void *user);
+
+/* Copies one access unit and queues it. Safe to call from any thread. */
+void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len);
+
+/* Drops queued data and decoder state (use when a new stream starts). */
+void ph_decoder_reset(ph_decoder *d);
+
+/* If a picture newer than *seq exists, references it into `dst` (YUV 4:2:0), updates *seq
+ * and returns true. `dst` must be an allocated, empty AVFrame. */
+bool ph_decoder_latest(ph_decoder *d, struct AVFrame *dst, uint64_t *seq);
+
+void ph_decoder_stop(ph_decoder *d);
+
+#endif

@@ -1,0 +1,52 @@
+#ifndef PORTHOLE_UI_WINDOW_H
+#define PORTHOLE_UI_WINDOW_H
+
+/* The mirror window (SDL2): shows the phone-screen part of decoded frames letterboxed and
+ * maps window points to positions on the phone screen. Main thread only. */
+
+#include <stdbool.h>
+
+#include "video/crop.h"
+
+struct AVFrame;
+
+typedef struct ph_window ph_window;
+
+ph_window *ph_window_create(const char *title);
+
+void ph_window_set_title(ph_window *w, const char *title);
+
+/* Local connection/setup guidance; this never sends input to the phone. */
+void ph_window_set_status(ph_window *w, bool mirroring, bool control_ready, const char *detail);
+
+/* F1 opens/closes local help. Picture coordinates are rejected while it is open. */
+void ph_window_toggle_help(ph_window *w);
+bool ph_window_help_visible(const ph_window *w);
+
+/* Uploads a YUV 4:2:0 frame and shows the `screen` part of it (the phone screen inside the
+ * frame, see video/crop.h). The window is resized to fit when the screen size changes and
+ * stays changed for a moment (so rotation animations don't make it jump). */
+void ph_window_present(ph_window *w, const struct AVFrame *frame, const ph_rect *screen);
+
+/* Applies pending resizes; call regularly from the event loop. */
+void ph_window_tick(ph_window *w);
+
+/* Redraws the last frame (after resize/expose) or a blank window if there is none. */
+void ph_window_redraw(ph_window *w);
+
+/* Forgets the last frame and shows a blank window (e.g. when mirroring stops). */
+void ph_window_clear(ph_window *w);
+
+/* Maps a point in window coordinates to the phone screen as fractions in [0,1].
+ * Returns false in letterbox bars, while local help is open, or controls are unavailable. */
+bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy);
+
+/* Size of the phone screen in stream pixels (0x0 if none yet). */
+void ph_window_video_size(const ph_window *w, int *width, int *height);
+
+/* SDL window ID, for matching input events to this window. */
+unsigned int ph_window_id(const ph_window *w);
+
+void ph_window_destroy(ph_window *w);
+
+#endif
