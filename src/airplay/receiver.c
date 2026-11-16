@@ -96,7 +96,17 @@ static void cb_video_process(void *cls, raop_ntp_t *ntp, video_decode_struct *da
 
 static void cb_audio_process(void *cls, raop_ntp_t *ntp, audio_decode_struct *data)
 {
-    (void)cls, (void)ntp, (void)data; /* audio forwarding is a later feature */
+    ph_receiver *r = self(cls);
+    (void)ntp;
+    if (r->cb.audio && data->data_len > 0)
+        r->cb.audio(r->cb.user, data->ct, data->data, (size_t)data->data_len);
+}
+
+static void cb_audio_flush(void *cls)
+{
+    ph_receiver *r = self(cls);
+    if (r->cb.audio_flush)
+        r->cb.audio_flush(r->cb.user);
 }
 
 static void cb_noop(void *cls)
@@ -130,7 +140,9 @@ static double cb_audio_set_client_volume(void *cls)
 
 static void cb_audio_set_volume(void *cls, float volume)
 {
-    (void)cls, (void)volume;
+    ph_receiver *r = self(cls);
+    if (r->cb.audio_volume)
+        r->cb.audio_volume(r->cb.user, volume);
 }
 
 static void cb_audio_buffer(void *cls, const void *buffer, int buflen)
@@ -146,7 +158,10 @@ static void cb_audio_set_progress(void *cls, uint32_t *start, uint32_t *curr, ui
 static void cb_audio_get_format(void *cls, unsigned char *ct, unsigned short *spf,
                                 bool *using_screen, bool *is_media, uint64_t *audio_format)
 {
-    (void)cls, (void)ct, (void)spf, (void)using_screen, (void)is_media, (void)audio_format;
+    ph_receiver *r = self(cls);
+    (void)using_screen, (void)is_media, (void)audio_format;
+    if (r->cb.audio_format)
+        r->cb.audio_format(r->cb.user, *ct, *spf);
 }
 
 static void cb_video_report_size(void *cls, float *width_source, float *height_source,
@@ -293,7 +308,7 @@ ph_receiver *ph_receiver_start(const ph_receiver_options *opt, const ph_receiver
     cbs.video_process = cb_video_process;
     cbs.video_pause = cb_noop;
     cbs.video_resume = cb_noop;
-    cbs.audio_flush = cb_noop;
+    cbs.audio_flush = cb_audio_flush;
     cbs.video_flush = cb_noop;
     cbs.video_reset = cb_video_reset;
     cbs.video_set_codec = cb_video_set_codec;

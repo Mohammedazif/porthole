@@ -30,13 +30,14 @@ if(PORTHOLE_WITH_AIRPLAY)
     # The full app: AirPlay receiver -> FFmpeg decoder -> SDL2 window.
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
-    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
+    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale libswresample)
     find_package(OpenSSL REQUIRED)
     find_package(Threads REQUIRED)
 
     add_library(porthole_app STATIC
         app.c
         airplay/receiver.c
+        audio/player.c
         hid/link.c
         ui/window.c
         video/decoder.c

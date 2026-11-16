@@ -10,6 +10,7 @@
 #include <libavutil/frame.h>
 
 #include "airplay/receiver.h"
+#include "audio/player.h"
 #include "control/input.h"
 #include "control/pointer.h"
 #include "control/scroll.h"
@@ -32,6 +33,7 @@ typedef struct app {
     ph_window *win;
     ph_decoder *dec;
     ph_receiver *rx;
+    ph_audio *audio;
     ph_hid_link *link;
     Uint32 ev_base;
     atomic_bool frame_pending; /* coalesces "new frame" events */
@@ -85,8 +87,33 @@ static void on_connected(void *user, const char *name, const char *model)
     push_event(user, EV_CONNECTED, strdup(name && *name ? name : "iPhone"));
 }
 
+static void on_audio(void *user, unsigned char compression, const uint8_t *data, size_t len)
+{
+    app *a = user;
+    ph_audio_push(a->audio, compression, data, len);
+}
+
+static void on_audio_format(void *user, unsigned char compression, unsigned short samples)
+{
+    app *a = user;
+    ph_audio_configure(a->audio, compression, samples);
+}
+
+static void on_audio_volume(void *user, float decibels)
+{
+    app *a = user;
+    ph_audio_set_volume(a->audio, decibels);
+}
+
+static void on_audio_flush(void *user)
+{
+    app *a = user;
+    ph_audio_flush(a->audio);
+}
+
 static void on_disconnected(void *user)
 {
+    on_audio_flush(user);
     push_event(user, EV_DISCONNECTED, NULL);
 }
 
@@ -562,6 +589,10 @@ int ph_app_run(const ph_app_options *opt)
     ph_receiver_callbacks rx_cb = {
         .user = &a,
         .video = on_video,
+        .audio = on_audio,
+        .audio_format = on_audio_format,
+        .audio_volume = on_audio_volume,
+        .audio_flush = on_audio_flush,
         .connected = on_connected,
         .disconnected = on_disconnected,
     };
@@ -582,6 +613,8 @@ int ph_app_run(const ph_app_options *opt)
     a.pointer_baseline = av_frame_alloc();
     a.win = ph_window_create(PORTHOLE_NAME);
     a.dec = ph_decoder_start(on_frame, &a);
+    if (opt->audio)
+        a.audio = ph_audio_create();
     if (a.ev_base == (Uint32)-1 || !frame || !a.view_frame || !a.pointer_baseline
         || !a.win || !a.dec)
         goto done;
@@ -629,6 +662,7 @@ done:
     release_everything(&a);
     ph_hid_link_stop(a.link);
     ph_receiver_stop(a.rx); /* stop the network first so no more video arrives */
+    ph_audio_destroy(a.audio);
     ph_decoder_stop(a.dec);
     ph_window_destroy(a.win);
     av_frame_free(&frame);

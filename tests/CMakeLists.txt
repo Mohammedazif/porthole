@@ -38,6 +38,14 @@ target_link_libraries(test_pointer PRIVATE porthole_core)
 porthole_set_warnings(test_pointer)
 add_test(NAME pointer COMMAND test_pointer)
 
+if(PORTHOLE_WITH_AIRPLAY)
+    add_executable(test_audio test_audio.c)
+    target_link_libraries(test_audio PRIVATE porthole_app)
+    porthole_set_warnings(test_audio)
+    add_test(NAME audio COMMAND test_audio)
+    set_tests_properties(audio PROPERTIES TIMEOUT 15)
+endif()
+
 if(UNIX AND PORTHOLE_WITH_AIRPLAY)
     # The Linux app uses Python/BlueZ; this check needs no adapter or D-Bus service.
     find_package(Python3 REQUIRED COMPONENTS Interpreter)

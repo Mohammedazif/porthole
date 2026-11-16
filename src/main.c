@@ -24,6 +24,7 @@ static void print_usage(FILE *out, const char *argv0)
             "      --random-ports  Let the system pick network ports instead of the fixed\n"
             "                    TCP 7000/7001/7100 and UDP 6000/6001/7011\n"
             "      --no-bluetooth  View only: don't control the phone over Bluetooth\n"
+            "      --no-audio     Mute audio playback on the PC\n"
             "      --ble-helper PATH  Bluetooth helper script (default: the one in the source tree)\n"
             "      --debug       Log AirPlay protocol details\n"
             "  -v, --verbose     Show debug messages\n"
@@ -48,6 +49,7 @@ int main(int argc, char **argv)
     bool fixed_ports = true;
     bool debug = false;
     bool bluetooth = true;
+    bool audio = true;
 #ifdef PORTHOLE_BLE_HELPER
     const char *ble_helper = PORTHOLE_BLE_HELPER;
 #else
@@ -72,6 +74,8 @@ int main(int argc, char **argv)
             fixed_ports = false;
         } else if (!strcmp(arg, "--no-bluetooth")) {
             bluetooth = false;
+        } else if (!strcmp(arg, "--no-audio")) {
+            audio = false;
         } else if (!strcmp(arg, "--ble-helper")) {
             if (i + 1 >= argc || !argv[i + 1][0]) {
                 fprintf(stderr, "%s: %s needs a value\n", argv[0], arg);
@@ -98,6 +102,7 @@ int main(int argc, char **argv)
                               .fixed_ports = fixed_ports,
                               .debug = debug,
                               .bluetooth = bluetooth,
+                              .audio = audio,
                               .ble_helper = ble_helper};
         return ph_app_run(&opt);
     }
@@ -105,6 +110,7 @@ int main(int argc, char **argv)
     (void)fixed_ports;
     (void)debug;
     (void)bluetooth;
+    (void)audio;
     (void)ble_helper;
     PH_LOGW("this build has no Wi-Fi receiver (configured with PORTHOLE_WITH_AIRPLAY=OFF)");
     return 0;

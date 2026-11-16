@@ -15,6 +15,11 @@ typedef struct ph_receiver_callbacks {
     /* One H.264 access unit in Annex-B format (start codes; SPS/PPS precede keyframes).
      * Called on a network thread; `data` is only valid during the call. */
     void (*video)(void *user, const uint8_t *data, size_t len, uint64_t timestamp_ns);
+    /* Decrypted compressed audio and its negotiated format, on network threads. */
+    void (*audio)(void *user, unsigned char compression, const uint8_t *data, size_t len);
+    void (*audio_format)(void *user, unsigned char compression, unsigned short samples);
+    void (*audio_volume)(void *user, float decibels);
+    void (*audio_flush)(void *user);
     /* A device started a mirroring session. Called on a network thread. */
     void (*connected)(void *user, const char *name, const char *model);
     /* The mirroring session ended or was reset. Called on a network thread. */

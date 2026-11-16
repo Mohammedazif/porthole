@@ -8,6 +8,7 @@ typedef struct ph_app_options {
     bool fixed_ports;       /* well-known ports, matching the firewall rules */
     bool debug;             /* verbose AirPlay protocol logging */
     bool bluetooth;         /* control the iPhone through the Bluetooth helper */
+    bool audio;             /* play mirrored phone audio through the PC */
     const char *ble_helper; /* path of the Bluetooth helper script */
 } ph_app_options;
 
