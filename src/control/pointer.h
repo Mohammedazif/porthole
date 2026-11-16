@@ -23,6 +23,7 @@ typedef enum ph_pointer_phase {
     PH_POINTER_MOVING,
     PH_POINTER_BUTTON,
     PH_POINTER_WAIT_VIDEO,
+    PH_POINTER_DRAINING, /* cancelled output still queued in the transport */
 } ph_pointer_phase;
 
 /* Main-thread state. Zero-initialize, assign output, then enable when HID is ready.
@@ -63,8 +64,11 @@ void ph_pointer_tick(ph_pointer *p, uint64_t now_ms);
 bool ph_pointer_ready(const ph_pointer *p, double x, double y, double aspect);
 /* Search radius is expressed as a fraction of picture WIDTH, even for Y search. */
 bool ph_pointer_hint(const ph_pointer *p, double *x, double *y, double *radius);
-/* Cancel queued input and release held buttons; reset also forgets the location. */
+/* Cancel intent and release held buttons; reset also forgets the location.
+ * Both retain a transport fence while already-sent reports drain. */
 void ph_pointer_cancel(ph_pointer *p, uint64_t now_ms);
 void ph_pointer_reset(ph_pointer *p, uint64_t now_ms);
+/* Only when the old link/helper is gone: discard its unacknowledgeable fence. */
+void ph_pointer_transport_reset(ph_pointer *p, uint64_t now_ms);
 
 #endif

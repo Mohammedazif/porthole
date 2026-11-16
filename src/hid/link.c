@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "core/log.h"
+#include "core/metrics.h"
 #include "hid/link_proto.h"
 
 #ifdef _WIN32
@@ -28,16 +29,24 @@ void ph_hid_link_stop(ph_hid_link *l)
     (void)l;
 }
 
+void ph_hid_link_request_stop(ph_hid_link *l) { (void)l; }
+bool ph_hid_link_poll(ph_hid_link *l) { (void)l; return true; }
+
 #else
 
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <poll.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#define EOF_GRACE_MS 1000
+#define TERM_GRACE_MS 1000
 
 struct ph_hid_link {
     pid_t pid;
@@ -47,26 +56,78 @@ struct ph_hid_link {
     ph_hid_link_status_fn on_status;
     void *user;
     bool dead;
+    bool reader_started, stop_requested;
+    unsigned int stop_phase;
+    uint64_t stop_deadline;
+    atomic_bool child_reaped, output_closed, reader_finished;
 };
+
+static void sleep_briefly(void)
+{
+    struct timespec pause = {0, 10 * 1000 * 1000};
+    while (nanosleep(&pause, &pause) < 0 && errno == EINTR) {}
+}
+
+static void status_line(ph_hid_link *l, char line[512], size_t *used)
+{
+    line[*used] = '\0';
+    if (*used && l->on_status)
+        l->on_status(l->user, line);
+    *used = 0;
+}
 
 static void *reader_thread(void *arg)
 {
     ph_hid_link *l = arg;
-    FILE *in = fdopen(l->from_helper, "r");
-    char line[512];
-
-    if (in) {
-        while (fgets(line, sizeof line, in)) {
-            line[strcspn(line, "\r\n")] = '\0';
-            if (line[0] && l->on_status)
-                l->on_status(l->user, line);
+    char line[512], data[512];
+    size_t used = 0;
+    uint64_t drain_until = 0;
+    for (;;) {
+        if (atomic_load(&l->child_reaped)) {
+            if (!drain_until)
+                drain_until = ph_metrics_now_ms() + 100;
+            else if (ph_metrics_now_ms() >= drain_until)
+                break;
         }
-        fclose(in); /* also closes from_helper */
-    } else {
-        close(l->from_helper);
+        struct pollfd fd = {l->from_helper, POLLIN, 0};
+        int ready = poll(&fd, 1, 50);
+        if (ready < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (!ready) {
+            /* A descendant could retain stdout after the direct child exits.
+             * Do not let that descriptor hold the reader join forever. */
+            if (atomic_load(&l->child_reaped))
+                break;
+            continue;
+        }
+        ssize_t count = read(l->from_helper, data, sizeof data);
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count <= 0)
+            break;
+        for (ssize_t i = 0; i < count; i++) {
+            if (data[i] == '\n')
+                status_line(l, line, &used);
+            else if (data[i] != '\r') {
+                line[used++] = data[i];
+                if (used == sizeof line - 1)
+                    status_line(l, line, &used);
+            }
+        }
     }
+    status_line(l, line, &used);
+    close(l->from_helper);
+    atomic_store(&l->output_closed, true);
+    /* EOF alone is not proof of process exit. A stuck helper may close stdout
+     * before hanging; poll() must first finish the bounded process shutdown. */
+    while (!atomic_load(&l->child_reaped))
+        sleep_briefly();
     if (l->on_status)
         l->on_status(l->user, "exited");
+    atomic_store(&l->reader_finished, true);
     return NULL;
 }
 
@@ -77,6 +138,11 @@ ph_hid_link *ph_hid_link_start(char *const argv[], ph_hid_link_status_fn on_stat
 
     if (!l)
         return NULL;
+    l->to_helper = -1;
+    l->from_helper = -1;
+    atomic_init(&l->child_reaped, false);
+    atomic_init(&l->output_closed, false);
+    atomic_init(&l->reader_finished, false);
     /* A dead helper must make writes fail with EPIPE, not kill the app. */
     signal(SIGPIPE, SIG_IGN);
     if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0)
@@ -104,13 +170,16 @@ ph_hid_link *ph_hid_link_start(char *const argv[], ph_hid_link_status_fn on_stat
     fcntl(l->from_helper, F_SETFD, FD_CLOEXEC);
     l->on_status = on_status;
     l->user = user;
-    if (pthread_create(&l->reader, NULL, reader_thread, l) != 0) {
-        close(l->to_helper);
+    int error = pthread_create(&l->reader, NULL, reader_thread, l);
+    if (error != 0) {
+        PH_LOGE("couldn't start Bluetooth status reader: %s", strerror(error));
         close(l->from_helper);
-        waitpid(l->pid, NULL, 0);
-        free(l);
+        l->from_helper = -1;
+        atomic_store(&l->reader_finished, true);
+        ph_hid_link_stop(l);
         return NULL;
     }
+    l->reader_started = true;
     return l;
 
 fail:
@@ -130,7 +199,7 @@ static bool send_frame(ph_hid_link *l, uint8_t type, const uint8_t *payload, siz
     uint8_t buf[PH_LINK_MAX_FRAME];
     size_t n = ph_link_frame(type, payload, len, buf), off = 0;
 
-    if (!l || l->dead || n == 0)
+    if (!l || l->dead || l->to_helper < 0 || n == 0)
         return false;
     if (ph_log_get_level() <= PH_LOG_DEBUG) {
         char hex[3 * PH_LINK_MAX_FRAME + 1] = "";
@@ -156,22 +225,61 @@ static bool send_frame(ph_hid_link *l, uint8_t type, const uint8_t *payload, siz
     return true;
 }
 
+void ph_hid_link_request_stop(ph_hid_link *l)
+{
+    if (!l || l->stop_requested)
+        return;
+    l->stop_requested = true;
+    l->dead = true;
+    if (l->to_helper >= 0) {
+        close(l->to_helper); /* allow normal unregister/queue drain first */
+        l->to_helper = -1;
+    }
+    l->stop_phase = 1;
+    l->stop_deadline = ph_metrics_now_ms() + EOF_GRACE_MS;
+}
+
+bool ph_hid_link_poll(ph_hid_link *l)
+{
+    if (!l || atomic_load(&l->child_reaped))
+        return true;
+    pid_t result;
+    do {
+        result = waitpid(l->pid, NULL, WNOHANG);
+    } while (result < 0 && errno == EINTR);
+    if (result == l->pid || (result < 0 && errno == ECHILD)) {
+        if (l->to_helper >= 0) {
+            close(l->to_helper);
+            l->to_helper = -1;
+        }
+        l->dead = true;
+        atomic_store(&l->child_reaped, true);
+        return true;
+    }
+    if (atomic_load(&l->output_closed) && !l->stop_requested)
+        ph_hid_link_request_stop(l);
+    if (l->stop_requested && ph_metrics_now_ms() >= l->stop_deadline) {
+        if (l->stop_phase == 1) {
+            kill(l->pid, SIGTERM);
+            l->stop_phase = 2;
+            l->stop_deadline = ph_metrics_now_ms() + TERM_GRACE_MS;
+        } else if (l->stop_phase == 2) {
+            kill(l->pid, SIGKILL);
+            l->stop_phase = 3;
+        }
+    }
+    return false;
+}
+
 void ph_hid_link_stop(ph_hid_link *l)
 {
-    int status;
-
     if (!l)
         return;
-    close(l->to_helper); /* EOF: the helper unregisters from BlueZ and exits */
-    for (int i = 0; i < 40; i++) {
-        if (waitpid(l->pid, &status, WNOHANG) == l->pid)
-            goto reaped;
-        nanosleep(&(struct timespec){0, 50 * 1000 * 1000}, NULL);
-    }
-    kill(l->pid, SIGTERM);
-    waitpid(l->pid, &status, 0);
-reaped:
-    pthread_join(l->reader, NULL);
+    ph_hid_link_request_stop(l);
+    while (!ph_hid_link_poll(l) || !atomic_load(&l->reader_finished))
+        sleep_briefly();
+    if (l->reader_started)
+        pthread_join(l->reader, NULL);
     free(l);
 }
 

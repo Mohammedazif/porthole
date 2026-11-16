@@ -13,6 +13,7 @@
 #define FRAME_SETTLE_MS 32
 #define FRAME_TIMEOUT_MS 180
 #define GESTURE_IDLE_MS 500
+#define ACK_TIMEOUT_MS 3000
 
 static void start_batch(ph_scroll *scroll);
 
@@ -66,7 +67,7 @@ static void move_axis(ph_scroll *scroll, double distance, bool horizontal)
 
 static void start_batch(ph_scroll *scroll)
 {
-    if (scroll->in_flight || scroll->waiting_frame
+    if (scroll->failed || scroll->in_flight || scroll->waiting_frame
         || (!scroll->pending_x && !scroll->pending_y))
         return;
     if (scroll->position && !scroll->position(scroll->output.user, scroll->target_x,
@@ -78,6 +79,7 @@ static void start_batch(ph_scroll *scroll)
     scroll->pending_x -= x;
     scroll->pending_y -= y;
     scroll->in_flight = true;
+    scroll->sent_at = scroll->now_ms;
     scroll->sent_y = y;
     scroll->sent_had_bar = scroll->have_bar;
     scroll->sent_bar_top = scroll->bar_top;
@@ -138,7 +140,8 @@ bool ph_scroll_request(ph_scroll *scroll, double x, double y, double aspect,
 {
     if (!scroll->output.mouse || !scroll->output.delay || !scroll->output.sync
         || !isfinite(x) || !isfinite(y) || !isfinite(aspect) || x < 0 || x >= 1
-        || y < 0 || y >= 1 || aspect < 0.1 || aspect > 10 || (!notches_x && !notches_y))
+        || y < 0 || y >= 1 || aspect < 0.1 || aspect > 10 || (!notches_x && !notches_y)
+        || scroll->failed)
         return false;
     if (scroll->have_request && scroll->now_ms >= scroll->last_request_at
         && scroll->now_ms - scroll->last_request_at >= GESTURE_IDLE_MS) {
@@ -172,8 +175,13 @@ bool ph_scroll_request(ph_scroll *scroll, double x, double y, double aspect,
 void ph_scroll_ack(ph_scroll *scroll, uint32_t id)
 {
     if (scroll->in_flight && id == scroll->sync_id) {
+        bool cancelled = scroll->cancelled || scroll->failed;
         scroll->in_flight = false;
-        scroll->waiting_frame = scroll->feedback;
+        scroll->cancelled = false;
+        scroll->failed = false;
+        scroll->waiting_frame = scroll->feedback && !cancelled;
+        if (cancelled)
+            scroll->sent_y = 0;
         scroll->wait_since = scroll->now_ms;
         start_batch(scroll);
     }
@@ -182,7 +190,7 @@ void ph_scroll_ack(ph_scroll *scroll, uint32_t id)
 void ph_scroll_cancel(ph_scroll *scroll)
 {
     scroll->pending_x = scroll->pending_y = 0;
-    scroll->in_flight = false;
+    scroll->cancelled = scroll->in_flight;
     scroll->waiting_frame = false;
     scroll->pinned_batches = 0;
 }
@@ -196,9 +204,24 @@ void ph_scroll_reset(ph_scroll *scroll)
     ph_scroll_forget_bounds(scroll);
 }
 
+void ph_scroll_transport_reset(ph_scroll *scroll)
+{
+    ph_scroll_reset(scroll);
+    scroll->in_flight = false;
+    scroll->cancelled = false;
+    scroll->failed = false;
+}
+
 void ph_scroll_tick(ph_scroll *scroll, uint64_t now_ms)
 {
     scroll->now_ms = now_ms;
+    if (scroll->in_flight && now_ms - scroll->sent_at >= ACK_TIMEOUT_MS) {
+        /* Keep the fence until a late ACK or explicit link reset. A new cursor
+         * position must not turn a missing ACK into unlimited queued batches. */
+        ph_scroll_cancel(scroll);
+        scroll->failed = true;
+        return;
+    }
     if (scroll->waiting_frame && now_ms - scroll->wait_since >= FRAME_TIMEOUT_MS) {
         scroll->waiting_frame = false;
     }

@@ -7,7 +7,9 @@
  * threads start. All Porthole symbols use the ph_/PH_ prefix to avoid clashing
  * with UxPlay's own logger. */
 
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__MINGW32__) && (defined(__GNUC__) || defined(__clang__))
+#define PH_PRINTF_FMT(fmt_idx, args_idx) __attribute__((format(gnu_printf, fmt_idx, args_idx)))
+#elif defined(__GNUC__) || defined(__clang__)
 #define PH_PRINTF_FMT(fmt_idx, args_idx) __attribute__((format(printf, fmt_idx, args_idx)))
 #else
 #define PH_PRINTF_FMT(fmt_idx, args_idx)

@@ -10,12 +10,15 @@
 #include <libswscale/swscale.h>
 
 #include "core/log.h"
+#include "core/metrics.h"
 
 #define MAX_QUEUED 240 /* ~4 s at 60 fps; beyond that we're hopelessly behind */
 
 typedef struct packet {
     struct packet *next;
     size_t len;
+    uint64_t received_ms;
+    uint64_t generation;
     uint8_t data[];
 } packet;
 
@@ -27,9 +30,13 @@ struct ph_decoder {
     int queued;
     bool reset;
     bool quit;
+    uint64_t generation;
 
     AVFrame *latest; /* guarded by lock */
     uint64_t latest_seq;
+    uint64_t consumed_seq;
+    ph_frame_timing latest_timing;
+    ph_decoder_stats stats;
 
     void (*on_frame)(void *user);
     void *user;
@@ -40,10 +47,21 @@ static void free_queue(ph_decoder *d)
     while (d->head) {
         packet *p = d->head;
         d->head = p->next;
+        d->stats.packets_discarded++;
         free(p);
     }
     d->tail = NULL;
     d->queued = 0;
+}
+
+static void reset_locked(ph_decoder *d)
+{
+    free_queue(d);
+    d->generation++;
+    d->reset = true;
+    av_frame_free(&d->latest);
+    memset(&d->latest_timing, 0, sizeof d->latest_timing);
+    d->consumed_seq = d->latest_seq;
 }
 
 static AVCodecContext *open_codec(void)
@@ -61,6 +79,9 @@ static AVCodecContext *open_codec(void)
     ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
     ctx->thread_type = FF_THREAD_SLICE; /* frame threading would add a frame of latency each */
     ctx->thread_count = 0;
+    /* PTS carries local packet provenance only. Rendering remains immediate;
+     * this does not schedule frames or change audio/video synchronization. */
+    ctx->pkt_timebase = (AVRational){1, 1000};
     if (avcodec_open2(ctx, codec, NULL) < 0) {
         avcodec_free_context(&ctx);
         return NULL;
@@ -128,10 +149,12 @@ static void *decode_thread(void *arg)
         if (!d->head)
             d->tail = NULL;
         d->queued--;
+        uint64_t generation = p->generation;
         pthread_mutex_unlock(&d->lock);
 
         if (av_new_packet(pkt, (int)p->len) == 0) {
             memcpy(pkt->data, p->data, p->len);
+            pkt->pts = (int64_t)p->received_ms;
             if (avcodec_send_packet(ctx, pkt) < 0)
                 PH_LOGD("decoder rejected a packet (waiting for the next keyframe)");
             av_packet_unref(pkt);
@@ -139,6 +162,13 @@ static void *decode_thread(void *arg)
         free(p);
 
         while (avcodec_receive_frame(ctx, frame) == 0) {
+            uint64_t decoded_ms = ph_metrics_now_ms();
+            ph_frame_timing timing = {.decoded_ms = decoded_ms};
+            if (frame->pts != AV_NOPTS_VALUE && frame->pts > 0
+                && (uint64_t)frame->pts <= decoded_ms) {
+                timing.received_ms = (uint64_t)frame->pts;
+                timing.valid = true;
+            }
             AVFrame *out = to_yuv420p(frame, &sws);
             av_frame_unref(frame);
             if (!out)
@@ -149,8 +179,20 @@ static void *decode_thread(void *arg)
                 PH_LOGI("video %dx%d", w, h);
             }
             pthread_mutex_lock(&d->lock);
+            d->stats.frames_decoded++;
+            /* A stream can reset while FFmpeg is working without our lock.
+             * Never publish the previous session's in-flight decoded image. */
+            if (generation != d->generation || d->quit) {
+                d->stats.frames_stale++;
+                pthread_mutex_unlock(&d->lock);
+                av_frame_free(&out);
+                continue;
+            }
+            if (d->latest && d->consumed_seq != d->latest_seq)
+                d->stats.frames_superseded++;
             av_frame_free(&d->latest);
             d->latest = out;
+            d->latest_timing = timing;
             d->latest_seq++;
             pthread_mutex_unlock(&d->lock);
             if (d->on_frame)
@@ -193,16 +235,18 @@ void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len)
         return;
     p->next = NULL;
     p->len = len;
+    p->received_ms = ph_metrics_now_ms();
     memcpy(p->data, data, len);
 
     pthread_mutex_lock(&d->lock);
+    d->stats.packets_received++;
     if (d->queued >= MAX_QUEUED) {
         /* Can't drop single packets without corrupting the picture; start over instead. The
          * phone sends SPS/PPS with every keyframe, so decoding resumes at the next one. */
         PH_LOGW("video decoder fell behind; skipping to the next keyframe");
-        free_queue(d);
-        d->reset = true;
+        reset_locked(d);
     }
+    p->generation = d->generation;
     if (d->tail)
         d->tail->next = p;
     else
@@ -216,23 +260,48 @@ void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len)
 void ph_decoder_reset(ph_decoder *d)
 {
     pthread_mutex_lock(&d->lock);
-    free_queue(d);
-    d->reset = true;
+    reset_locked(d);
     pthread_cond_signal(&d->wake);
     pthread_mutex_unlock(&d->lock);
 }
 
 bool ph_decoder_latest(ph_decoder *d, AVFrame *dst, uint64_t *seq)
 {
+    return ph_decoder_latest_timed(d, dst, seq, NULL);
+}
+
+bool ph_decoder_latest_timed(ph_decoder *d, AVFrame *dst, uint64_t *seq,
+                             ph_frame_timing *timing)
+{
     bool fresh = false;
 
+    if (timing)
+        memset(timing, 0, sizeof *timing);
+    if (!d || !dst || !seq)
+        return false;
     pthread_mutex_lock(&d->lock);
     if (d->latest && d->latest_seq != *seq && av_frame_ref(dst, d->latest) == 0) {
         *seq = d->latest_seq;
+        d->consumed_seq = d->latest_seq;
+        if (timing)
+            *timing = d->latest_timing;
         fresh = true;
     }
     pthread_mutex_unlock(&d->lock);
     return fresh;
+}
+
+void ph_decoder_get_stats(ph_decoder *d, ph_decoder_stats *stats)
+{
+    if (!stats)
+        return;
+    memset(stats, 0, sizeof *stats);
+    if (!d)
+        return;
+    pthread_mutex_lock(&d->lock);
+    *stats = d->stats;
+    stats->queued_packets = (unsigned int)d->queued;
+    pthread_mutex_unlock(&d->lock);
 }
 
 void ph_decoder_stop(ph_decoder *d)

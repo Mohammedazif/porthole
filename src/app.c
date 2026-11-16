@@ -1,6 +1,7 @@
 #include "app.h"
 
 #include <stdatomic.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,8 +15,10 @@
 #include "control/input.h"
 #include "control/pointer.h"
 #include "control/scroll.h"
+#include "control/setup.h"
 #include "core/config.h"
 #include "core/log.h"
+#include "core/metrics.h"
 #include "core/version.h"
 #include "hid/link.h"
 #include "ui/window.h"
@@ -35,6 +38,7 @@ typedef struct app {
     ph_receiver *rx;
     ph_audio *audio;
     ph_hid_link *link;
+    bool link_stopping;
     Uint32 ev_base;
     atomic_bool frame_pending; /* coalesces "new frame" events */
     double portrait_aspect;    /* phone screen width/height when upright; 0 until seen */
@@ -53,6 +57,14 @@ typedef struct app {
     bool checked_found;
     double checked_x, checked_y, candidate_x, candidate_y;
     Uint64 ble_retry_at;
+    ph_setup setup;
+    bool calibration_saved;
+    double previous_scale_x, previous_scale_y;
+    ph_metrics metrics;
+    ph_frame_timing frame_timing;
+    bool input_pending;
+    uint64_t input_at;
+    Uint64 metrics_at, metrics_log_at;
 } app;
 
 /* ------------------------------------------------------------ cross-thread notifications */
@@ -138,6 +150,9 @@ static void update_title(app *a)
                  a->opt->name);
     ph_window_set_title(a->win, title);
     ph_window_set_status(a->win, a->phone_name[0] != 0, !strcmp(control, "on"), control);
+    ph_setup_update(&a->setup, a->input.enabled,
+                     a->phone_name[0] && a->view_frame && a->view_frame->data[0]);
+    ph_window_set_setup(a->win, &a->setup);
 }
 
 static void handle_ble_status(app *a, const char *line)
@@ -160,6 +175,7 @@ static void handle_ble_status(app *a, const char *line)
     if (!strncmp(line, "sync", 4)) {
         unsigned int id;
         if (sscanf(line, "sync %u", &id) == 1) {
+            ph_metrics_hid_ack(&a->metrics, (uint32_t)id, ph_metrics_now_ms());
             ph_scroll_tick(&a->wheel, SDL_GetTicks64());
             ph_scroll_ack(&a->wheel, (uint32_t)id);
             ph_pointer_ack(&a->pointer, (uint32_t)id, SDL_GetTicks64());
@@ -181,6 +197,9 @@ static void handle_ble_status(app *a, const char *line)
     if (!strcmp(line, "exited")) {
         ph_hid_link_stop(a->link);
         a->link = NULL;
+        a->link_stopping = false;
+        ph_pointer_transport_reset(&a->pointer, SDL_GetTicks64());
+        ph_scroll_transport_reset(&a->wheel);
         a->ble_retry_at = SDL_GetTicks64() + BLE_RETRY_MS;
     }
     update_title(a);
@@ -188,18 +207,34 @@ static void handle_ble_status(app *a, const char *line)
 
 /* ---- sending input to the phone */
 
+static void record_input_handoff(app *a)
+{
+    if (a->input_pending) {
+        ph_metrics_input(&a->metrics, a->input_at, ph_metrics_now_ms());
+        a->input_pending = false;
+    }
+}
+
+static void mark_input(app *a, uint32_t timestamp)
+{
+    uint32_t age = SDL_GetTicks() - timestamp;
+    uint64_t now = ph_metrics_now_ms();
+    a->input_at = now >= age ? now - age : now;
+    a->input_pending = true;
+}
+
 static void send_keys(void *user, const ph_hid_keyboard *keys)
 {
     app *a = user;
-    if (a->link)
-        ph_hid_link_keyboard(a->link, keys);
+    if (a->link && ph_hid_link_keyboard(a->link, keys))
+        record_input_handoff(a);
 }
 
 static void send_consumer(void *user, uint16_t usage)
 {
     app *a = user;
-    if (a->link)
-        ph_hid_link_consumer(a->link, usage);
+    if (a->link && ph_hid_link_consumer(a->link, usage))
+        record_input_handoff(a);
 }
 
 static void send_mouse(void *user, const ph_hid_mouse *mouse)
@@ -208,7 +243,8 @@ static void send_mouse(void *user, const ph_hid_mouse *mouse)
     if (a->link) {
         ph_hid_mouse merged = *mouse;
         merged.buttons |= a->input.buttons | a->pointer.buttons;
-        ph_hid_link_mouse(a->link, &merged);
+        if (ph_hid_link_mouse(a->link, &merged))
+            record_input_handoff(a);
     }
 }
 
@@ -222,8 +258,8 @@ static void send_delay(void *user, uint16_t milliseconds)
 static void send_sync(void *user, uint32_t id)
 {
     app *a = user;
-    if (a->link)
-        ph_hid_link_sync(a->link, id);
+    if (a->link && ph_hid_link_sync(a->link, id))
+        ph_metrics_hid_sent(&a->metrics, id, ph_metrics_now_ms());
 }
 
 static void send_pointer_sync(void *user, uint32_t id)
@@ -249,7 +285,7 @@ static bool position_for_scroll(void *user, double x, double y, double aspect)
 static bool pointer_coordinates(app *a, int x, int y, double *nx, double *ny, double *aspect)
 {
     int width, height;
-    if (!a->link || !a->input.enabled || !a->phone_name[0] || a->input.buttons)
+    if (!a->link || !a->input.enabled || !a->phone_name[0] || a->input.buttons || a->setup.visible)
         return false;
     ph_window_video_size(a->win, &width, &height);
     if (width <= 0 || height <= 0 || !ph_window_to_video(a->win, x, y, nx, ny))
@@ -262,6 +298,7 @@ static void mouse_motion(app *a, const SDL_MouseMotionEvent *event)
 {
     double x, y, aspect;
     if (pointer_coordinates(a, event->x, event->y, &x, &y, &aspect)) {
+        mark_input(a, event->timestamp);
         /* Moving to a new location replaces wheel work aimed at the old location. */
         double dx = x - a->wheel.target_x, dy = (y - a->wheel.target_y) / aspect;
         if (dx * dx + dy * dy > 0.0001)
@@ -282,12 +319,14 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
     if (!button)
         return;
     if (!pointer_coordinates(a, event->x, event->y, &x, &y, &aspect)) {
+        a->input_pending = false;
         if (event->type == SDL_MOUSEBUTTONUP) {
             ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
             SDL_CaptureMouse(SDL_FALSE);
         }
         return;
     }
+    mark_input(a, event->timestamp);
     ph_scroll_cancel(&a->wheel);
     ph_scroll_forget_bounds(&a->wheel);
     ph_pointer_button(&a->pointer, button, event->type == SDL_MOUSEBUTTONDOWN,
@@ -299,7 +338,7 @@ static void scroll(app *a, const SDL_MouseWheelEvent *event)
 {
     int x, y, width, height;
     double nx, ny;
-    if (!a->link || !a->input.enabled || !a->phone_name[0] || a->input.buttons
+    if (!a->link || !a->input.enabled || !a->phone_name[0] || a->input.buttons || a->setup.visible
         || a->pointer.requested_buttons || a->pointer.buttons)
         return;
 #if SDL_VERSION_ATLEAST(2, 26, 0)
@@ -310,12 +349,130 @@ static void scroll(app *a, const SDL_MouseWheelEvent *event)
 #endif
     ph_window_video_size(a->win, &width, &height);
     if (width > 0 && height > 0 && ph_window_to_video(a->win, x, y, &nx, &ny)) {
+        mark_input(a, event->timestamp);
         int sign = event->direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1;
         PH_LOGD("wheel at PC (%d,%d), phone (%.3f,%.3f)", x, y, nx, ny);
         ph_scroll_request(&a->wheel, nx, ny, (double)width / height,
                           sign * event->x, sign * event->y);
     } else {
         ph_scroll_cancel(&a->wheel);
+    }
+}
+
+static const char *setup_marker(const app *a)
+{
+    return a->opt->bluetooth && a->opt->ble_helper ? "setup-complete-controls" : "setup-complete-mirror";
+}
+
+static void finish_calibration(app *a, bool success)
+{
+    if (!a->calibration_saved)
+        return;
+    bool valid = isfinite(a->pointer.scale_x) && isfinite(a->pointer.scale_y)
+                 && a->pointer.scale_x >= .05 && a->pointer.scale_x <= 20
+                 && a->pointer.scale_y >= .05 && a->pointer.scale_y <= 20;
+    if (success && valid) {
+        char line[96];
+        snprintf(line, sizeof line, "%.6f %.6f", a->pointer.scale_x, a->pointer.scale_y);
+        if (!ph_config_write_line("pointer-scale", line)) {
+            ph_setup_abort(&a->setup, PH_SETUP_SAVE_FAILED);
+            success = false;
+        } else {
+            PH_LOGI("guided calibration confirmed: x=%.3f y=%.3f", a->pointer.scale_x,
+                     a->pointer.scale_y);
+        }
+    } else if (success) {
+        ph_setup_abort(&a->setup, PH_SETUP_POINTER_UNCONFIRMED);
+        success = false;
+    }
+    if (!success)
+        ph_pointer_set_scale(&a->pointer, a->previous_scale_x, a->previous_scale_y);
+    PH_LOGD("pointer cancel: calibration %s", success ? "complete" : "rollback");
+    ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
+    a->calibration_saved = false;
+}
+
+static void open_setup(app *a)
+{
+    a->input_pending = false;
+    ph_input_release_all(&a->input);
+    PH_LOGD("pointer cancel: guided setup opened");
+    ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
+    ph_scroll_cancel(&a->wheel);
+    SDL_CaptureMouse(SDL_FALSE);
+    ph_setup_open(&a->setup, a->opt->bluetooth && a->opt->ble_helper);
+    update_title(a);
+}
+
+static void setup_action(app *a, ph_setup_action action)
+{
+    if (action == PH_SETUP_ACTION_NONE)
+        return;
+    if (action == PH_SETUP_ACTION_CLOSE || action == PH_SETUP_ACTION_BACK) {
+        if (a->setup.calibrating)
+            ph_setup_abort(&a->setup, PH_SETUP_CANCELED);
+        finish_calibration(a, false);
+        if (action == PH_SETUP_ACTION_CLOSE)
+            ph_setup_close(&a->setup);
+        else
+            ph_setup_back(&a->setup);
+    } else if (action == PH_SETUP_ACTION_CALIBRATE) {
+        if (ph_setup_start_calibration(&a->setup, SDL_GetTicks64())) {
+            a->previous_scale_x = a->pointer.scale_x > 0 ? a->pointer.scale_x : 1;
+            a->previous_scale_y = a->pointer.scale_y > 0 ? a->pointer.scale_y : 1;
+            a->calibration_saved = true;
+            PH_LOGD("pointer reset: guided calibration started");
+            ph_pointer_reset(&a->pointer, SDL_GetTicks64());
+            ph_scroll_cancel(&a->wheel);
+        }
+    } else if (ph_setup_next(&a->setup) && a->setup.completed) {
+        if (!ph_config_write_line(setup_marker(a), "1"))
+            PH_LOGW("couldn't save guided setup completion");
+    }
+    ph_window_set_setup(a->win, &a->setup);
+}
+
+static void tick_setup(app *a)
+{
+    ph_setup_update(&a->setup, a->input.enabled,
+                     a->phone_name[0] && a->view_frame && a->view_frame->data[0]);
+    if (a->setup.calibrating) {
+        double x, y;
+        if (a->picture_w > 0 && a->picture_h > 0 && ph_setup_target(&a->setup, &x, &y)) {
+            double aspect = (double)a->picture_w / a->picture_h;
+            Uint64 now = SDL_GetTicks64();
+            ph_pointer_target(&a->pointer, x, y, aspect, now);
+            ph_setup_observe(&a->setup, ph_pointer_ready(&a->pointer, x, y, aspect),
+                              a->pointer.failed, now);
+        }
+    }
+    if (a->calibration_saved && !a->setup.calibrating)
+        finish_calibration(a, a->setup.calibrated);
+    ph_window_set_setup(a->win, &a->setup);
+}
+
+static void tick_metrics(app *a)
+{
+    Uint64 now = SDL_GetTicks64();
+    if (now < a->metrics_at)
+        return;
+    a->metrics_at = now + 250;
+    ph_metrics_snapshot snapshot;
+    ph_metrics_snapshot_get(&a->metrics, ph_metrics_now_ms(), &snapshot);
+    ph_decoder_stats stats;
+    ph_decoder_get_stats(a->dec, &stats);
+    ph_window_set_metrics(a->win, &snapshot, stats.queued_packets, stats.packets_discarded,
+                           stats.frames_superseded);
+    if (a->opt->diagnostics && now >= a->metrics_log_at) {
+        a->metrics_log_at = now + 5000;
+        PH_LOGI("local diagnostics: FPS %.1f; receive/decode %.1f ms; receive/display %.1f ms; "
+                "input handoff %.1f ms; helper ACK %.1f ms; pending %zu; BT interval unknown",
+                snapshot.fps_known ? snapshot.fps : -1,
+                snapshot.receive_to_decode.known ? snapshot.receive_to_decode.last_ms : -1,
+                snapshot.receive_to_present.known ? snapshot.receive_to_present.last_ms : -1,
+                snapshot.input_handoff.known ? snapshot.input_handoff.last_ms : -1,
+                snapshot.helper_ack.known ? snapshot.helper_ack.last_ms : -1,
+                snapshot.pending_acks);
     }
 }
 
@@ -336,13 +493,44 @@ static uint8_t pc_modifiers(SDL_Keymod mods)
 static void handle_key(app *a, const SDL_KeyboardEvent *e)
 {
     SDL_Scancode sc = e->keysym.scancode;
+    if (sc == SDL_SCANCODE_F2) {
+        if (e->type == SDL_KEYDOWN && !e->repeat) {
+            a->input_pending = false;
+            if (a->setup.visible)
+                setup_action(a, PH_SETUP_ACTION_CLOSE);
+            else
+                open_setup(a);
+        }
+        return;
+    }
+    if (sc == SDL_SCANCODE_F3) {
+        if (e->type == SDL_KEYDOWN && !e->repeat)
+            ph_window_toggle_diagnostics(a->win);
+        return;
+    }
     if (sc == SDL_SCANCODE_F1) {
         if (e->type == SDL_KEYDOWN && !e->repeat) {
+            a->input_pending = false;
+            if (a->setup.visible)
+                setup_action(a, PH_SETUP_ACTION_CLOSE);
+            PH_LOGD("pointer cancel: help toggled");
             ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
             SDL_CaptureMouse(SDL_FALSE);
             ph_input_release_all(&a->input);
             ph_scroll_cancel(&a->wheel);
             ph_window_toggle_help(a->win);
+        }
+        return;
+    }
+    if (a->setup.visible) {
+        if (e->type == SDL_KEYDOWN && !e->repeat) {
+            if (sc == SDL_SCANCODE_ESCAPE)
+                setup_action(a, PH_SETUP_ACTION_CLOSE);
+            else if (sc == SDL_SCANCODE_BACKSPACE || sc == SDL_SCANCODE_LEFT)
+                setup_action(a, PH_SETUP_ACTION_BACK);
+            else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
+                setup_action(a, a->setup.step == PH_SETUP_CALIBRATE && !a->setup.calibrated
+                                    ? PH_SETUP_ACTION_CALIBRATE : PH_SETUP_ACTION_NEXT);
         }
         return;
     }
@@ -352,13 +540,16 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         ph_scroll_cancel(&a->wheel); /* a new action cancels queued wheel batches */
         ph_scroll_forget_bounds(&a->wheel);
         if ((e->keysym.mod & KMOD_LALT) || sc == SDL_SCANCODE_LALT) {
+            PH_LOGD("pointer cancel: Alt shortcut");
             ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
             SDL_CaptureMouse(SDL_FALSE);
         }
     }
-    if (a->phone_name[0] && (unsigned)sc < 256)
+    if (a->phone_name[0] && (unsigned)sc < 256) {
+        mark_input(a, e->timestamp);
         ph_input_key(&a->input, (uint8_t)sc, e->type == SDL_KEYDOWN, e->repeat != 0,
                      pc_modifiers((SDL_Keymod)e->keysym.mod));
+    }
 }
 
 static void release_everything(app *a)
@@ -433,6 +624,8 @@ static void show_frame(app *a, const AVFrame *f)
     }
     ph_rect screen = ph_video_content_rect(&planes, a->portrait_aspect);
     if (screen.w != a->picture_w || screen.h != a->picture_h) {
+        PH_LOGD("pointer reset: picture size %dx%d -> %dx%d", a->picture_w, a->picture_h,
+                 screen.w, screen.h);
         ph_pointer_reset(&a->pointer, SDL_GetTicks64());
         ph_scroll_reset(&a->wheel);
         a->picture_w = screen.w;
@@ -454,6 +647,20 @@ static void show_frame(app *a, const AVFrame *f)
     if (a->wheel.blocked_y && previous_edge != a->wheel.blocked_y)
         PH_LOGD("wheel stopped at %s boundary", a->wheel.blocked_y > 0 ? "top" : "bottom");
     ph_window_present(a->win, f, &screen);
+    ph_metrics_frame(&a->metrics, a->frame_timing.valid ? a->frame_timing.received_ms : 0,
+                      a->frame_timing.valid ? a->frame_timing.decoded_ms : 0, ph_metrics_now_ms());
+}
+
+static void clear_view(app *a)
+{
+    av_frame_unref(a->view_frame);
+    av_frame_unref(a->pointer_baseline);
+    a->picture_w = a->picture_h = 0;
+    a->view_seen_at = a->candidate_since = 0;
+    a->checked_sync = a->candidate_sync = 0;
+    a->checked_found = false;
+    memset(&a->frame_timing, 0, sizeof a->frame_timing);
+    a->input_pending = false;
 }
 
 static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *seq)
@@ -461,12 +668,13 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
     switch ((int)(e->type - a->ev_base)) {
     case EV_FRAME:
         atomic_store(&a->frame_pending, false);
-        if (ph_decoder_latest(a->dec, frame, seq)) {
+        if (ph_decoder_latest_timed(a->dec, frame, seq, &a->frame_timing)) {
             show_frame(a, frame);
             av_frame_unref(frame);
         }
         break;
     case EV_CONNECTED:
+        clear_view(a);
         ph_pointer_reset(&a->pointer, SDL_GetTicks64());
         ph_scroll_reset(&a->wheel);
         snprintf(a->phone_name, sizeof a->phone_name, "%s", (const char *)e->user.data1);
@@ -477,6 +685,8 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
         break;
     case EV_DISCONNECTED:
         release_everything(a);
+        clear_view(a);
+        ph_decoder_reset(a->dec);
         ph_pointer_set_enabled(&a->pointer, false, SDL_GetTicks64());
         a->phone_name[0] = '\0';
         ph_window_clear(a->win);
@@ -524,11 +734,21 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
             e->window.event == SDL_WINDOWEVENT_EXPOSED)
             ph_window_redraw(a->win);
         else if (e->window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+            a->input_pending = false;
+            PH_LOGD("pointer cancel: window focus lost");
+            if (a->setup.calibrating) {
+                ph_setup_abort(&a->setup, PH_SETUP_CANCELED);
+                finish_calibration(a, false);
+                ph_window_set_setup(a->win, &a->setup);
+            }
             ph_input_release_all(&a->input);
             ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
             ph_scroll_cancel(&a->wheel);
             SDL_CaptureMouse(SDL_FALSE);
         } else if (e->window.event == SDL_WINDOWEVENT_LEAVE) {
+            PH_LOGD("pointer cancel: mouse left window");
+            if (a->setup.calibrating)
+                break; /* calibration is autonomous; the mouse may be outside the picture */
             ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
             ph_scroll_cancel(&a->wheel);
             SDL_CaptureMouse(SDL_FALSE);
@@ -549,8 +769,14 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
         break;
     case SDL_MOUSEBUTTONDOWN:
     case SDL_MOUSEBUTTONUP:
-        if (e->button.windowID == win_id)
-            mouse_button(a, &e->button);
+        if (e->button.windowID == win_id) {
+            if (a->setup.visible) {
+                if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT)
+                    setup_action(a, ph_window_setup_click(a->win, e->button.x, e->button.y));
+            } else {
+                mouse_button(a, &e->button);
+            }
+        }
         break;
     default:
         if (e->type >= a->ev_base && e->type < a->ev_base + EV_COUNT)
@@ -619,6 +845,12 @@ int ph_app_run(const ph_app_options *opt)
         || !a.win || !a.dec)
         goto done;
     update_title(&a);
+    if (opt->diagnostics)
+        ph_window_toggle_diagnostics(a.win);
+    char setup_done[16];
+    if (opt->setup || (opt->auto_setup && !ph_config_read_line(setup_marker(&a), setup_done,
+                                                              sizeof setup_done)))
+        open_setup(&a);
 
     a.rx = ph_receiver_start(&rx_opt, &rx_cb);
     if (!a.rx)
@@ -642,6 +874,22 @@ int ph_app_run(const ph_app_options *opt)
         observe_pointer(&a);
         ph_pointer_tick(&a.pointer, SDL_GetTicks64());
         ph_scroll_tick(&a.wheel, SDL_GetTicks64());
+        if (a.link)
+            ph_hid_link_poll(a.link);
+        tick_setup(&a);
+        tick_metrics(&a);
+        if (a.link && !a.link_stopping
+            && ((a.pointer.failed && a.pointer.phase == PH_POINTER_DRAINING)
+                       || a.wheel.failed)) {
+            PH_LOGW("input helper stopped acknowledging queued reports; restarting control");
+            ph_input_set_enabled(&a.input, false);
+            ph_pointer_set_enabled(&a.pointer, false, SDL_GetTicks64());
+            ph_hid_link_request_stop(a.link);
+            a.link_stopping = true;
+            snprintf(a.ble_status, sizeof a.ble_status, "recovering; retrying");
+            a.ble_retry_at = 0; /* wait for the old pipe to exit before replacing it */
+            update_title(&a);
+        }
         ph_receiver_poll(a.rx);
         if (a.ble_retry_at && SDL_GetTicks64() >= a.ble_retry_at) {
             start_bluetooth(&a);
@@ -651,6 +899,8 @@ int ph_app_run(const ph_app_options *opt)
     rc = 0;
 
 done:
+    if (a.calibration_saved)
+        finish_calibration(&a, false);
     if (a.pointer.observed_at && a.pointer.known && !a.pointer.failed
         && a.pointer.phase == PH_POINTER_IDLE
         && a.pointer.scale_x >= 0.05 && a.pointer.scale_x <= 20

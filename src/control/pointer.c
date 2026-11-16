@@ -12,6 +12,7 @@
 #define POSITION_MAX_AGE_MS 1200
 #define MIN_PRESS_MS 80
 #define MAX_ATTEMPTS 8
+#define MAX_MOVE_REPORTS 24 /* bound one unacknowledged plan to 360 ms at 15 ms/report */
 
 static void pump(ph_pointer *p);
 
@@ -58,7 +59,7 @@ static void sync(ph_pointer *p, ph_pointer_phase phase)
     p->output.sync(p->output.user, p->sync_id);
 }
 
-static double move_axis(ph_pointer *p, double pixels, bool horizontal)
+static double move_axis(ph_pointer *p, double pixels, bool horizontal, int *reports_left)
 {
     static const int steps[] = {32, 16, 8, 4, 2, 1};
     double scale = horizontal ? p->scale_x : p->scale_y;
@@ -70,12 +71,13 @@ static double move_axis(ph_pointer *p, double pixels, bool horizontal)
         int step = steps[i];
         double travel = (0.25 * step + 0.055 * step * step) * scale;
         int count = (int)floor(remaining / travel);
-        /* Valid coordinates and calibration already bound the plan. A hard limit
-         * also protects the helper if a future caller supplies unusual geometry. */
-        if (count > 64)
-            count = 64;
+        /* Partial moves are confirmed before continuing. A stale low scale must
+         * not queue seconds of uninterruptible movement behind a held button. */
+        if (count > *reports_left)
+            count = *reports_left;
         for (int j = 0; j < count; j++)
             emit_mouse(p, horizontal ? sign * step : 0, horizontal ? 0 : sign * step);
+        *reports_left -= count;
         moved += count * travel;
         remaining -= count * travel;
     }
@@ -104,8 +106,9 @@ static void move_to(ph_pointer *p, double x, double y)
     double dy = (y - p->actual_y) * width / p->aspect;
     p->sent_start_x = p->actual_x;
     p->sent_start_y = p->actual_y;
-    p->sent_dx = move_axis(p, dx, true);
-    p->sent_dy = move_axis(p, dy, false);
+    int reports_left = MAX_MOVE_REPORTS;
+    p->sent_dx = move_axis(p, dx, true, &reports_left);
+    p->sent_dy = move_axis(p, dy, false, &reports_left);
     p->hint_x = p->actual_x + p->sent_dx / width;
     p->hint_y = p->actual_y + p->sent_dy * p->aspect / width;
     p->search_radius = fmin(0.9, (40 + hypot(dx, dy) * 0.65) / width);
@@ -206,9 +209,14 @@ static void pump(ph_pointer *p)
 void ph_pointer_cancel(ph_pointer *p, uint64_t now_ms)
 {
     p->now_ms = now_ms;
+    bool pending = p->phase == PH_POINTER_MOVING || p->phase == PH_POINTER_BUTTON
+                   || p->phase == PH_POINTER_DRAINING;
     if (p->phase == PH_POINTER_MOVING || p->phase == PH_POINTER_WAIT_VIDEO)
         p->known = false;
-    p->phase = PH_POINTER_IDLE;
+    /* Cancelling our intent cannot retract reports already in the helper's
+     * pipe. Keep their fence so rapid leave/re-enter events cannot flood it
+     * with corner sweeps while ignoring every superseded acknowledgement. */
+    p->phase = pending ? PH_POINTER_DRAINING : PH_POINTER_IDLE;
     p->active = false;
     p->failed = false;
     p->head = p->count = 0;
@@ -216,8 +224,11 @@ void ph_pointer_cancel(ph_pointer *p, uint64_t now_ms)
     p->requested_buttons = 0;
     if (p->buttons) {
         p->buttons = 0;
-        if (p->output.mouse)
+        if (p->output.mouse) {
             emit_mouse(p, 0, 0);
+            if (p->output.sync)
+                sync(p, PH_POINTER_DRAINING); /* include the release in the drain */
+        }
     }
 }
 
@@ -227,6 +238,7 @@ void ph_pointer_reset(ph_pointer *p, uint64_t now_ms)
     p->known = false;
     p->aspect = 0;
     p->failed = false;
+    p->retry_at = 0;
 }
 
 void ph_pointer_set_enabled(ph_pointer *p, bool enabled, uint64_t now_ms)
@@ -235,6 +247,12 @@ void ph_pointer_set_enabled(ph_pointer *p, bool enabled, uint64_t now_ms)
         return;
     ph_pointer_reset(p, now_ms);
     p->enabled = enabled;
+}
+
+void ph_pointer_transport_reset(ph_pointer *p, uint64_t now_ms)
+{
+    ph_pointer_reset(p, now_ms);
+    p->phase = PH_POINTER_IDLE;
 }
 
 bool ph_pointer_set_scale(ph_pointer *p, double x, double y)
@@ -254,6 +272,11 @@ static bool target(ph_pointer *p, double x, double y, double aspect, uint64_t no
 {
     if (!p->enabled || !valid(x, y, aspect))
         return false;
+    if (p->phase == PH_POINTER_DRAINING && now_ms - p->sent_at >= ACK_TIMEOUT_MS) {
+        p->now_ms = now_ms;
+        p->failed = true;
+        return false; /* wait for transport recovery, even if the target changes */
+    }
     reachable(&x, &y, aspect);
     bool changed = !p->aspect || fabs(p->aspect - aspect) > 0.0001
                    || distance(x, y, p->target_x, p->target_y, aspect) > ALIGNMENT_PX;
@@ -294,6 +317,8 @@ bool ph_pointer_button(ph_pointer *p, uint8_t button, bool down, double x, doubl
 {
     if (!p->enabled || !valid(x, y, aspect) || !button || (button & (button - 1)))
         return false;
+    if (p->phase == PH_POINTER_DRAINING && now_ms - p->sent_at >= ACK_TIMEOUT_MS)
+        return false;
     reachable(&x, &y, aspect);
     if (p->aspect && fabs(p->aspect - aspect) > 0.0001)
         ph_pointer_reset(p, now_ms);
@@ -323,6 +348,11 @@ void ph_pointer_ack(ph_pointer *p, uint32_t id, uint64_t now_ms)
     if (p->phase == PH_POINTER_MOVING) {
         p->phase = PH_POINTER_WAIT_VIDEO;
         p->wait_since = now_ms;
+    } else if (p->phase == PH_POINTER_DRAINING) {
+        p->phase = PH_POINTER_IDLE;
+        p->failed = false;
+        p->retry_at = now_ms;
+        pump(p);
     } else if (p->phase == PH_POINTER_BUTTON) {
         p->phase = PH_POINTER_IDLE;
         pump(p);
@@ -388,7 +418,8 @@ void ph_pointer_observe(ph_pointer *p, bool found, double x, double y, uint64_t 
 void ph_pointer_tick(ph_pointer *p, uint64_t now_ms)
 {
     p->now_ms = now_ms;
-    if ((p->phase == PH_POINTER_MOVING || p->phase == PH_POINTER_BUTTON)
+    if ((p->phase == PH_POINTER_MOVING || p->phase == PH_POINTER_BUTTON
+         || p->phase == PH_POINTER_DRAINING)
         && now_ms - p->sent_at >= ACK_TIMEOUT_MS) {
         fail(p);
         return;

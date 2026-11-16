@@ -26,6 +26,11 @@ struct ph_window {
     Uint64 pending_since;
     bool mirroring, control_ready, help_visible;
     char control_detail[96];
+    ph_setup setup;
+    bool diagnostics_visible;
+    ph_metrics_snapshot metrics;
+    unsigned int queued_packets;
+    uint64_t discarded_packets, superseded_frames;
 };
 
 /* Small built-in font keeps setup guidance available without an extra font package.
@@ -164,7 +169,7 @@ static void draw_waiting(ph_window *w, int width, int height)
     snprintf(status, sizeof status, "Controls: %s",
              w->control_ready ? "connected" : w->control_detail[0] ? w->control_detail : "waiting");
     y = draw_text(w->renderer, status, margin, y, content_width, scale, color_accent);
-    draw_text(w->renderer, "F1: controls and setup help", margin, y + 8 * scale,
+    draw_text(w->renderer, "F1: help  F2: guided setup\nF3: diagnostics", margin, y + 8 * scale,
                content_width, scale, color_muted);
 }
 
@@ -186,7 +191,7 @@ static void draw_help(ph_window *w, int width, int height)
     int y = margin;
     y = draw_text(w->renderer, "Porthole help", margin, y, content_width,
                   scale + 1, color_accent);
-    y = draw_text(w->renderer, "F1: close help", margin, y + 6 * scale,
+    y = draw_text(w->renderer, "F1: close  F2: guided setup\nF3: diagnostics", margin, y + 6 * scale,
                   content_width, scale, color_muted);
     y += 8 * scale;
     y = draw_text(w->renderer, "Mouse", margin, y, content_width, scale, color_accent);
@@ -222,9 +227,150 @@ static void draw_control_status(ph_window *w, int width)
     SDL_RenderFillRect(w->renderer, &panel);
     SDL_SetRenderDrawBlendMode(w->renderer, SDL_BLENDMODE_NONE);
     char line[160];
-    snprintf(line, sizeof line, "Viewing only: %s\nF1: Bluetooth setup",
+    snprintf(line, sizeof line, "Viewing only: %s\nF2: guided setup",
              w->control_detail[0] ? w->control_detail : "controls disconnected");
     draw_text(w->renderer, line, margin, margin, width - 2 * margin, scale, color_text);
+}
+
+static void setup_buttons(int width, int height, SDL_Rect buttons[3])
+{
+    int scale = text_scale(width), margin = 12 * scale, gap = 4 * scale;
+    int button_width = (width - 2 * margin - 2 * gap) / 3;
+    for (int i = 0; i < 3; i++)
+        buttons[i] = (SDL_Rect){margin + i * (button_width + gap),
+                                height - margin - 24 * scale, button_width, 24 * scale};
+}
+
+static void draw_setup(ph_window *w, int width, int height)
+{
+    const ph_setup *s = &w->setup;
+    int scale = text_scale(width), margin = 12 * scale, content_width = width - 2 * margin;
+    SDL_SetRenderDrawBlendMode(w->renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(w->renderer, 12, 23, 35, 245);
+    SDL_Rect panel = {0, 0, width, height};
+    SDL_RenderFillRect(w->renderer, &panel);
+    SDL_SetRenderDrawBlendMode(w->renderer, SDL_BLENDMODE_NONE);
+    SDL_Rect buttons[3];
+    setup_buttons(width, height, buttons);
+    SDL_Rect clip = {margin, margin, content_width, buttons[0].y - 2 * margin};
+    SDL_RenderSetClipRect(w->renderer, &clip);
+    char heading[80];
+    snprintf(heading, sizeof heading, "Setup %d/%d", s->controls ? (int)s->step + 1
+                                                                : s->step == PH_SETUP_MIRROR ? 1 : 2,
+             s->controls ? 5 : 2);
+    int y = draw_text(w->renderer, heading, margin, margin, content_width, scale + 1, color_accent);
+    y += 8 * scale;
+    const char *title = "", *body = "";
+    switch (s->step) {
+    case PH_SETUP_PREPARE:
+        title = "Prepare your iPhone";
+        body = "On your iPhone:\nSettings > Accessibility > Touch > AssistiveTouch.\n"
+               "Turn AssistiveTouch On.\nTurn Dwell Control Off.\n\n"
+               "Keep Tracking Sensitivity fixed.\nPress Next once you have checked these settings.";
+        break;
+    case PH_SETUP_BLUETOOTH:
+        title = "Connect Bluetooth";
+        body = "On iPhone, open Settings > Bluetooth.\nSelect Porthole under Other Devices.\n\n"
+               "Wait for all controls to connect. If pairing fails, forget the old Porthole entry and pair again.";
+        break;
+    case PH_SETUP_MIRROR:
+        title = "Mirror your screen";
+        body = "Use the same Wi-Fi network.\nOn iPhone, open Control Center > Screen Mirroring.\n"
+               "Select Porthole.\n\nClose the iPhone's mirroring panel once connected.";
+        break;
+    case PH_SETUP_CALIBRATE:
+        title = "Check pointer alignment";
+        body = "Leave your iPhone on a still page, such as Calculator.\n"
+               "The pointer will move to three targets. No taps are sent.\n\n"
+               "Leave the phone untouched during the check. Calibration is saved only after all three targets are confirmed.";
+        break;
+    case PH_SETUP_FINISH:
+        title = "Ready to use";
+        body = s->controls
+                   ? "Point, click, drag and type through the mirror.\nF2 opens this guide again.\n\n"
+                     "Optional shortcuts: assign AssistiveTouch buttons 3-6 to App Switcher, Control Center, Notifications and Screenshot. F1 lists the keys."
+                   : "Your iPhone screen is connected.\nThis build is viewing only.\nF2 opens this guide again.";
+        break;
+    }
+    y = draw_text(w->renderer, title, margin, y, content_width, scale, color_accent);
+    y = draw_text(w->renderer, body, margin, y + 6 * scale, content_width, scale, color_text);
+    y += 8 * scale;
+    char status[128] = "";
+    if (s->step == PH_SETUP_BLUETOOTH)
+        snprintf(status, sizeof status, "Controls: %s", s->bluetooth_ready ? "connected" : w->control_detail);
+    else if (s->step == PH_SETUP_MIRROR)
+        snprintf(status, sizeof status, "Screen: %s", s->mirroring ? "connected" : "waiting for iPhone");
+    else if (s->step == PH_SETUP_CALIBRATE)
+        snprintf(status, sizeof status, "%s: %u/%d targets",
+                 s->calibrated ? "Confirmed" : s->calibrating ? "Checking" : "Not checked",
+                 s->target, PH_SETUP_TARGETS);
+    y = draw_text(w->renderer, status, margin, y, content_width, scale, color_accent);
+    if (s->error != PH_SETUP_OK) {
+        const char *error = s->error == PH_SETUP_CONNECTION_LOST ? "Connection lost. Reconnect, then retry."
+                            : s->error == PH_SETUP_CANCELED ? "Check paused. Press Start to retry."
+                            : s->error == PH_SETUP_SAVE_FAILED ? "Could not save calibration. Check the configuration folder, then retry."
+                            : "Pointer not confirmed. Check AssistiveTouch and Tracking Sensitivity, then retry.";
+        draw_text(w->renderer, error, margin, y + 6 * scale, content_width, scale, color_muted);
+    }
+    SDL_RenderSetClipRect(w->renderer, NULL);
+    const char *next = s->step == PH_SETUP_FINISH ? "Finish"
+                       : s->calibrating ? "Wait"
+                       : s->step == PH_SETUP_CALIBRATE && !s->calibrated
+                             ? s->error != PH_SETUP_OK ? "Retry" : "Start" : "Next";
+    const char *labels[] = {"Close", "Back", next};
+    for (int i = 0; i < 3; i++) {
+        SDL_SetRenderDrawColor(w->renderer, 31, 59, 78, 255);
+        SDL_RenderFillRect(w->renderer, &buttons[i]);
+        int text_width = (int)strlen(labels[i]) * 6 * scale;
+        draw_text(w->renderer, labels[i], buttons[i].x + (buttons[i].w - text_width) / 2,
+                   buttons[i].y + 8 * scale, buttons[i].w, scale, color_text);
+    }
+}
+
+static void diagnostic_line(char out[160], const char *name, const ph_metric_summary *value)
+{
+    if (value->known)
+        snprintf(out, 160, "%s: %.0f ms (p95 %.0f)", name, value->last_ms, value->p95_ms);
+    else
+        snprintf(out, 160, "%s: --", name);
+}
+
+static void draw_diagnostics(ph_window *w, int width, int height)
+{
+    int scale = text_scale(width), margin = 8 * scale;
+    SDL_Rect panel = {0, 0, width, height < 260 * scale ? height : 260 * scale};
+    SDL_SetRenderDrawBlendMode(w->renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(w->renderer, 12, 23, 35, 240);
+    SDL_RenderFillRect(w->renderer, &panel);
+    SDL_SetRenderDrawBlendMode(w->renderer, SDL_BLENDMODE_NONE);
+    int y = draw_text(w->renderer, "F3: close diagnostics", margin, margin,
+                       width - 2 * margin, scale, color_accent);
+    char line[160];
+    if (w->metrics.fps_known)
+        snprintf(line, sizeof line, "Displayed video FPS: %.1f", w->metrics.fps);
+    else
+        snprintf(line, sizeof line, "Displayed video FPS: --");
+    y = draw_text(w->renderer, line, margin, y, width - 2 * margin, scale, color_text);
+    const char *names[] = {"Receive to decode", "Receive to present", "Input handoff", "Helper queue ACK"};
+    const ph_metric_summary *values[] = {&w->metrics.receive_to_decode, &w->metrics.receive_to_present,
+                                         &w->metrics.input_handoff, &w->metrics.helper_ack};
+    for (int i = 0; i < 4; i++) {
+        diagnostic_line(line, names[i], values[i]);
+        y = draw_text(w->renderer, line, margin, y, width - 2 * margin, scale, color_text);
+    }
+    if (w->metrics.bluetooth_interval_known)
+        snprintf(line, sizeof line, "Bluetooth interval: %.2f ms", w->metrics.bluetooth_interval_ms);
+    else
+        snprintf(line, sizeof line, "Bluetooth interval: not measured");
+    y = draw_text(w->renderer, line, margin, y, width - 2 * margin, scale, color_text);
+    snprintf(line, sizeof line, "HID pending: %zu  expired: %llu", w->metrics.pending_acks,
+             (unsigned long long)w->metrics.acks_expired);
+    y = draw_text(w->renderer, line, margin, y, width - 2 * margin, scale, color_text);
+    snprintf(line, sizeof line, "Video queue: %u  discarded: %llu  superseded: %llu", w->queued_packets,
+             (unsigned long long)w->discarded_packets, (unsigned long long)w->superseded_frames);
+    y = draw_text(w->renderer, line, margin, y, width - 2 * margin, scale, color_text);
+    draw_text(w->renderer, "Local timings only. Helper ACK excludes radio and phone response. Phone capture latency is not measured.",
+               margin, y + 6 * scale, width - 2 * margin, scale, color_muted);
 }
 
 ph_window *ph_window_create(const char *title)
@@ -281,6 +427,56 @@ void ph_window_toggle_help(ph_window *w)
 bool ph_window_help_visible(const ph_window *w)
 {
     return w->help_visible;
+}
+
+void ph_window_set_setup(ph_window *w, const ph_setup *setup)
+{
+    if (memcmp(&w->setup, setup, sizeof *setup) == 0)
+        return;
+    w->setup = *setup;
+    if (setup->visible)
+        w->help_visible = false;
+    ph_window_redraw(w);
+}
+
+ph_setup_action ph_window_setup_click(const ph_window *w, int x, int y)
+{
+    if (!w->setup.visible)
+        return PH_SETUP_ACTION_NONE;
+    int width, height, out_w, out_h;
+    SDL_GetWindowSize(w->window, &width, &height);
+    if (width <= 0 || height <= 0 || SDL_GetRendererOutputSize(w->renderer, &out_w, &out_h))
+        return PH_SETUP_ACTION_NONE;
+    SDL_Point point = {x * out_w / width, y * out_h / height};
+    SDL_Rect buttons[3];
+    setup_buttons(out_w, out_h, buttons);
+    if (SDL_PointInRect(&point, &buttons[0]))
+        return PH_SETUP_ACTION_CLOSE;
+    if (SDL_PointInRect(&point, &buttons[1]))
+        return PH_SETUP_ACTION_BACK;
+    if (SDL_PointInRect(&point, &buttons[2]))
+        return w->setup.calibrating ? PH_SETUP_ACTION_NONE
+               : w->setup.step == PH_SETUP_CALIBRATE && !w->setup.calibrated
+                   ? PH_SETUP_ACTION_CALIBRATE : PH_SETUP_ACTION_NEXT;
+    return PH_SETUP_ACTION_NONE;
+}
+
+void ph_window_toggle_diagnostics(ph_window *w)
+{
+    w->diagnostics_visible = !w->diagnostics_visible;
+    ph_window_redraw(w);
+}
+
+void ph_window_set_metrics(ph_window *w, const ph_metrics_snapshot *metrics,
+                           unsigned int queued_packets, uint64_t discarded_packets,
+                           uint64_t superseded_frames)
+{
+    w->metrics = *metrics;
+    w->queued_packets = queued_packets;
+    w->discarded_packets = discarded_packets;
+    w->superseded_frames = superseded_frames;
+    if (w->diagnostics_visible && !w->setup.visible && !w->help_visible)
+        ph_window_redraw(w);
 }
 
 /* Letterboxed picture rectangle inside an area of the given size. */
@@ -397,6 +593,10 @@ void ph_window_redraw(ph_window *w)
     }
     if (w->help_visible)
         draw_help(w, out_w, out_h);
+    if (w->diagnostics_visible && !w->help_visible && !w->setup.visible)
+        draw_diagnostics(w, out_w, out_h);
+    if (w->setup.visible)
+        draw_setup(w, out_w, out_h);
     SDL_RenderPresent(w->renderer);
 }
 
@@ -411,7 +611,7 @@ bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy
     int win_w, win_h;
     SDL_Rect r;
 
-    if (!w->has_picture || w->help_visible || !w->control_ready)
+    if (!w->has_picture || w->help_visible || w->setup.visible || !w->control_ready)
         return false;
     SDL_GetWindowSize(w->window, &win_w, &win_h);
     r = fit_rect(win_w, win_h, w->screen.w, w->screen.h);

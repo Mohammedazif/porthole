@@ -27,7 +27,7 @@
 struct ph_window { int unused; };
 struct ph_decoder { int unused; };
 struct ph_receiver { int unused; };
-struct ph_hid_link { int unused; };
+struct ph_hid_link { bool stopping; };
 static ph_window window;
 static ph_decoder decoder;
 static ph_receiver receiver;
@@ -48,12 +48,24 @@ static unsigned int presses, releases, movement_frames, movement_acks;
 static unsigned int frames_after_last_ack;
 static bool ack_emitted;
 static bool drag_mode, release_waiting_sync, release_synced;
+static bool modal_mode, setup_visible, setup_seen, keyboard_held, modal_checked;
+static unsigned int modal_stage, modal_leaks, premodal_keys, resumed_keys;
 static unsigned int dragged_reports;
 static Uint64 first_tick;
 
 static void quit(void)
 {
     SDL_Event event = {.type = SDL_QUIT};
+    SDL_PushEvent(&event);
+}
+
+static void push_key(SDL_Scancode scancode, bool down, SDL_Keymod modifiers)
+{
+    SDL_Event event = {.type = down ? SDL_KEYDOWN : SDL_KEYUP};
+    event.key.windowID = 1;
+    event.key.state = down ? SDL_PRESSED : SDL_RELEASED;
+    event.key.keysym.scancode = scancode;
+    event.key.keysym.mod = modifiers;
     SDL_PushEvent(&event);
 }
 
@@ -110,6 +122,18 @@ void ph_window_set_status(ph_window *w, bool mirror, bool ready, const char *det
 
 void ph_window_toggle_help(ph_window *w) { (void)w; }
 bool ph_window_help_visible(const ph_window *w) { (void)w; return false; }
+void ph_window_set_setup(ph_window *w, const ph_setup *setup)
+{
+    (void)w;
+    setup_visible = setup->visible;
+    setup_seen |= setup_visible;
+}
+ph_setup_action ph_window_setup_click(const ph_window *w, int x, int y)
+{ (void)w; (void)x; (void)y; return PH_SETUP_ACTION_NONE; }
+void ph_window_toggle_diagnostics(ph_window *w) { (void)w; }
+void ph_window_set_metrics(ph_window *w, const ph_metrics_snapshot *m, unsigned int queued,
+                           uint64_t discarded, uint64_t superseded)
+{ (void)w; (void)m; (void)queued; (void)discarded; (void)superseded; }
 void ph_window_redraw(ph_window *w) { (void)w; }
 void ph_window_clear(ph_window *w) { (void)w; initial_frame = false; }
 void ph_window_destroy(ph_window *w) { (void)w; }
@@ -147,6 +171,60 @@ void ph_window_tick(ph_window *w)
     if (SDL_GetTicks64() - first_tick > 4000) {
         timed_out = true;
         quit();
+    }
+    if (modal_mode && mirroring && control_ready && initial_frame) {
+        if (modal_stage == 0) {
+            modal_stage = 1;
+            /* Prove the keyboard channel is live before opening the local
+             * modal, and that opening it releases this held phone key. */
+            push_key(SDL_SCANCODE_B, true, KMOD_NONE);
+            push_key(SDL_SCANCODE_F2, true, KMOD_NONE);
+            push_key(SDL_SCANCODE_F2, false, KMOD_NONE);
+            push_key(SDL_SCANCODE_A, true, KMOD_NONE);
+            push_key(SDL_SCANCODE_A, false, KMOD_NONE);
+            push_key(SDL_SCANCODE_LALT, true, KMOD_LALT);
+            push_key(SDL_SCANCODE_H, true, KMOD_LALT);
+            push_key(SDL_SCANCODE_H, false, KMOD_LALT);
+            push_key(SDL_SCANCODE_LALT, false, KMOD_NONE);
+            SDL_Event motion = {.type = SDL_MOUSEMOTION};
+            motion.motion.windowID = 1;
+            motion.motion.x = TARGET_X;
+            motion.motion.y = TARGET_Y;
+            SDL_PushEvent(&motion);
+            SDL_Event wheel = {.type = SDL_MOUSEWHEEL};
+            wheel.wheel.windowID = 1;
+            wheel.wheel.y = -1;
+            SDL_PushEvent(&wheel);
+            SDL_Event button = {.type = SDL_MOUSEBUTTONDOWN};
+            button.button.windowID = 1;
+            button.button.button = SDL_BUTTON_LEFT;
+            button.button.x = TARGET_X;
+            button.button.y = TARGET_Y;
+            SDL_PushEvent(&button);
+            button.type = SDL_MOUSEBUTTONUP;
+            SDL_PushEvent(&button);
+            return;
+        }
+        if (modal_stage == 1) {
+            modal_checked = setup_seen && setup_visible && !keyboard_held && premodal_keys > 0;
+            if (!modal_checked || modal_leaks) {
+                quit();
+                return;
+            }
+            modal_stage = 2;
+            push_key(SDL_SCANCODE_ESCAPE, true, KMOD_NONE);
+            push_key(SDL_SCANCODE_ESCAPE, false, KMOD_NONE);
+            push_key(SDL_SCANCODE_A, true, KMOD_NONE);
+            push_key(SDL_SCANCODE_A, false, KMOD_NONE);
+            return;
+        }
+        if (modal_stage == 2) {
+            if (setup_visible || !resumed_keys) {
+                quit();
+                return;
+            }
+            modal_stage = 3; /* ordinary click below must work after closing F2 */
+        }
     }
     if (!injected && mirroring && control_ready && initial_frame) {
         injected = true;
@@ -197,6 +275,18 @@ bool ph_decoder_latest(ph_decoder *d, AVFrame *dst, uint64_t *seq)
     return true;
 }
 
+bool ph_decoder_latest_timed(ph_decoder *d, AVFrame *dst, uint64_t *seq, ph_frame_timing *timing)
+{
+    memset(timing, 0, sizeof *timing);
+    return ph_decoder_latest(d, dst, seq);
+}
+
+void ph_decoder_get_stats(ph_decoder *d, ph_decoder_stats *stats)
+{
+    (void)d;
+    memset(stats, 0, sizeof *stats);
+}
+
 void ph_decoder_stop(ph_decoder *d) { (void)d; av_frame_free(&latest); }
 
 ph_receiver *ph_receiver_start(const ph_receiver_options *opt, const ph_receiver_callbacks *cb)
@@ -214,18 +304,35 @@ ph_hid_link *ph_hid_link_start(char *const argv[], ph_hid_link_status_fn on_stat
     (void)argv;
     link_status = on_status;
     link_user = user;
+    fake_link.stopping = false;
     on_status(user, "subscribed");
     return &fake_link;
 }
-void ph_hid_link_stop(ph_hid_link *l) { (void)l; }
+void ph_hid_link_stop(ph_hid_link *l) { if (l) l->stopping = true; }
+void ph_hid_link_request_stop(ph_hid_link *l) { if (l) l->stopping = true; }
+bool ph_hid_link_poll(ph_hid_link *l) { return !l || l->stopping; }
 bool ph_hid_link_keyboard(ph_hid_link *l, const ph_hid_keyboard *k)
 {
-    (void)l, (void)k;
+    (void)l;
+    bool nonzero = k->modifiers != 0;
+    for (size_t i = 0; i < sizeof k->keys; i++)
+        nonzero |= k->keys[i] != 0;
+    keyboard_held = nonzero;
+    if (nonzero) {
+        if (setup_visible)
+            modal_leaks++;
+        else if (modal_stage == 1)
+            premodal_keys++;
+        else if (modal_stage == 2)
+            resumed_keys++;
+    }
     return true;
 }
 bool ph_hid_link_consumer(ph_hid_link *l, uint16_t usage)
 {
-    (void)l, (void)usage;
+    (void)l;
+    if (setup_visible && usage)
+        modal_leaks++;
     return true;
 }
 bool ph_hid_link_delay(ph_hid_link *l, uint16_t milliseconds)
@@ -244,6 +351,8 @@ static double travel(int value)
 bool ph_hid_link_mouse(ph_hid_link *l, const ph_hid_mouse *m)
 {
     (void)l;
+    if (setup_visible && (m->buttons || m->dx || m->dy || m->wheel || m->pan))
+        modal_leaks++;
     if (m->dx || m->dy) {
         moved_since_frame = true;
         phone_x = fmin(PHONE_WIDTH - 16, fmax(16, phone_x + travel(m->dx)));
@@ -294,9 +403,10 @@ bool ph_hid_link_sync(ph_hid_link *l, uint32_t id)
 
 int main(int argc, char **argv)
 {
-    if (argc > 2 || (argc == 2 && strcmp(argv[1], "--drag")))
+    if (argc > 2 || (argc == 2 && strcmp(argv[1], "--drag") && strcmp(argv[1], "--modal")))
         return 1;
-    drag_mode = argc == 2;
+    drag_mode = argc == 2 && !strcmp(argv[1], "--drag");
+    modal_mode = argc == 2 && !strcmp(argv[1], "--modal");
     char config[] = "/tmp/porthole-pointer-XXXXXX";
     if (!mkdtemp(config))
         return 1;
@@ -320,7 +430,8 @@ int main(int argc, char **argv)
         || held_buttons || anchored_with_button || error > 5 || release_error > 5
         || !release_synced || (drag_mode && !dragged_reports)
         || movement_frames < (drag_mode ? 3U : 2U)
-        || movement_frames != movement_acks || frames_after_last_ack) {
+        || movement_frames != movement_acks || frames_after_last_ack
+        || (modal_mode && (!modal_checked || modal_leaks || !resumed_keys || modal_stage != 3))) {
         fprintf(stderr, "idle-frame pointer failed: rc=%d timeout=%d frame_error=%d injected=%d "
                         "presses=%u releases=%u held=%u error=%.2f release_error=%.2f "
                         "release_synced=%d dragged_reports=%u anchored_held=%d "
@@ -329,9 +440,15 @@ int main(int argc, char **argv)
                 error, release_error, release_synced, dragged_reports, anchored_with_button,
                 movement_frames, movement_acks,
                 frames_after_last_ack);
+        if (modal_mode)
+            fprintf(stderr, "setup modal failed: stage=%u seen=%d visible=%d checked=%d "
+                            "leaks=%u held_key=%d premodal_keys=%u resumed_keys=%u\n",
+                    modal_stage, setup_seen, setup_visible, modal_checked, modal_leaks,
+                    keyboard_held, premodal_keys, resumed_keys);
         return 1;
     }
-    puts(drag_mode ? "SDL drag aligned and released with the smaller pressed cursor"
+    puts(modal_mode ? "F2 setup releases keys, suppresses phone input and resumes controls on close"
+                   : drag_mode ? "SDL drag aligned and released with the smaller pressed cursor"
                    : "SDL click aligned using the retained pre-ACK frame, without another video frame");
     return 0;
 }

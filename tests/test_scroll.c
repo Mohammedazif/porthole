@@ -127,7 +127,7 @@ int main(void)
     /* Disconnect/focus loss drops queued work, and an old ACK cannot finish a new batch. */
     uint32_t old_id = f.last_sync;
     CHECK(ph_scroll_request(&f.scroll, 0.5, 0.5, 0.46, 0, 4));
-    ph_scroll_reset(&f.scroll);
+    ph_scroll_transport_reset(&f.scroll);
     first_count = f.count;
     ph_scroll_ack(&f.scroll, old_id);
     CHECK(f.count == first_count && f.scroll.pending_y == 0);
@@ -182,9 +182,11 @@ int main(void)
     CHECK(ph_scroll_request(&f.scroll, 0.5, 0.65, 0.46, 0, -1));
     first_count = f.count;
     CHECK(ph_scroll_set_scale(&f.scroll, 2, 2));
-    CHECK(!f.scroll.positioned && !f.scroll.in_flight);
+    CHECK(!f.scroll.positioned && f.scroll.in_flight && f.scroll.cancelled);
     f.count = 0;
     CHECK(ph_scroll_request(&f.scroll, 0.5, 0.65, 0.46, 0, -1));
+    CHECK(f.count == 0); /* calibration cannot overtake the old transport batch */
+    ph_scroll_ack(&f.scroll, f.last_sync);
     CHECK(f.count < first_count && wheel_total(&f) == 1);
     CHECK(!ph_scroll_set_scale(&f.scroll, NAN, 1));
     CHECK(!ph_scroll_set_scale(&f.scroll, 1, INFINITY));
@@ -285,6 +287,52 @@ int main(void)
     CHECK(f.count > first_count && pan_total(&f) == 1 && f.scroll.blocked_y == -1);
     ph_scroll_reset(&f.scroll);
     CHECK(!f.scroll.blocked_y && !f.scroll.have_bar);
+
+    /* Cancellation drops intent, not already queued transport work. Repeated
+     * cursor changes cannot flood replacement batches before the old ACK. */
+    init(&f);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, -1));
+    old_id = f.last_sync;
+    first_count = f.count;
+    for (int i = 0; i < 100; i++) {
+        ph_scroll_cancel(&f.scroll);
+        CHECK(ph_scroll_request(&f.scroll, i % 2 ? .2 : .8, .5, .46, 0, -1));
+        CHECK(f.count == first_count && f.last_sync == old_id);
+        CHECK(f.scroll.in_flight && f.scroll.pending_y == -1);
+    }
+    ph_scroll_ack(&f.scroll, old_id);
+    CHECK(f.count > first_count && f.last_sync != old_id);
+    CHECK(f.scroll.in_flight && !f.scroll.pending_y);
+    first_count = f.count;
+    ph_scroll_ack(&f.scroll, old_id);
+    CHECK(f.count == first_count && f.scroll.in_flight);
+
+    /* A missing ACK stays bounded; changed coordinates cannot bypass it. A
+     * late fence or explicit reconnect reset permits a fresh gesture. */
+    init(&f);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, -1));
+    old_id = f.last_sync;
+    first_count = f.count;
+    ph_scroll_cancel(&f.scroll);
+    ph_scroll_tick(&f.scroll, 3001);
+    CHECK(f.scroll.failed && f.scroll.in_flight);
+    CHECK(!ph_scroll_request(&f.scroll, .8, .5, .46, 0, -1));
+    CHECK(f.count == first_count);
+    ph_scroll_ack(&f.scroll, old_id);
+    CHECK(!f.scroll.failed && !f.scroll.in_flight && f.count == first_count);
+    CHECK(ph_scroll_request(&f.scroll, .8, .5, .46, 0, -1));
+    CHECK(f.count > first_count);
+    ph_scroll_transport_reset(&f.scroll);
+    CHECK(!f.scroll.in_flight && !f.scroll.failed);
+
+    init(&f);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, -4));
+    first_count = f.count;
+    CHECK(f.scroll.pending_y == -3);
+    ph_scroll_tick(&f.scroll, 3001);
+    CHECK(f.scroll.failed && !f.scroll.pending_y && f.count == first_count);
+    ph_scroll_ack(&f.scroll, f.last_sync);
+    CHECK(!f.scroll.failed && !f.scroll.in_flight && f.count == first_count);
 
     /* A normal moving indicator permits the next notch after a fresh frame;
      * missing frames have a bounded timeout instead of hanging scrolling. */

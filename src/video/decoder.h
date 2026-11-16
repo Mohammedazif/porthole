@@ -12,6 +12,19 @@ struct AVFrame;
 
 typedef struct ph_decoder ph_decoder;
 
+typedef struct ph_frame_timing {
+    bool valid;
+    /* Local monotonic receipt of the access unit and completion of its decode.
+     * These are not iPhone capture timestamps or synchronized AirPlay NTP time. */
+    uint64_t received_ms, decoded_ms;
+} ph_frame_timing;
+
+typedef struct ph_decoder_stats {
+    uint64_t packets_received, packets_discarded;
+    uint64_t frames_decoded, frames_superseded, frames_stale;
+    unsigned int queued_packets;
+} ph_decoder_stats;
+
 /* `on_frame` is called on the decoder thread whenever a new picture is ready. */
 ph_decoder *ph_decoder_start(void (*on_frame)(void *user), void *user);
 
@@ -24,6 +37,11 @@ void ph_decoder_reset(ph_decoder *d);
 /* If a picture newer than *seq exists, references it into `dst` (YUV 4:2:0), updates *seq
  * and returns true. `dst` must be an allocated, empty AVFrame. */
 bool ph_decoder_latest(ph_decoder *d, struct AVFrame *dst, uint64_t *seq);
+/* Same operation, also returns receipt/decode timing for this exact picture.
+ * The clock is ph_metrics_now_ms(); invalid timing must be displayed as unknown. */
+bool ph_decoder_latest_timed(ph_decoder *d, struct AVFrame *dst, uint64_t *seq,
+                             ph_frame_timing *timing);
+void ph_decoder_get_stats(ph_decoder *d, ph_decoder_stats *stats);
 
 void ph_decoder_stop(ph_decoder *d);
 

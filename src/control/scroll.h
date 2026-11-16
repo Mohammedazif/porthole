@@ -18,7 +18,7 @@ typedef struct ph_scroll {
     double target_x, target_y, aspect;
     double last_x, last_y, last_aspect;
     double scale_x, scale_y;
-    bool positioned, in_flight;
+    bool positioned, in_flight, cancelled, failed;
     uint32_t sync_id;
     /* Video feedback prevents continued wheel input from stretching iOS past an edge. */
     bool feedback, waiting_frame, have_bar, sent_had_bar;
@@ -28,7 +28,7 @@ typedef struct ph_scroll {
     unsigned int pinned_batches;
     int pinned_direction;
     bool have_request, probe;
-    uint64_t now_ms, wait_since, last_request_at;
+    uint64_t now_ms, wait_since, last_request_at, sent_at;
 } ph_scroll;
 
 /* Target coordinates are fractions of the phone picture; aspect is its width/height.
@@ -37,9 +37,12 @@ typedef struct ph_scroll {
 bool ph_scroll_request(ph_scroll *scroll, double x, double y, double aspect,
                        int notches_x, int notches_y);
 void ph_scroll_ack(ph_scroll *scroll, uint32_t id);
-/* Stop pending wheel input while retaining the known phone pointer position. */
+/* Stop pending intent, retaining the current transport fence until its ACK so
+ * replacement input cannot overtake cancelled output. Reset also forgets the
+ * position/bounds, while transport_reset discards a replaced pipe's fence. */
 void ph_scroll_cancel(ph_scroll *scroll);
 void ph_scroll_reset(ph_scroll *scroll);
+void ph_scroll_transport_reset(ph_scroll *scroll);
 /* Enable feedback in the live app. Feed each newly decoded frame (including a faded
  * indicator) and tick the clock so a missing video frame cannot stall input forever. */
 void ph_scroll_tick(ph_scroll *scroll, uint64_t now_ms);

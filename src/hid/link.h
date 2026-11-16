@@ -27,7 +27,15 @@ bool ph_hid_link_consumer(ph_hid_link *l, uint16_t usage);
 bool ph_hid_link_sync(ph_hid_link *l, uint32_t id);
 bool ph_hid_link_delay(ph_hid_link *l, uint16_t milliseconds);
 
-/* Closes the helper's input (it then cleans up and exits) and waits for it. */
+/* Main-thread lifecycle: request_stop closes stdin once and rejects new reports.
+ * Poll regularly to reap without blocking, escalating EOF -> TERM -> KILL with
+ * bounded grace periods. Poll returns true once the child is reaped; it does not
+ * free the link. The reader emits "exited" after reaping, then stop can free it. */
+void ph_hid_link_request_stop(ph_hid_link *l);
+bool ph_hid_link_poll(ph_hid_link *l);
+
+/* Final shutdown: drives the same bounded stop sequence, joins the reader and
+ * frees the link. During normal rendering use request_stop/poll instead. */
 void ph_hid_link_stop(ph_hid_link *l);
 
 #endif

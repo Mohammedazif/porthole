@@ -9,6 +9,9 @@ typedef struct ph_app_options {
     bool debug;             /* verbose AirPlay protocol logging */
     bool bluetooth;         /* control the iPhone through the Bluetooth helper */
     bool audio;             /* play mirrored phone audio through the PC */
+    bool diagnostics;       /* show measured local input/video timings */
+    bool auto_setup;        /* offer guided setup until completed */
+    bool setup;             /* explicitly open guided setup this run */
     const char *ble_helper; /* path of the Bluetooth helper script */
 } ph_app_options;
 

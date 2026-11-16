@@ -16,7 +16,7 @@ typedef struct fixture {
     ph_pointer pointer;
     event events[2048];
     size_t count;
-    unsigned int anchors, syncs;
+    unsigned int anchors, syncs, motion_since_sync, max_motion_batch;
     double x, y, true_x_scale, true_y_scale;
     uint64_t now;
 } fixture;
@@ -48,6 +48,8 @@ static void mouse(void *user, const ph_hid_mouse *m)
         f->anchors++;
         CHECK(!m->buttons); /* recovery must never create a huge drag */
     }
+    if (m->dx || m->dy)
+        f->motion_since_sync++;
     if (f->count < sizeof f->events / sizeof f->events[0])
         f->events[f->count++] = (event){*m, f->pointer.now_ms, f->x, f->y};
     else
@@ -64,6 +66,9 @@ static void sync_reports(void *user, uint32_t id)
 {
     fixture *f = user;
     CHECK(id & 0x80000000U);
+    if (f->motion_since_sync > f->max_motion_batch)
+        f->max_motion_batch = f->motion_since_sync;
+    f->motion_since_sync = 0;
     f->syncs++;
 }
 
@@ -82,7 +87,8 @@ static void step(fixture *f)
 {
     f->now += 40;
     ph_pointer_phase phase = f->pointer.phase;
-    if (phase == PH_POINTER_MOVING || phase == PH_POINTER_BUTTON)
+    if (phase == PH_POINTER_MOVING || phase == PH_POINTER_BUTTON
+        || phase == PH_POINTER_DRAINING)
         ph_pointer_ack(&f->pointer, f->pointer.sync_id, f->now);
     else if (phase == PH_POINTER_WAIT_VIDEO)
         ph_pointer_observe(&f->pointer, true, f->x / (500 * fmax(1, f->pointer.aspect)),
@@ -234,8 +240,8 @@ int main(void)
     CHECK(f.pointer.failed && !f.pointer.count && !f.pointer.requested_buttons);
     CHECK(first_button(&f, PH_HID_BTN_LEFT) == f.count);
 
-    /* Focus loss releases a drag, invalidates an in-flight movement, and an old
-     * ACK cannot finish a new positioning request. */
+    /* Focus loss releases a drag and drains the cancelled movement before the
+     * new target can issue reports. The old movement ACK cannot finish release. */
     init(&f);
     CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true, .5, .5, .46, f.now));
     settle(&f);
@@ -245,11 +251,16 @@ int main(void)
     ph_pointer_cancel(&f.pointer, ++f.now);
     CHECK(!f.pointer.buttons && !f.pointer.known && !f.pointer.count);
     CHECK(f.events[f.count - 1].mouse.buttons == 0);
+    uint32_t release_id = f.pointer.sync_id;
+    initial = f.count;
     CHECK(ph_pointer_target(&f.pointer, .4, .5, .46, ++f.now));
-    uint32_t next_id = f.pointer.sync_id;
-    CHECK(next_id != stale_id);
+    CHECK(f.pointer.sync_id == release_id && release_id != stale_id);
+    CHECK(f.count == initial && f.pointer.phase == PH_POINTER_DRAINING);
     ph_pointer_ack(&f.pointer, stale_id, ++f.now);
+    CHECK(f.pointer.phase == PH_POINTER_DRAINING && f.count == initial);
+    ph_pointer_ack(&f.pointer, release_id, ++f.now);
     CHECK(f.pointer.phase == PH_POINTER_MOVING);
+    CHECK(f.pointer.sync_id != release_id);
 
     /* A missing transport ACK while dragging also releases the physical button. */
     init(&f);
@@ -264,7 +275,88 @@ int main(void)
     CHECK(f.events[f.count - 1].mouse.buttons == 0);
     initial = f.count;
     ph_pointer_ack(&f.pointer, stale_id, f.now + 3100);
+    CHECK(f.count == initial && f.pointer.phase == PH_POINTER_DRAINING);
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now + 3200);
     CHECK(f.count == initial && f.pointer.phase == PH_POINTER_IDLE);
+
+    /* A real sender dispatches asynchronously. Repeated leave/re-enter events
+     * must not enqueue a fresh corner sweep for every cancellation while the
+     * first sweep is still queued. New motion coalesces behind its ACK. */
+    init(&f);
+    CHECK(ph_pointer_target(&f.pointer, .8, .8, .46, f.now));
+    stale_id = f.pointer.sync_id;
+    initial = f.count;
+    for (int i = 0; i < 100; i++) {
+        ph_pointer_cancel(&f.pointer, ++f.now);
+        CHECK(ph_pointer_target(&f.pointer, i % 2 ? .2 : .8, .7, .46, ++f.now));
+        ph_pointer_tick(&f.pointer, f.now);
+        CHECK(f.count == initial && f.anchors == 8);
+        CHECK(f.pointer.sync_id == stale_id && f.pointer.phase == PH_POINTER_DRAINING);
+    }
+    ph_pointer_ack(&f.pointer, stale_id, ++f.now);
+    CHECK(f.anchors == 16 && f.pointer.phase == PH_POINTER_MOVING);
+    uint32_t next_id = f.pointer.sync_id;
+    ph_pointer_ack(&f.pointer, stale_id, ++f.now);
+    CHECK(f.pointer.sync_id == next_id && f.pointer.phase == PH_POINTER_MOVING);
+    settle(&f);
+    CHECK(ph_pointer_ready(&f.pointer, .2, .7, .46));
+
+    /* A cancelled drag's release is itself fenced. A click queued meanwhile
+     * cannot run until that release, re-anchoring and fresh video all finish. */
+    init(&f);
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true, .5, .5, .46, f.now));
+    settle(&f);
+    CHECK(ph_pointer_target(&f.pointer, .8, .8, .46, ++f.now));
+    stale_id = f.pointer.sync_id;
+    ph_pointer_cancel(&f.pointer, ++f.now);
+    release_id = f.pointer.sync_id;
+    initial = f.count;
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true, .4, .5, .46, ++f.now));
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, false, .4, .5, .46, ++f.now));
+    CHECK(f.pointer.count == 2 && f.count == initial && !f.pointer.buttons);
+    ph_pointer_ack(&f.pointer, stale_id, ++f.now);
+    CHECK(f.count == initial && f.pointer.phase == PH_POINTER_DRAINING);
+    ph_pointer_ack(&f.pointer, release_id, ++f.now);
+    settle(&f);
+    bool clicked_after_release = false;
+    for (size_t i = initial; i < f.count; i++) {
+        if (f.events[i].mouse.buttons == PH_HID_BTN_LEFT) {
+            clicked_after_release = true;
+            CHECK(hypot(f.events[i].x - 200, f.events[i].y - .5 * 500 / .46) <= 4);
+        }
+    }
+    CHECK(clicked_after_release && !f.pointer.buttons && !f.pointer.count);
+
+    /* Geometry resets also retain the fence; only transport_reset may forget
+     * commands that still exist in the helper's input queue. */
+    init(&f);
+    CHECK(ph_pointer_target(&f.pointer, .8, .8, .46, f.now));
+    stale_id = f.pointer.sync_id;
+    initial = f.count;
+    ph_pointer_reset(&f.pointer, ++f.now);
+    CHECK(ph_pointer_target(&f.pointer, .4, .5, 2.16, ++f.now));
+    CHECK(f.count == initial && f.pointer.phase == PH_POINTER_DRAINING);
+    ph_pointer_ack(&f.pointer, stale_id, ++f.now);
+    settle(&f);
+    CHECK(ph_pointer_ready(&f.pointer, .4, .5, 2.16));
+
+    /* A broken transport never becomes an unbounded retry queue just because
+     * targets change. A link reset can explicitly discard its missing ACK. */
+    init(&f);
+    CHECK(ph_pointer_target(&f.pointer, .8, .8, .46, f.now));
+    initial = f.count;
+    ph_pointer_cancel(&f.pointer, ++f.now);
+    ph_pointer_tick(&f.pointer, f.now += 3001);
+    CHECK(f.pointer.failed && f.pointer.phase == PH_POINTER_DRAINING);
+    for (int i = 0; i < 20; i++)
+        CHECK(!ph_pointer_target(&f.pointer, i % 2 ? .2 : .8, .7, .46, ++f.now));
+    CHECK(f.count == initial);
+    ph_pointer_set_enabled(&f.pointer, false, ++f.now);
+    ph_pointer_transport_reset(&f.pointer, ++f.now);
+    ph_pointer_set_enabled(&f.pointer, true, ++f.now);
+    CHECK(ph_pointer_target(&f.pointer, .4, .5, .46, ++f.now));
+    settle(&f);
+    CHECK(ph_pointer_ready(&f.pointer, .4, .5, .46));
 
     /* Same-target wheel routing after idle can reveal the hidden pointer and
      * become ready again; it cannot wait forever on an observation that aged out. */
@@ -378,6 +470,23 @@ int main(void)
     settle(&f);
     CHECK(!f.pointer.buttons && !f.pointer.failed && f.anchors == 8);
     CHECK(hypot(f.x - 250, f.y - .368 * 500 / .46) <= 4);
+
+    /* A low but valid calibration can need hundreds of reports across a large
+     * screen. Each confirmed segment must stay bounded so cancellation can drain
+     * promptly; progress can complete the target without a retry-budget failure. */
+    init(&f);
+    CHECK(ph_pointer_set_scale(&f.pointer, .05, .05));
+    f.true_x_scale = f.true_y_scale = .05;
+    CHECK(ph_pointer_target(&f.pointer, .8, .9, .46, f.now));
+    settle(&f);
+    CHECK(ph_pointer_ready(&f.pointer, .8, .9, .46));
+    CHECK(f.max_motion_batch <= 24 && f.syncs > 10 && f.anchors == 8);
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true, .8, .9, .46, ++f.now));
+    settle(&f);
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, false, .2, .2, .46, ++f.now));
+    settle(&f);
+    CHECK(ph_pointer_ready(&f.pointer, .2, .2, .46));
+    CHECK(f.max_motion_batch <= 24 && f.anchors == 8 && !f.pointer.buttons);
 
     /* Ignored reports still exhaust the bounded retry budget. */
     init(&f);

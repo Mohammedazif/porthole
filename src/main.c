@@ -6,6 +6,7 @@
 #include "core/version.h"
 
 #ifdef PORTHOLE_HAVE_AIRPLAY
+#include <SDL.h>
 #include "app.h"
 #define FEATURE_AIRPLAY "yes"
 #else
@@ -25,6 +26,9 @@ static void print_usage(FILE *out, const char *argv0)
             "                    TCP 7000/7001/7100 and UDP 6000/6001/7011\n"
             "      --no-bluetooth  View only: don't control the phone over Bluetooth\n"
             "      --no-audio     Mute audio playback on the PC\n"
+            "      --setup        Open guided pairing and calibration setup\n"
+            "      --no-setup     Skip automatic first-run setup (F2 still opens it)\n"
+            "      --diagnostics  Show local timing diagnostics and log summaries\n"
             "      --ble-helper PATH  Bluetooth helper script (default: the one in the source tree)\n"
             "      --debug       Log AirPlay protocol details\n"
             "  -v, --verbose     Show debug messages\n"
@@ -33,7 +37,8 @@ static void print_usage(FILE *out, const char *argv0)
             "\n"
             "Hotkeys (Left Alt + key): H Home, S App Switcher, C Control Center,\n"
             "  N Notification Center, F Spotlight, P Screenshot, Left Back, Up/Down Volume.\n"
-            "Ctrl on the PC acts as Command on the iPhone (Ctrl+C, Ctrl+V, ...).\n",
+            "Ctrl on the PC acts as Command on the iPhone (Ctrl+C, Ctrl+V, ...).\n"
+            "F1 help; F2 guided setup; F3 local timing diagnostics.\n",
             argv0, PORTHOLE_NAME);
 }
 
@@ -48,8 +53,13 @@ int main(int argc, char **argv)
     const char *name = PORTHOLE_NAME;
     bool fixed_ports = true;
     bool debug = false;
+#ifdef _WIN32
+    bool bluetooth = false; /* mirror-only Windows build; WinRT HID is a later workstream */
+#else
     bool bluetooth = true;
+#endif
     bool audio = true;
+    bool diagnostics = false, setup = false, auto_setup = true;
 #ifdef PORTHOLE_BLE_HELPER
     const char *ble_helper = PORTHOLE_BLE_HELPER;
 #else
@@ -76,6 +86,13 @@ int main(int argc, char **argv)
             bluetooth = false;
         } else if (!strcmp(arg, "--no-audio")) {
             audio = false;
+        } else if (!strcmp(arg, "--setup")) {
+            setup = true;
+        } else if (!strcmp(arg, "--no-setup")) {
+            auto_setup = false;
+            setup = false;
+        } else if (!strcmp(arg, "--diagnostics")) {
+            diagnostics = true;
         } else if (!strcmp(arg, "--ble-helper")) {
             if (i + 1 >= argc || !argv[i + 1][0]) {
                 fprintf(stderr, "%s: %s needs a value\n", argv[0], arg);
@@ -103,6 +120,9 @@ int main(int argc, char **argv)
                               .debug = debug,
                               .bluetooth = bluetooth,
                               .audio = audio,
+                              .diagnostics = diagnostics,
+                              .auto_setup = auto_setup,
+                              .setup = setup,
                               .ble_helper = ble_helper};
         return ph_app_run(&opt);
     }
@@ -111,6 +131,9 @@ int main(int argc, char **argv)
     (void)debug;
     (void)bluetooth;
     (void)audio;
+    (void)diagnostics;
+    (void)setup;
+    (void)auto_setup;
     (void)ble_helper;
     PH_LOGW("this build has no Wi-Fi receiver (configured with PORTHOLE_WITH_AIRPLAY=OFF)");
     return 0;

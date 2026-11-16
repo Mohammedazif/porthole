@@ -3,10 +3,12 @@ configure_file(core/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/core/vers
 # Platform-independent code shared by the app and the tests.
 add_library(porthole_core STATIC
     core/config.c
+    core/metrics.c
     control/keyboard.c
     control/input.c
     control/pointer.c
     control/scroll.c
+    control/setup.c
     core/log.c
     hid/hid_reports.c
     video/crop.c

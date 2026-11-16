@@ -7,6 +7,8 @@
 #include <stdbool.h>
 
 #include "video/crop.h"
+#include "control/setup.h"
+#include "core/metrics.h"
 
 struct AVFrame;
 
@@ -22,6 +24,15 @@ void ph_window_set_status(ph_window *w, bool mirroring, bool control_ready, cons
 /* F1 opens/closes local help. Picture coordinates are rejected while it is open. */
 void ph_window_toggle_help(ph_window *w);
 bool ph_window_help_visible(const ph_window *w);
+
+/* F2 guided setup is local and consumes input while visible. */
+void ph_window_set_setup(ph_window *w, const ph_setup *setup);
+ph_setup_action ph_window_setup_click(const ph_window *w, int x, int y);
+/* F3 diagnostics never intercepts phone input. All timings are local measurements. */
+void ph_window_toggle_diagnostics(ph_window *w);
+void ph_window_set_metrics(ph_window *w, const ph_metrics_snapshot *metrics,
+                           unsigned int queued_packets, uint64_t discarded_packets,
+                           uint64_t superseded_frames);
 
 /* Uploads a YUV 4:2:0 frame and shows the `screen` part of it (the phone screen inside the
  * frame, see video/crop.h). The window is resized to fit when the screen size changes and

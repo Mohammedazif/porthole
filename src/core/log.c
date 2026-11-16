@@ -2,34 +2,31 @@
 
 #include <stdarg.h>
 #include <stdio.h>
-#include <time.h>
+#include <stdatomic.h>
 
-static volatile ph_log_level g_level = PH_LOG_INFO;
+#include "core/metrics.h"
+
+static atomic_int g_level = PH_LOG_INFO;
 
 void ph_log_set_level(ph_log_level level)
 {
-    g_level = level;
+    atomic_store(&g_level, level);
 }
 
 ph_log_level ph_log_get_level(void)
 {
-    return g_level;
+    return (ph_log_level)atomic_load(&g_level);
 }
 
 /* Seconds since the first log call, with millisecond precision. */
 static double elapsed_seconds(void)
 {
-    static struct timespec start;
-    static int started;
-    struct timespec now;
-
-    if (!timespec_get(&now, TIME_UTC))
-        return 0.0;
-    if (!started) {
-        start = now;
-        started = 1;
-    }
-    return (double)(now.tv_sec - start.tv_sec) + (double)(now.tv_nsec - start.tv_nsec) / 1e9;
+    static atomic_uint_fast64_t start;
+    uint64_t now = ph_metrics_now_ms();
+    uint_fast64_t unset = 0;
+    atomic_compare_exchange_strong(&start, &unset, now);
+    uint64_t first = atomic_load(&start);
+    return now >= first ? (double)(now - first) / 1000 : 0;
 }
 
 void ph_log(ph_log_level level, const char *fmt, ...)
@@ -39,7 +36,7 @@ void ph_log(ph_log_level level, const char *fmt, ...)
     int n;
     va_list ap;
 
-    if (level < g_level || level > PH_LOG_ERROR)
+    if (level < ph_log_get_level() || level > PH_LOG_ERROR)
         return;
 
     n = snprintf(line, sizeof line, "[%9.3f] %c ", elapsed_seconds(), tags[level]);
