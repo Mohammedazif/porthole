@@ -213,10 +213,10 @@ static void send_pointer_sync(void *user, uint32_t id)
 static bool position_for_scroll(void *user, double x, double y, double aspect)
 {
     app *a = user;
-    ph_pointer_target(&a->pointer, x, y, aspect, SDL_GetTicks64());
+    bool ready = ph_pointer_scroll_target(&a->pointer, x, y, aspect, SDL_GetTicks64());
     if (a->pointer.failed)
         ph_scroll_cancel(&a->wheel);
-    return ph_pointer_ready(&a->pointer, x, y, aspect);
+    return ready;
 }
 
 static bool pointer_coordinates(app *a, int x, int y, double *nx, double *ny, double *aspect)
@@ -239,7 +239,11 @@ static void mouse_motion(app *a, const SDL_MouseMotionEvent *event)
         double dx = x - a->wheel.target_x, dy = (y - a->wheel.target_y) / aspect;
         if (dx * dx + dy * dy > 0.0001)
             ph_scroll_cancel(&a->wheel);
-        ph_pointer_target(&a->pointer, x, y, aspect, SDL_GetTicks64());
+        if (a->wheel.pending_x || a->wheel.pending_y || a->wheel.in_flight
+            || a->wheel.waiting_frame)
+            ph_pointer_scroll_target(&a->pointer, x, y, aspect, SDL_GetTicks64());
+        else
+            ph_pointer_target(&a->pointer, x, y, aspect, SDL_GetTicks64());
     }
 }
 
@@ -592,7 +596,11 @@ int ph_app_run(const ph_app_options *opt)
 
     while (running) {
         SDL_Event e;
-        if (SDL_WaitEventTimeout(&e, 16)) {
+        /* Button holds and video confirmation are timed in this loop: run it more
+         * often while input is on its way to the phone. */
+        bool busy = a.pointer.phase != PH_POINTER_IDLE || a.pointer.count
+                    || a.wheel.in_flight || a.wheel.waiting_frame;
+        if (SDL_WaitEventTimeout(&e, busy ? 4 : 16)) {
             do {
                 running = handle_event(&a, &e, frame, &seq) && running;
             } while (SDL_PollEvent(&e));

@@ -36,6 +36,7 @@ typedef struct ph_pointer {
     bool enabled, active, known, failed;
     ph_pointer_phase phase;
     double target_x, target_y, aspect;
+    double target_tolerance;
     double actual_x, actual_y;
     double scale_x, scale_y;
     double hint_x, hint_y, search_radius;
@@ -51,6 +52,9 @@ typedef struct ph_pointer {
 void ph_pointer_set_enabled(ph_pointer *p, bool enabled, uint64_t now_ms);
 bool ph_pointer_set_scale(ph_pointer *p, double x, double y);
 bool ph_pointer_target(ph_pointer *p, double x, double y, double aspect, uint64_t now_ms);
+/* Position for a wheel gesture, accepting fresh video within 20 model pixels.
+ * Returns readiness; clicks and held drags continue to require 4-pixel alignment. */
+bool ph_pointer_scroll_target(ph_pointer *p, double x, double y, double aspect, uint64_t now_ms);
 bool ph_pointer_button(ph_pointer *p, uint8_t button, bool down, double x, double y,
                        double aspect, uint64_t now_ms);
 void ph_pointer_ack(ph_pointer *p, uint32_t id, uint64_t now_ms);

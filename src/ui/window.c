@@ -237,8 +237,9 @@ ph_window *ph_window_create(const char *title)
                                  SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!w->window)
         goto fail;
-    w->renderer = SDL_CreateRenderer(w->window, -1,
-                                     SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    /* No vsync: presenting a frame must not block this thread, which also forwards
+     * mouse and keyboard input, for up to a whole display refresh. */
+    w->renderer = SDL_CreateRenderer(w->window, -1, SDL_RENDERER_ACCELERATED);
     if (!w->renderer) {
         PH_LOGW("no accelerated renderer (%s); using software rendering", SDL_GetError());
         w->renderer = SDL_CreateRenderer(w->window, -1, SDL_RENDERER_SOFTWARE);

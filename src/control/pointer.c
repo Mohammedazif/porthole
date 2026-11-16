@@ -5,6 +5,7 @@
 #define MODEL_WIDTH 500.0
 #define CORNER 16.0
 #define ALIGNMENT_PX 4.0
+#define SCROLL_ALIGNMENT_PX 20.0
 #define FRAME_SETTLE_MS 32
 #define FRAME_TIMEOUT_MS 700
 #define ACK_TIMEOUT_MS 3000
@@ -168,7 +169,9 @@ static void pump(ph_pointer *p)
             anchor(p);
         return;
     }
-    if (distance(x, y, p->actual_x, p->actual_y, p->aspect) > ALIGNMENT_PX) {
+    double tolerance = p->count || p->buttons || !p->target_tolerance
+                           ? ALIGNMENT_PX : p->target_tolerance;
+    if (distance(x, y, p->actual_x, p->actual_y, p->aspect) > tolerance) {
         if (p->attempts >= MAX_ATTEMPTS) {
             fail(p);
             return;
@@ -246,7 +249,8 @@ bool ph_pointer_set_scale(ph_pointer *p, double x, double y)
     return true;
 }
 
-bool ph_pointer_target(ph_pointer *p, double x, double y, double aspect, uint64_t now_ms)
+static bool target(ph_pointer *p, double x, double y, double aspect, uint64_t now_ms,
+                   double tolerance)
 {
     if (!p->enabled || !valid(x, y, aspect))
         return false;
@@ -268,15 +272,21 @@ bool ph_pointer_target(ph_pointer *p, double x, double y, double aspect, uint64_
     p->target_x = x;
     p->target_y = y;
     p->aspect = aspect;
+    p->target_tolerance = tolerance;
     p->active = true;
     if (p->phase == PH_POINTER_IDLE && p->known && !p->count && !p->buttons
         && now_ms - p->observed_at > POSITION_MAX_AGE_MS
-        && distance(x, y, p->actual_x, p->actual_y, aspect) <= ALIGNMENT_PX) {
+        && distance(x, y, p->actual_x, p->actual_y, aspect) <= tolerance) {
         reveal(p);
         return true;
     }
     pump(p);
     return true;
+}
+
+bool ph_pointer_target(ph_pointer *p, double x, double y, double aspect, uint64_t now_ms)
+{
+    return target(p, x, y, aspect, now_ms, ALIGNMENT_PX);
 }
 
 bool ph_pointer_button(ph_pointer *p, uint8_t button, bool down, double x, double y,
@@ -356,6 +366,8 @@ void ph_pointer_observe(ph_pointer *p, bool found, double x, double y, uint64_t 
     if (p->phase != PH_POINTER_WAIT_VIDEO || now_ms - p->wait_since < FRAME_SETTLE_MS
         || !found || !valid(x, y, p->aspect) || !held_observation(p, x, y))
         return;
+    if (distance(x, y, p->hint_x, p->hint_y, p->aspect) <= ALIGNMENT_PX)
+        p->attempts = 0; /* a moving target is progress, not a failure to converge */
     if (p->learn_move) {
         double width = model_width(p->aspect);
         p->scale_x = learned_scale(p->scale_x, p->sent_dx,
@@ -398,7 +410,7 @@ void ph_pointer_tick(ph_pointer *p, uint64_t now_ms)
     pump(p);
 }
 
-bool ph_pointer_ready(const ph_pointer *p, double x, double y, double aspect)
+static bool ready(const ph_pointer *p, double x, double y, double aspect, double tolerance)
 {
     if (!valid(x, y, aspect))
         return false;
@@ -406,7 +418,18 @@ bool ph_pointer_ready(const ph_pointer *p, double x, double y, double aspect)
     return p->enabled && p->known && p->phase == PH_POINTER_IDLE && !p->count && !p->buttons
            && fabs(p->aspect - aspect) < 0.0001
            && p->now_ms - p->observed_at <= POSITION_MAX_AGE_MS
-           && distance(x, y, p->actual_x, p->actual_y, aspect) <= ALIGNMENT_PX;
+           && distance(x, y, p->actual_x, p->actual_y, aspect) <= tolerance;
+}
+
+bool ph_pointer_ready(const ph_pointer *p, double x, double y, double aspect)
+{
+    return ready(p, x, y, aspect, ALIGNMENT_PX);
+}
+
+bool ph_pointer_scroll_target(ph_pointer *p, double x, double y, double aspect, uint64_t now_ms)
+{
+    return target(p, x, y, aspect, now_ms, SCROLL_ALIGNMENT_PX)
+           && ready(p, x, y, aspect, SCROLL_ALIGNMENT_PX);
 }
 
 bool ph_pointer_hint(const ph_pointer *p, double *x, double *y, double *radius)

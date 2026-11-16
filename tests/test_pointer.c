@@ -361,6 +361,63 @@ int main(void)
                                      f.events[pressed].y - .5 * 500 / .46) <= 4);
     CHECK(!f.pointer.buttons && !f.pointer.failed);
 
+    /* Small continuous target changes must not exhaust the retry budget while
+     * each acknowledged hop lands correctly. Input arrives before both the ACK
+     * and video, so the phone remains behind the newest target throughout. */
+    init(&f);
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true, .5, .2, .46, f.now));
+    settle(&f);
+    for (int i = 0; i < 30; i++) {
+        for (int j = 1; j <= 2; j++)
+            CHECK(ph_pointer_target(&f.pointer, .5, .2 + (2 * i + j) * .0028,
+                                    .46, ++f.now));
+        step(&f);
+        CHECK(f.pointer.buttons == PH_HID_BTN_LEFT && !f.pointer.failed);
+    }
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, false, .5, .368, .46, ++f.now));
+    settle(&f);
+    CHECK(!f.pointer.buttons && !f.pointer.failed && f.anchors == 8);
+    CHECK(hypot(f.x - 250, f.y - .368 * 500 / .46) <= 4);
+
+    /* Ignored reports still exhaust the bounded retry budget. */
+    init(&f);
+    CHECK(ph_pointer_target(&f.pointer, .5, .5, .46, f.now));
+    settle(&f);
+    f.true_x_scale = f.true_y_scale = 0;
+    CHECK(ph_pointer_target(&f.pointer, .8, .8, .46, ++f.now));
+    for (int i = 0; i < 400 && !f.pointer.failed; i++)
+        step(&f);
+    CHECK(f.pointer.failed && !f.pointer.known);
+    initial = f.count;
+    for (int i = 0; i < 20; i++)
+        step(&f);
+    CHECK(f.count == initial);
+
+    /* Wheel positioning tolerates a small video-confirmed offset. It must not
+     * stall on sub-pixel correction cycles, or relax the next click's accuracy. */
+    init(&f);
+    CHECK(ph_pointer_target(&f.pointer, .5, .5, .46, f.now));
+    settle(&f);
+    initial = f.count;
+    CHECK(ph_pointer_scroll_target(&f.pointer, .52, .5, .46, ++f.now));
+    CHECK(!ph_pointer_ready(&f.pointer, .52, .5, .46) && f.count == initial);
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true, .52, .5, .46, ++f.now));
+    CHECK(first_button(&f, PH_HID_BTN_LEFT) == f.count);
+    settle(&f);
+    pressed = first_button(&f, PH_HID_BTN_LEFT);
+    CHECK(pressed < f.count);
+    CHECK(hypot(f.events[pressed].x - 260, f.events[pressed].y - .5 * 500 / .46) <= 4);
+
+    init(&f);
+    CHECK(ph_pointer_target(&f.pointer, .5, .5, .46, f.now));
+    settle(&f);
+    CHECK(!ph_pointer_scroll_target(&f.pointer, .7, .5, .46, ++f.now));
+    settle(&f);
+    CHECK(ph_pointer_scroll_target(&f.pointer, .7, .5, .46, ++f.now));
+    f.now += 1600;
+    CHECK(!ph_pointer_scroll_target(&f.pointer, .7, .5, .46, f.now));
+    CHECK(f.pointer.phase == PH_POINTER_MOVING); /* stale video must be refreshed */
+
     /* Disconnection and bad inputs cannot emit mouse reports. */
     init(&f);
     CHECK(!ph_pointer_target(&f.pointer, NAN, .5, .46, f.now));
