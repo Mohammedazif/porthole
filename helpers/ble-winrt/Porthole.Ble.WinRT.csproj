@@ -10,6 +10,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <PublishSingleFile Condition="'$(SelfContained)' == 'true'">true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>embedded</DebugType>
+    <CopyOutputSymbolsToPublishDirectory>false</CopyOutputSymbolsToPublishDirectory>
     <PublishTrimmed>false</PublishTrimmed>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
@@ -19,7 +25,7 @@
     <Compile Include="PipeSessionLifetime.cs" />
     <Compile Include="AdvertisingStartupState.cs" />
     <Compile Include="WinRtHidPeripheral.cs" />
-    <ProjectReference Include="Core/Porthole.Ble.Core.csproj" />
+    <ProjectReference Include="Core/Porthole.Ble.Core.csproj" AdditionalProperties="DebugType=embedded" />
   </ItemGroup>
   <Target Name="PortholePublishNotices" AfterTargets="Publish">
     <ItemGroup>
@@ -29,7 +35,7 @@
         Condition="'%(ResolvedRuntimePack.NuGetPackageId)' == 'Microsoft.NETCore.App.Runtime.$(RuntimeIdentifier)'" />
       <_PortholeSdkMetadata Include="%(ResolvedRuntimePack.PackageDirectory)/microsoft.windows.sdk.net.ref.nuspec;%(ResolvedRuntimePack.PackageDirectory)/data/RuntimeList.xml"
         Condition="'%(ResolvedRuntimePack.NuGetPackageId)' == 'Microsoft.Windows.SDK.NET.Ref'" />
-      <_PortholeComponentInfo Include="SDK=$(NETCoreSdkVersion);TFM=$(TargetFramework);RID=$(RuntimeIdentifier);SelfContained=$(SelfContained)" />
+      <_PortholeComponentInfo Include="SDK=$(NETCoreSdkVersion);TFM=$(TargetFramework);RID=$(RuntimeIdentifier);SelfContained=$(SelfContained);PublishSingleFile=$(PublishSingleFile);IncludeNativeLibrariesForSelfExtract=$(IncludeNativeLibrariesForSelfExtract);IncludeAllContentForSelfExtract=$(IncludeAllContentForSelfExtract);EnableCompressionInSingleFile=$(EnableCompressionInSingleFile);PublishTrimmed=$(PublishTrimmed)" />
       <_PortholeComponentInfo Include="@(_PortholeBundledPack->'%(NuGetPackageId)=%(NuGetPackageVersion)')" />
     </ItemGroup>
     <Copy SourceFiles="@(_PortholeRuntimeNotice)" DestinationFolder="$(PublishDir)licenses/dotnet" Condition="'$(SelfContained)' == 'true'" />

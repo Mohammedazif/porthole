@@ -172,6 +172,12 @@ metadata and matching source archives. The CI full Windows job builds/tests this
 and uploads the portable bundle and sources. The no-AirPlay presets remain available as
 minimal build checks.
 
+For a one-file preview, [build the portable launcher](scripts/portable-windows/README.md)
+from that bundle. Users run one executable, which prepares its complete files under
+Windows TEMP and launches Porthole. The Bluetooth helper also embeds its own .NET runtime;
+copying it cannot omit separate runtime DLLs. This portable file installs no drivers or
+system services. Live Windows advertising/input validation remains pending.
+
 If the Windows firewall blocks discovery or mirroring, the bundle includes a reviewed
 `windows-firewall.ps1` helper for the mirror executable and fixed ports on Private networks.
 Installer/uninstaller work remains with the separate polish workstream.

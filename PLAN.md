@@ -131,6 +131,22 @@ now passes 11/11, including this sequence, deadline expiry and sticky failures.
 HID advertising. Retest it on the Windows host, then check iPhone subscriptions, typing,
 pointer/drag/wheel input and reconnect. Grok's items 5–7 remain excluded from this delivery.
 
+The subsequent `hostpolicy.dll` errors came from running the seven-file helper update
+in a separate directory without its runtime. The Windows folder listing confirmed those
+runtime files were absent. At the user's request, delivery now uses a one-file portable
+launcher and a genuinely self-contained Bluetooth helper. The helper's 43.97 MB executable
+contains a statically linked .NET 10 runtime and 178 verified bundled files; no adjacent
+runtime DLLs/configuration or installed .NET are needed.
+
+The outer launcher embeds the full native app, 86 runtime DLLs, helper, sources and licenses.
+It extracts into a unique user TEMP directory and opens Porthole automatically, with
+private runtime cache and diagnostic logs. A recursive verifier checks native import
+closure, safe paths, bundled assembly/configuration contents and the final executable's
+RCDATA ZIP. Seven negative cases reject partial or damaged helpers and missing native
+dependencies. Native Wine tests cover extraction/app startup success, extractor failure,
+missing helper and app startup failure, with actual execution markers and both log streams.
+Real system PowerShell extraction and iPhone Bluetooth still require the Windows retry.
+
 ---
 
 ## 1. Why this project

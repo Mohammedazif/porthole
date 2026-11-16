@@ -31,12 +31,23 @@ The `sync` reply confirms dispatch completion, not phone rendering.
 
 ## Build and diagnostic commands
 
-Use the .NET 10 SDK (a self-contained publish also bundles the .NET runtime):
+Use the .NET 10 SDK to create the Windows x64 single-file helper. The executable
+contains the .NET runtime, WinRT assemblies, helper assemblies and runtime
+configuration; running it does not require a separate .NET installation or
+adjacent runtime DLLs. Native and managed contents extract automatically into
+the current user's `%TEMP%\.net` cache when the executable starts. Trimming is
+disabled to preserve the WinRT projections.
 
 ```powershell
-dotnet publish helpers/ble-winrt/Porthole.Ble.WinRT.csproj -c Release -r win-x64 --self-contained true --artifacts-path build/dotnet -o build/ble-winrt
-.\build\ble-winrt\porthole-ble-winrt.exe --probe
+dotnet publish helpers/ble-winrt/Porthole.Ble.WinRT.csproj -c Release -r win-x64 --self-contained true --artifacts-path build/winrt-single-dotnet -o build/ble-winrt-single
+.\build\ble-winrt-single\porthole-ble-winrt.exe --probe
 ```
+
+Publish into a fresh output directory when changing from an older multi-file
+package. The output also contains `licenses/`, `COMPONENTS.txt` and this README;
+keep those notices in the distributed package. They are not runtime dependencies.
+The helper's name remains `porthole-ble-winrt.exe`, so the main app continues to
+launch it at `ble-winrt/porthole-ble-winrt.exe` inside a portable Porthole package.
 
 `--probe` checks hardware/access and actually creates HID 1812 and all its
 characteristics, without advertising or connecting. A successful probe prints
@@ -47,7 +58,7 @@ helper probe, so two processes do not compete to publish the same service.
 To test the next step, run:
 
 ```powershell
-.\build\ble-winrt\porthole-ble-winrt.exe --probe-advertising
+.\build\ble-winrt-single\porthole-ble-winrt.exe --probe-advertising
 ```
 
 This mode creates the full HID service, starts connectable/discoverable advertising,

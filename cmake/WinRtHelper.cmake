@@ -13,6 +13,7 @@ if(PORTHOLE_WITH_WINDOWS_BLUETOOTH)
     set(_ble_output "${CMAKE_CURRENT_BINARY_DIR}/ble-winrt")
     add_custom_command(
         OUTPUT "${_ble_output}/porthole-ble-winrt.exe"
+        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${_ble_output}"
         COMMAND "${DOTNET_EXECUTABLE}" publish "${_ble_project}"
             --configuration Release --runtime win-x64 --self-contained true
             --artifacts-path "${PROJECT_BINARY_DIR}/dotnet" --output "${_ble_output}"
