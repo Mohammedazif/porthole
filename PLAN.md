@@ -12,8 +12,9 @@
 The working controls run in the **Linux prototype in the VMware guest**. A full Windows
 Wi-Fi mirror now cross-builds with native discovery and portable dependencies. The user
 confirmed Windows host mirroring with the versioned preview. The item 4 WinRT Bluetooth
-helper and native process connection are implemented. The user's Windows host passed
-the real HID publication probe; iPhone pairing/input remain a host validation gate.
+helper and native process connection are implemented. A follow-up platform check established
+that the reported Bluetooth/pointer checks used the Linux VM; Windows HID publication,
+iPhone pairing and input remain unverified on the host.
 Windows CI is configured to build/test the full mirror and retain a minimal
 smoke build; this workstream did not trigger a remote CI run.
 The detailed M5 measurements later in this file include an archived experimental controller.
@@ -52,7 +53,7 @@ with Grok.
 | 1 | Cancellation retains helper ACK fences; pointer batches are capped at 24 reports; missing ACKs restart the helper without blocking rendering. F2 guides preparation, pairing, mirroring and transactional three-target calibration. Rapid-cancel, modal-input and reconnect tests pass; all three live calibration targets confirmed and saved on the final build. |
 | 2 | F3 and `--diagnostics` report local FPS, receive/decode/present, accepted input handoff, helper dispatch ACK and queue counters. Decoder generations prevent stale frames after reconnect. The actual Bluetooth radio interval remains unknown without a privileged trace. |
 | 3 | Native Windows DNS-SD replaces Bonjour, preserves protocol identity/TXT records, and builds the complete SDL/FFmpeg mirror. All 85 UCRT cross-build targets compile with warnings as errors. Portable runtime/source packaging and full MSYS2 CI are in place; the user confirmed host mirroring with preview c18f7ac. |
-| 4 | Native WinRT HID-over-GATT helper, Windows process/pipe transport, single-peer subscription gates, existing input protocol and guided setup integration. The user's host passed the real HID publication/peripheral-role probe; iPhone pairing/input validation remains pending. |
+| 4 | Native WinRT HID-over-GATT helper, Windows process/pipe transport, single-peer subscription gates, existing input protocol and guided setup integration. Automated checks pass; actual Windows host publication, pairing and input remain pending after clarification that the hands-on checks used Linux. |
 
 1. **Linux controls — baseline delivered:** bounded pointer recovery, long-list edge checks,
    drag/release regressions and guided AssistiveTouch, pairing and calibration setup.
@@ -67,8 +68,8 @@ with Grok.
    mirroring; repeat native MSYS2 CI and wider network/host testing before release.
 4. **Windows control — native implementation delivered, host check pending:** WinRT
    GATT HID helper and process transport, encrypted pairing, per-phone subscriptions,
-   paced keyboard/mouse/consumer input and F2 setup. The host adapter probe passed;
-   validate pairing, typing, pointer/calibration, wheel edges and reconnect on the
+   paced keyboard/mouse/consumer input and F2 setup. Run the actual Windows host probe,
+   then validate pairing, typing, pointer/calibration, wheel edges and reconnect on the
    Windows host. Windows owns the radio interval; software pacing is not that interval.
    An ESP32 fallback remains future work for hosts without BLE peripheral support.
 5. **Everyday-use polish (v0.2):** audio/video sync and audio UI, fullscreen/always-on-top/
@@ -109,11 +110,12 @@ PASS marker and verifies Unicode/quoting, inherited-handle isolation, partial I/
 hung stdin, early stdout EOF, descendant-held output, termination and no handle leaks.
 Logs are `build/live/item4-final-{windows,linux,windows-link}.log`.
 
-The user ran the real Windows hardware probe and reported
-`probe ok peripheral=true hid_service=1812`. This confirms creation of the full HID
-service on that adapter, without advertising. Live iPhone pairing, report subscriptions,
-typing, pointer/drag/wheel input and reconnect still require the full preview check.
-Grok's items 5–7 remain excluded from this delivery.
+The initially reported probe and pointer/click successes were subsequently clarified to
+have used **Porthole inside the Linux VM**. They do not validate the Windows backend.
+Run `ble-winrt/porthole-ble-winrt.exe --probe` on the Windows host outside VMware;
+then check iPhone pairing/subscriptions, typing, pointer/drag/wheel input and reconnect
+with the full preview. All Windows hardware checks remain pending. Grok's items 5–7
+remain excluded from this delivery.
 
 ---
 
