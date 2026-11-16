@@ -17,8 +17,10 @@ typedef void (*ph_hid_link_status_fn)(void *user, const char *line);
 /* Starts the helper (`argv[0]` is looked up in PATH). NULL on failure (logged). */
 ph_hid_link *ph_hid_link_start(char *const argv[], ph_hid_link_status_fn on_status, void *user);
 
-/* Queue reports; the helper sends them one at a time at its fixed interval.
- * These return false if the helper is gone. Main thread only. */
+/* Queue reports. The helper sends mouse reports, sync and delay one at a time at its
+ * fixed interval; keyboard and consumer reports use a second lane of their own, so a
+ * key press never waits behind queued pointer movement. Order is kept within a lane,
+ * not between the two. These return false if the helper is gone. Main thread only. */
 bool ph_hid_link_keyboard(ph_hid_link *l, const ph_hid_keyboard *k);
 bool ph_hid_link_mouse(ph_hid_link *l, const ph_hid_mouse *m);
 bool ph_hid_link_consumer(ph_hid_link *l, uint16_t usage);

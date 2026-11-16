@@ -9,8 +9,13 @@ stdin, binary frames  [type: 1 byte][length: 1 byte][payload]
   3  consumer report (2 bytes)      16 sync (4 bytes, little-endian id)
   17 report interval (2 bytes, little-endian milliseconds)
   18 pause after preceding reports (2 bytes, little-endian milliseconds)
-Reports are sent one at a time, a fixed interval apart (default 15 ms): iOS pointer
-acceleration depends on the timing, and Porthole's pointer model was measured at 15 ms.
+Reports travel in two independent lanes, each sent one at a time, a fixed interval apart
+(15 ms): iOS pointer acceleration depends on the timing, and Porthole's pointer model was
+measured at 15 ms.
+  motion lane: mouse reports, sync, interval and pause frames, strictly in order
+  key lane:    keyboard and consumer reports, strictly in order
+A key press therefore never waits behind queued pointer movement or a pause. "sync"
+acknowledges the motion lane only.
 
 stdout, text lines
   ready | advertising | connected | disconnected | subscribed | sync <id> | error <message>
@@ -56,6 +61,7 @@ AGENT_PATH = "/org/porthole/agent"
 FRAME_KEYBOARD, FRAME_MOUSE, FRAME_CONSUMER = 1, 2, 3
 FRAME_SYNC, FRAME_INTERVAL = 16, 17
 FRAME_DELAY = 18
+KEY_LANE = (FRAME_KEYBOARD, FRAME_CONSUMER)
 
 DEFAULT_DESCRIPTOR_SOURCE = Path(__file__).resolve().parents[2] / "src" / "hid" / "hid_reports.c"
 
@@ -184,7 +190,7 @@ class Characteristic(dbus.service.Object):
 
     @dbus.service.method(GATT_CHRC_IFACE)
     def StopNotify(self):
-        pass
+        self.subscribed_at = 0.0
 
     @dbus.service.signal(DBUS_PROP_IFACE, signature="sa{sv}as")
     def PropertiesChanged(self, interface, changed, invalidated):
@@ -337,8 +343,11 @@ def read_exact(stream, n):
     return data
 
 
-def stdin_reader(out_queue):
-    """Parses frames from the app; puts (type, payload) on the queue; None at EOF."""
+def stdin_reader(out_queue, key_queue=None):
+    """Parses frames from the app; puts (type, payload) on a queue; None at EOF.
+
+    With a key queue, keyboard and consumer reports go there so typing never waits
+    behind queued pointer movement."""
     # This daemon thread can still be blocked when advertising fails and main exits.
     # An unbuffered duplicate avoids holding stdin's BufferedReader lock at shutdown.
     stream = os.fdopen(os.dup(sys.stdin.fileno()), "rb", buffering=0)
@@ -353,17 +362,25 @@ def stdin_reader(out_queue):
         if EXPECTED_LEN.get(ftype) != length:
             emit(f"error bad frame type {ftype} length {length}")
             continue
-        out_queue.put((ftype, payload))
+        if key_queue is not None and ftype in KEY_LANE:
+            key_queue.put((ftype, payload))
+        else:
+            out_queue.put((ftype, payload))
+    if key_queue is not None:
+        key_queue.put(None)
     out_queue.put(None)
 
 
-def sender(in_queue, reports, loop):
-    """Sends queued reports one per interval on the GLib main loop."""
+def sender(in_queue, reports, loop, quit_at_eof=True, wait_for=None):
+    """Sends one lane's queued reports; waits for the other lane before quitting."""
     interval = 0.015
     while True:
         item = in_queue.get()
         if item is None:
-            GLib.idle_add(loop.quit)
+            if quit_at_eof:
+                if wait_for is not None:
+                    wait_for.join()
+                GLib.idle_add(loop.quit)
             return
         ftype, payload = item
         if ftype == FRAME_SYNC:
@@ -460,17 +477,29 @@ def main():
     agent_mgr.RegisterAgent(AGENT_PATH, "NoInputNoOutput")
     agent_mgr.RequestDefaultAgent(AGENT_PATH)
 
+    advertising_started = [False]
+
     def register_app(fatal=True):
+        def registered():
+            # BlueZ fetches our objects asynchronously. Advertising before that
+            # finishes lets a fast reconnect discover an incomplete HID service.
+            if not advertising_started[0]:
+                advertising_started[0] = True
+                adv_mgr.RegisterAdvertisement(adv.get_path(), {}, reply_handler=advertised,
+                                              error_handler=adv_failed)
+
         def failed(e):
             emit(f"error registering the HID service: {e}")
             if fatal:
                 loop.quit()
-        gatt_mgr.RegisterApplication(app.get_path(), {}, reply_handler=lambda: None,
+        gatt_mgr.RegisterApplication(app.get_path(), {}, reply_handler=registered,
                                      error_handler=failed)
         return False
 
     def reregister():
         """iOS rediscovers the services and subscribes again after this."""
+        for report in reports.values():
+            report.subscribed_at = 0.0  # a replaced service cannot reuse its old CCC state
         try:
             gatt_mgr.UnregisterApplication(APP_PATH)
         except dbus.exceptions.DBusException:
@@ -486,8 +515,11 @@ def main():
         loop.quit()
 
     register_app()
-    adv_mgr.RegisterAdvertisement(adv.get_path(), {}, reply_handler=advertised,
-                                  error_handler=adv_failed)
+
+    subscribed_announced = [0.0]
+    connected_since = [0.0]
+    connected_path = [None]
+    connection_generation = [0]
 
     def drop_stale_links():
         """An iPhone still connected from an earlier session keeps its old subscriptions,
@@ -496,7 +528,8 @@ def main():
         objects = dbus.Interface(bus.get_object(BLUEZ, "/"), DBUS_OM_IFACE).GetManagedObjects()
         for path, ifaces in objects.items():
             dev = ifaces.get(DEVICE_IFACE)
-            if dev and dev.get("Connected") and not reports_subscribed(reports):
+            if (dev and dev.get("Connected") and str(path) != connected_path[0]
+                    and not reports_subscribed(reports)):
                 log(f"dropping stale connection {path} so it subscribes again")
                 try:
                     dbus.Interface(bus.get_object(BLUEZ, path), DEVICE_IFACE).Disconnect(
@@ -508,9 +541,6 @@ def main():
 
     GLib.timeout_add(2000, drop_stale_links)
 
-    subscribed_announced = [0.0]
-    connected_since = [0.0]
-
     def on_subscribe():
         if (reports_subscribed(reports, connected_since[0])
                 and time.time() - subscribed_announced[0] > 1.0):
@@ -519,7 +549,9 @@ def main():
     for report in reports.values():
         report.on_subscribe = on_subscribe
 
-    def reconnect_if_stale(path, connected_at):
+    def reconnect_if_stale(path, connected_at, generation):
+        if generation != connection_generation[0] or path != connected_path[0]:
+            return False  # a timer from an old link must never disconnect a new one
         if reports_subscribed(reports, connected_at):
             return False
         try:
@@ -533,11 +565,13 @@ def main():
             log(f"checking stale link failed: {e}")
         return False
 
-    def check_resubscribed(connected_at, path):
+    def check_resubscribed(connected_at, path, generation):
+        if generation != connection_generation[0] or path != connected_path[0]:
+            return False
         if not reports_subscribed(reports, connected_at):
             log("iPhone reconnected without subscribing; re-registering the HID service")
             reregister()
-            GLib.timeout_add(1500, reconnect_if_stale, path, connected_at)
+            GLib.timeout_add(1500, reconnect_if_stale, path, connected_at, generation)
         return False
 
     def on_device_changed(interface, changed, invalidated, path=None):
@@ -545,11 +579,27 @@ def main():
             return
         dev = dbus.Interface(bus.get_object(BLUEZ, path), DBUS_PROP_IFACE)
         if "Connected" in changed:
+            connection_generation[0] += 1
             if changed["Connected"]:
                 connected_since[0] = time.time()
+                connected_path[0] = str(path)
                 emit("connected")
-                GLib.timeout_add(3000, check_resubscribed, connected_since[0], str(path))
+                # BlueZ retains enabled notifications for bonded peers across
+                # link loss. iOS need not call StartNotify again in this service
+                # instance; demanding fresh timestamps would disable valid input.
+                try:
+                    cached = reports_subscribed(reports) and dev.Get(DEVICE_IFACE, "Bonded")
+                except dbus.exceptions.DBusException:
+                    cached = False
+                if cached:
+                    subscribed_announced[0] = time.time()
+                    emit("subscribed")
+                else:
+                    # Allow encryption and service discovery to finish before recovery.
+                    GLib.timeout_add(15000, check_resubscribed, connected_since[0], str(path),
+                                     connection_generation[0])
             else:
+                connected_path[0] = None
                 emit("disconnected")
         if changed.get("Paired"):
             dev.Set(DEVICE_IFACE, "Trusted", dbus.Boolean(True))
@@ -557,9 +607,13 @@ def main():
     bus.add_signal_receiver(on_device_changed, dbus_interface=DBUS_PROP_IFACE,
                             signal_name="PropertiesChanged", path_keyword="path")
 
-    frames = queue.Queue()
-    threading.Thread(target=stdin_reader, args=(frames,), daemon=True).start()
-    threading.Thread(target=sender, args=(frames, reports, loop), daemon=True).start()
+    frames, key_frames = queue.Queue(), queue.Queue()
+    threading.Thread(target=stdin_reader, args=(frames, key_frames), daemon=True).start()
+    key_sender = threading.Thread(target=sender, args=(key_frames, reports, loop, False),
+                                  daemon=True)
+    key_sender.start()
+    threading.Thread(target=sender, args=(frames, reports, loop),
+                     kwargs={"wait_for": key_sender}, daemon=True).start()
     for sig in (signal.SIGINT, signal.SIGTERM):
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, loop.quit)
 

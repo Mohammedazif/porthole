@@ -14,7 +14,8 @@ enum {
     PH_LINK_KEYBOARD = 1, /* 8-byte keyboard report */
     PH_LINK_MOUSE = 2,    /* 7-byte mouse report */
     PH_LINK_CONSUMER = 3, /* 2-byte consumer report */
-    PH_LINK_SYNC = 16,    /* 4-byte id: helper prints "sync <id>" once everything before is sent */
+    /* 4-byte id: the helper prints "sync <id>" once the mouse reports before it are sent */
+    PH_LINK_SYNC = 16,
     PH_LINK_INTERVAL = 17, /* 2-byte milliseconds between reports */
     PH_LINK_DELAY = 18     /* 2-byte pause in milliseconds, after all preceding reports */
 };
