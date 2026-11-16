@@ -13,8 +13,9 @@ The working controls run in the **Linux prototype in the VMware guest**. A full 
 Wi-Fi mirror now cross-builds with native discovery and portable dependencies. The user
 confirmed Windows host mirroring with the versioned preview. The item 4 WinRT Bluetooth
 helper and native process connection are implemented. A follow-up platform check established
-that the reported Bluetooth/pointer checks used the Linux VM; Windows HID publication,
-iPhone pairing and input remain unverified on the host.
+that the first reported Bluetooth/pointer checks used the Linux VM. Actual Windows logs
+then confirmed video and full HID creation, but advertising aborted during startup.
+The startup fix is ready; Windows advertising, iPhone pairing and input need a retest.
 Windows CI is configured to build/test the full mirror and retain a minimal
 smoke build; this workstream did not trigger a remote CI run.
 The detailed M5 measurements later in this file include an archived experimental controller.
@@ -53,7 +54,7 @@ with Grok.
 | 1 | Cancellation retains helper ACK fences; pointer batches are capped at 24 reports; missing ACKs restart the helper without blocking rendering. F2 guides preparation, pairing, mirroring and transactional three-target calibration. Rapid-cancel, modal-input and reconnect tests pass; all three live calibration targets confirmed and saved on the final build. |
 | 2 | F3 and `--diagnostics` report local FPS, receive/decode/present, accepted input handoff, helper dispatch ACK and queue counters. Decoder generations prevent stale frames after reconnect. The actual Bluetooth radio interval remains unknown without a privileged trace. |
 | 3 | Native Windows DNS-SD replaces Bonjour, preserves protocol identity/TXT records, and builds the complete SDL/FFmpeg mirror. All 85 UCRT cross-build targets compile with warnings as errors. Portable runtime/source packaging and full MSYS2 CI are in place; the user confirmed host mirroring with preview c18f7ac. |
-| 4 | Native WinRT HID-over-GATT helper, Windows process/pipe transport, single-peer subscription gates, existing input protocol and guided setup integration. Automated checks pass; actual Windows host publication, pairing and input remain pending after clarification that the hands-on checks used Linux. |
+| 4 | Native WinRT HID-over-GATT helper, Windows process/pipe transport, single-peer subscription gates, existing input protocol and guided setup integration. Actual host logs confirm HID creation; initial advertising aborted. The startup-sequence fix passes 11 portable checks and awaits a Windows retest, pairing and input validation. |
 
 1. **Linux controls — baseline delivered:** bounded pointer recovery, long-list edge checks,
    drag/release regressions and guided AssistiveTouch, pairing and calibration setup.
@@ -68,8 +69,9 @@ with Grok.
    mirroring; repeat native MSYS2 CI and wider network/host testing before release.
 4. **Windows control — native implementation delivered, host check pending:** WinRT
    GATT HID helper and process transport, encrypted pairing, per-phone subscriptions,
-   paced keyboard/mouse/consumer input and F2 setup. Run the actual Windows host probe,
-   then validate pairing, typing, pointer/calibration, wheel edges and reconnect on the
+   paced keyboard/mouse/consumer input and F2 setup. HID creation passed on the actual
+   host; retest advertising with `--probe-advertising`, then validate pairing, typing,
+   pointer/calibration, wheel edges and reconnect on the
    Windows host. Windows owns the radio interval; software pacing is not that interval.
    An ESP32 fallback remains future work for hosts without BLE peripheral support.
 5. **Everyday-use polish (v0.2):** audio/video sync and audio UI, fullscreen/always-on-top/
@@ -112,10 +114,22 @@ Logs are `build/live/item4-final-{windows,linux,windows-link}.log`.
 
 The initially reported probe and pointer/click successes were subsequently clarified to
 have used **Porthole inside the Linux VM**. They do not validate the Windows backend.
-Run `ble-winrt/porthole-ble-winrt.exe --probe` on the Windows host outside VMware;
-then check iPhone pairing/subscriptions, typing, pointer/drag/wheel input and reconnect
-with the full preview. All Windows hardware checks remain pending. Grok's items 5–7
-remain excluded from this delivery.
+The later actual Windows log confirms BLE peripheral support, full encrypted HID 1812
+creation and 500x1080 live video, but shows `Aborted (Success)` about 20 ms after each
+advertising request. The old helper exited immediately on that callback, preventing any
+later `Started` event from being observed.
+
+A [primary implementation's measured startup sequence](https://github.com/abhishek-raj/windows-ble-hid/blob/main/DEVELOPMENT.md#advertising-facts)
+records an initial `Aborted` followed by `Started`. The fix keeps only initial
+`Aborted/Success` pending within the original 12-second deadline. It never reports
+advertising until `Started`/partial-start; actual errors, stops and established-session
+aborts remain fatal, and failure wins a concurrent Started callback. The portable suite
+now passes 11/11, including this sequence, deadline expiry and sticky failures.
+
+`--probe` still checks creation without advertising. With Porthole closed,
+`ble-winrt/porthole-ble-winrt.exe --probe-advertising` now tests two seconds of actual
+HID advertising. Retest it on the Windows host, then check iPhone subscriptions, typing,
+pointer/drag/wheel input and reconnect. Grok's items 5–7 remain excluded from this delivery.
 
 ---
 

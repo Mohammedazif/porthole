@@ -41,8 +41,30 @@ dotnet publish helpers/ble-winrt/Porthole.Ble.WinRT.csproj -c Release -r win-x64
 `--probe` checks hardware/access and actually creates HID 1812 and all its
 characteristics, without advertising or connecting. A successful probe prints
 `probe ok peripheral=true hid_service=1812` and exits. It does not prove iPhone
-pairing, subscription or input delivery. Test those on the Windows host through
-Porthole after the probe. An unavailable peripheral role is a driver/hardware
+pairing, subscription or input delivery. Close Porthole before running a standalone
+helper probe, so two processes do not compete to publish the same service.
+
+To test the next step, run:
+
+```powershell
+.\build\ble-winrt\porthole-ble-winrt.exe --probe-advertising
+```
+
+This mode creates the full HID service, starts connectable/discoverable advertising,
+and waits for two seconds of established advertising before printing
+`probe ok advertising=true stable_seconds=2 hid_service=1812`. The PC can briefly
+appear in nearby devices during this check. It then stops advertising and exits;
+Bluetooth pairing and input delivery still require Porthole's live connection test.
+
+Some Windows drivers emit an initial `Aborted` event with `Error=Success` before
+`Started`. The helper keeps that initial event pending within the existing
+12-second startup deadline; it prints `advertising` only after `Started` or
+`StartedWithoutAllAdvertisementData`. A real error, timeout, or advertising loss
+after startup remains fatal. Diagnostic lines include elapsed startup time and
+both the event's status and the provider's current status.
+
+Test pairing, subscriptions and input delivery on the Windows host through
+Porthole after the probes. An unavailable peripheral role is a driver/hardware
 limitation: Wi-Fi viewing remains available.
 
 `--descriptor` prints the report map as lowercase hexadecimal without touching

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Porthole.Ble.Core;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
@@ -12,6 +13,9 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
 {
     private readonly object stateLock = new();
     private readonly PipeSessionLifetime pipeLifetime = new();
+    private readonly AdvertisingStartupState advertising = new();
+    private readonly Stopwatch advertisingClock = new();
+    private int advertisingAttempt;
     private readonly SessionGate gate;
     private readonly Action<string> status;
     private readonly Action<string> log;
@@ -143,27 +147,75 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
 
     public async Task StartAsync(CancellationToken ct)
     {
+        lock (stateLock)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            advertising.RequestStart();
+            advertisingClock.Restart();
+            advertisingAttempt++;
+            log($"HID advertising attempt {advertisingAttempt}: connectable=true discoverable=true, initial provider state={provider!.AdvertisementStatus}.");
+        }
+        if (failure.Task.IsCompleted) throw await failure.Task;
         provider!.StartAdvertising(new GattServiceProviderAdvertisingParameters
         {
             IsConnectable = true,
             IsDiscoverable = true
         });
+        if (failure.Task.IsCompleted) throw await failure.Task;
         Task finished = await Task.WhenAny(started.Task, failure.Task, Task.Delay(TimeSpan.FromSeconds(12), ct));
         ct.ThrowIfCancellationRequested();
-        if (finished == failure.Task)
-            throw await failure.Task;
+        // When a fatal callback and Started race, failure always wins.
+        if (failure.Task.IsCompleted) throw await failure.Task;
         if (finished != started.Task)
-            throw new TimeoutException("Windows did not start HID advertising. Turn Bluetooth off/on in Windows, close other peripheral publishers, then run --probe.");
+        {
+            lock (stateLock)
+            {
+                if (advertising.Timeout() == AdvertisingAction.Failed)
+                {
+                    log($"HID advertising attempt {advertisingAttempt} timed out at {advertisingClock.ElapsedMilliseconds}ms; provider state={provider.AdvertisementStatus}.");
+                    failure.TrySetResult(new TimeoutException(
+                        "Windows did not start HID advertising within 12 seconds. Check Bluetooth advertising/discoverability policy, close other peripheral publishers and run --probe-advertising."));
+                }
+            }
+            if (failure.Task.IsCompleted) throw await failure.Task;
+        }
         await started.Task;
+        if (failure.Task.IsCompleted) throw await failure.Task;
+    }
+
+    public async Task WaitForStableAdvertisingAsync(TimeSpan duration, CancellationToken ct)
+    {
+        if (failure.Task.IsCompleted) throw await failure.Task;
+        await Task.WhenAny(failure.Task, Task.Delay(duration, ct));
+        ct.ThrowIfCancellationRequested();
+        if (failure.Task.IsCompleted) throw await failure.Task;
+        lock (stateLock)
+        {
+            if (!advertising.Established || advertising.Failed || provider!.AdvertisementStatus is not
+                (GattServiceProviderAdvertisementStatus.Started or GattServiceProviderAdvertisementStatus.StartedWithoutAllAdvertisementData))
+                throw new InvalidOperationException("HID advertising did not remain active during the diagnostic check.");
+            log($"HID advertising attempt {advertisingAttempt} stable for {duration.TotalSeconds:0.0}s; provider state={provider!.AdvertisementStatus}.");
+        }
+        if (failure.Task.IsCompleted) throw await failure.Task;
     }
 
     private void AdvertisementChanged(GattServiceProvider sender, GattServiceProviderAdvertisementStatusChangedEventArgs args)
     {
         lock (stateLock)
         {
-            if (disposed) return;
-            log($"HID advertising status: {args.Status} ({args.Error}).");
-            if (args.Status is GattServiceProviderAdvertisementStatus.Started or GattServiceProviderAdvertisementStatus.StartedWithoutAllAdvertisementData)
+            if (disposed || sender != provider) return;
+            log($"HID advertising attempt {advertisingAttempt} +{advertisingClock.ElapsedMilliseconds}ms: reported={args.Status}, error={args.Error}, provider={sender.AdvertisementStatus}.");
+            AdvertisingState observed = args.Status switch
+            {
+                GattServiceProviderAdvertisementStatus.Created => AdvertisingState.Created,
+                GattServiceProviderAdvertisementStatus.Stopped => AdvertisingState.Stopped,
+                GattServiceProviderAdvertisementStatus.Started => AdvertisingState.Started,
+                GattServiceProviderAdvertisementStatus.Aborted => AdvertisingState.Aborted,
+                GattServiceProviderAdvertisementStatus.StartedWithoutAllAdvertisementData => AdvertisingState.Partial,
+                _ => AdvertisingState.Aborted
+            };
+            AdvertisingAction action = advertising.Observe(observed, args.Error != BluetoothError.Success);
+            if (action == AdvertisingAction.Started)
             {
                 if (!advertisingReported)
                 {
@@ -172,12 +224,16 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
                 }
                 started.TrySetResult();
             }
-            else if (args.Status is GattServiceProviderAdvertisementStatus.Aborted or GattServiceProviderAdvertisementStatus.Stopped)
+            else if (action == AdvertisingAction.Failed)
             {
                 DropPeerLocked();
                 failure.TrySetResult(args.Error == BluetoothError.Success
-                    ? new InvalidOperationException("Windows stopped HID advertising. Check that Bluetooth is on and run --probe again.")
+                    ? new InvalidOperationException("Windows stopped HID advertising. Check Bluetooth advertising/discoverability policy and run --probe-advertising again.")
                     : BluetoothFailure("advertise the HID service", args.Error));
+            }
+            else if (action == AdvertisingAction.Pending && observed == AdvertisingState.Aborted)
+            {
+                log("Initial Aborted/Success notification is pending; waiting for Started within the 12-second startup deadline.");
             }
         }
     }
@@ -462,6 +518,7 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         {
             if (disposed) return ValueTask.CompletedTask;
             disposed = true;
+            advertising.RequestStop();
             DropPeerLocked();
             if (provider is not null)
             {

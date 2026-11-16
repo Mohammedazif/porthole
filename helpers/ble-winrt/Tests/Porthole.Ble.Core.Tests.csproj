@@ -9,5 +9,6 @@
   <ItemGroup>
     <ProjectReference Include="../Core/Porthole.Ble.Core.csproj" />
     <Compile Include="../PipeSessionLifetime.cs" Link="PipeSessionLifetime.cs" />
+    <Compile Include="../AdvertisingStartupState.cs" Link="AdvertisingStartupState.cs" />
   </ItemGroup>
 </Project>

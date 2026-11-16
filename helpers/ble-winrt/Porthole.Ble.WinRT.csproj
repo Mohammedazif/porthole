@@ -17,6 +17,7 @@
     <None Update="licenses/*" PortholeNotice="true" />
     <Compile Include="Program.cs" />
     <Compile Include="PipeSessionLifetime.cs" />
+    <Compile Include="AdvertisingStartupState.cs" />
     <Compile Include="WinRtHidPeripheral.cs" />
     <ProjectReference Include="Core/Porthole.Ble.Core.csproj" />
   </ItemGroup>

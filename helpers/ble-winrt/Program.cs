@@ -39,14 +39,16 @@ internal static class Program
         }
         if (args.Length == 1 && args[0] is "--help" or "-h")
         {
-            Console.WriteLine("porthole-ble-winrt [--probe | --descriptor]");
+            Console.WriteLine("porthole-ble-winrt [--probe | --probe-advertising | --descriptor]");
             Console.WriteLine("Without arguments, reads Porthole binary input frames from stdin.");
             Console.WriteLine("--probe checks the local adapter and creates the HID service without advertising.");
+            Console.WriteLine("--probe-advertising additionally advertises HID for two seconds; the PC can briefly be discovered.");
             Console.WriteLine("Pair the PC's Windows Bluetooth name; this helper does not rename the computer.");
             return 0;
         }
         bool probe = args.Length == 1 && args[0] == "--probe";
-        if (args.Length != 0 && !probe)
+        bool probeAdvertising = args.Length == 1 && args[0] == "--probe-advertising";
+        if (args.Length != 0 && !probe && !probeAdvertising)
         {
             Status("error invalid arguments; use --help");
             return 2;
@@ -72,11 +74,19 @@ internal static class Program
             }
             Status("ready");
             await peripheral.StartAsync(shutdown.Token);
+            if (probeAdvertising)
+            {
+                await peripheral.WaitForStableAdvertisingAsync(TimeSpan.FromSeconds(2), shutdown.Token);
+                if (peripheral.Failure.IsCompleted) throw await peripheral.Failure;
+                Status("probe ok advertising=true stable_seconds=2 hid_service=1812");
+                return 0;
+            }
             using Stream input = Console.OpenStandardInput();
             var runner = new ProtocolRunner(gate, peripheral, Status);
             Task running = runner.RunAsync(input, shutdown.Token);
-            Task completed = await Task.WhenAny(running, peripheral.Failure);
-            if (completed == peripheral.Failure)
+            if (!peripheral.Failure.IsCompleted)
+                await Task.WhenAny(running, peripheral.Failure);
+            if (peripheral.Failure.IsCompleted)
             {
                 shutdown.Cancel();
                 // A broken native pipe must not prevent this helper from terminating.
@@ -85,6 +95,7 @@ internal static class Program
                 throw await peripheral.Failure;
             }
             await running;
+            if (peripheral.Failure.IsCompleted) throw await peripheral.Failure;
             return 0;
         }
         catch (OperationCanceledException) when (shutdown.IsCancellationRequested)

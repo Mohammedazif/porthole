@@ -107,6 +107,60 @@ internal static class Program
         Check(reports.Count(Nonzero) == 2 && reports.TakeLast(3).All(n => !Nonzero(n)), "Key/consumer drain or releases were lost.");
     }
 
+    private static Task AdvertisingStartup()
+    {
+        var transient = new AdvertisingStartupState();
+        Check(transient.Observe(AdvertisingState.Aborted, false) == AdvertisingAction.Ignored,
+            "Unrequested callback changed startup.");
+        transient.RequestStart();
+        Check(transient.Observe(AdvertisingState.Created, false) == AdvertisingAction.Pending,
+            "Created was treated as advertising.");
+        Check(transient.Observe(AdvertisingState.Aborted, false) == AdvertisingAction.Pending
+            && !transient.Established && !transient.Failed, "Initial Aborted(Success) was fatal or ready.");
+        Check(transient.Observe(AdvertisingState.Started, false) == AdvertisingAction.Started
+            && transient.Established, "Transient abort could not recover to Started.");
+        Check(transient.Observe(AdvertisingState.Started, false) == AdvertisingAction.Ignored,
+            "Duplicate Started emitted a second transition.");
+        Check(transient.Observe(AdvertisingState.Aborted, false) == AdvertisingAction.Failed
+            && transient.Observe(AdvertisingState.Started, false) == AdvertisingAction.Failed,
+            "Established abort or late Started bypassed sticky failure.");
+
+        var partial = new AdvertisingStartupState(); partial.RequestStart();
+        Check(partial.Observe(AdvertisingState.Partial, false) == AdvertisingAction.Started
+            && partial.Established && partial.Timeout() == AdvertisingAction.Started,
+            "Partial advertising was not accepted.");
+        Check(partial.Observe(AdvertisingState.Stopped, false) == AdvertisingAction.Failed,
+            "Established Stopped was not fatal.");
+
+        var neverStarted = new AdvertisingStartupState(); neverStarted.RequestStart();
+        Check(neverStarted.Observe(AdvertisingState.Aborted, false) == AdvertisingAction.Pending
+            && neverStarted.Observe(AdvertisingState.Aborted, false) == AdvertisingAction.Pending
+            && neverStarted.Timeout() == AdvertisingAction.Failed
+            && neverStarted.Observe(AdvertisingState.Started, false) == AdvertisingAction.Failed,
+            "Repeated initial aborts extended readiness beyond the startup deadline.");
+        foreach (AdvertisingState state in Enum.GetValues<AdvertisingState>())
+        {
+            var error = new AdvertisingStartupState(); error.RequestStart();
+            Check(error.Observe(state, true) == AdvertisingAction.Failed && error.Failed,
+                "Real Bluetooth error was not immediately fatal.");
+        }
+        var unexpectedStop = new AdvertisingStartupState(); unexpectedStop.RequestStart();
+        Check(unexpectedStop.Observe(AdvertisingState.Stopped, false) == AdvertisingAction.Failed,
+            "Pre-start Stopped was accidentally tolerated.");
+        foreach (bool established in new[] { false, true })
+        {
+            var stopped = new AdvertisingStartupState(); stopped.RequestStart();
+            if (established) stopped.Observe(AdvertisingState.Started, false);
+            stopped.RequestStop();
+            foreach (AdvertisingState state in Enum.GetValues<AdvertisingState>())
+                Check(stopped.Observe(state, true) == AdvertisingAction.Ignored,
+                    "Expected stop/cancellation callback mutated the attempt.");
+            Check(stopped.Timeout() == AdvertisingAction.Ignored && !stopped.Failed,
+                "Intentional shutdown created a startup failure.");
+        }
+        return Task.CompletedTask;
+    }
+
     private static async Task PacingAndOrder()
     {
         using var f = new Fixture();
@@ -215,6 +269,7 @@ internal static class Program
         [
             ("descriptor matches C", Descriptor), ("split/complete/malformed framing", Framing),
             ("readiness, stale sessions and pipe lifetime", ReadinessAndPipeLifetime),
+            ("advertising startup transitions", AdvertisingStartup),
             ("empty fence, priming and EOF releases", EmptyFenceAndEof), ("motion order and pacing", PacingAndOrder),
             ("independent keyboard lane", IndependentLanes), ("dispatch ACK and failure", AwaitDispatchAndFailure),
             ("queued epoch/client isolation", EpochIsolation), ("invalid input and bounded queues", BadInputAndOverflow),
