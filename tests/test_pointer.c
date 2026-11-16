@@ -17,7 +17,8 @@ typedef struct fixture {
     event events[2048];
     size_t count;
     unsigned int anchors, syncs, motion_since_sync, max_motion_batch;
-    double x, y, true_x_scale, true_y_scale;
+    double x, y, true_x_scale, true_y_scale, true_linear, true_quadratic;
+    bool bounded_video;
     uint64_t now;
 } fixture;
 
@@ -30,10 +31,10 @@ static int failures;
         }                                                                                          \
     } while (0)
 
-static double travel(int value)
+static double travel(const fixture *f, int value)
 {
     double magnitude = fabs((double)value);
-    double result = .25 * magnitude + .055 * magnitude * magnitude;
+    double result = f->true_linear * magnitude + f->true_quadratic * magnitude * magnitude;
     return value < 0 ? -result : result;
 }
 
@@ -42,8 +43,8 @@ static void mouse(void *user, const ph_hid_mouse *m)
     fixture *f = user;
     double width = 500 * fmax(1, f->pointer.aspect);
     double height = width / f->pointer.aspect;
-    f->x = fmin(width - 16, fmax(16, f->x + travel(m->dx) * f->true_x_scale));
-    f->y = fmin(height - 16, fmax(16, f->y + travel(m->dy) * f->true_y_scale));
+    f->x = fmin(width - 16, fmax(16, f->x + travel(f, m->dx) * f->true_x_scale));
+    f->y = fmin(height - 16, fmax(16, f->y + travel(f, m->dy) * f->true_y_scale));
     if (m->dx == -127 && m->dy == -127) {
         f->anchors++;
         CHECK(!m->buttons); /* recovery must never create a huge drag */
@@ -78,6 +79,8 @@ static void init(fixture *f)
     f->x = 400;
     f->y = 800;
     f->true_x_scale = f->true_y_scale = 1;
+    f->true_linear = .25;
+    f->true_quadratic = .055;
     f->now = 100;
     f->pointer.output = (ph_pointer_output){f, mouse, delay, sync_reports};
     ph_pointer_set_enabled(&f->pointer, true, f->now);
@@ -90,10 +93,16 @@ static void step(fixture *f)
     if (phase == PH_POINTER_MOVING || phase == PH_POINTER_BUTTON
         || phase == PH_POINTER_DRAINING)
         ph_pointer_ack(&f->pointer, f->pointer.sync_id, f->now);
-    else if (phase == PH_POINTER_WAIT_VIDEO)
-        ph_pointer_observe(&f->pointer, true, f->x / (500 * fmax(1, f->pointer.aspect)),
-                            f->y * f->pointer.aspect / (500 * fmax(1, f->pointer.aspect)),
-                            f->now);
+    else if (phase == PH_POINTER_WAIT_VIDEO) {
+        double width = 500 * fmax(1, f->pointer.aspect);
+        double x = f->x / width, y = f->y * f->pointer.aspect / width;
+        double hx, hy, radius;
+        bool found = !f->bounded_video
+                     || (ph_pointer_hint(&f->pointer, &hx, &hy, &radius)
+                         && fabs(x - hx) <= radius
+                         && fabs(y - hy) <= radius * f->pointer.aspect);
+        ph_pointer_observe(&f->pointer, found, x, y, f->now);
+    }
     ph_pointer_tick(&f->pointer, f->now);
 }
 
@@ -113,6 +122,18 @@ static size_t first_button(const fixture *f, uint8_t button)
         if (f->events[i].mouse.buttons & button)
             return i;
     return f->count;
+}
+
+static void confirmed_position(fixture *f, double x, double y, double aspect)
+{
+    f->x = x;
+    f->y = y;
+    f->pointer.aspect = aspect;
+    double width = 500 * fmax(1, aspect);
+    f->pointer.actual_x = x / width;
+    f->pointer.actual_y = y * aspect / width;
+    f->pointer.known = true;
+    f->pointer.observed_at = f->now;
 }
 
 int main(void)
@@ -487,6 +508,105 @@ int main(void)
     settle(&f);
     CHECK(ph_pointer_ready(&f.pointer, .2, .2, .46));
     CHECK(f.max_motion_batch <= 24 && f.anchors == 8 && !f.pointer.buttons);
+
+    /* Tracking Sensitivity changes the small-step gain independently of the
+     * large-step acceleration. The three actual wizard targets must converge
+     * without fitting a new curve or accepting a click at an estimated point. */
+    const double phone_curves[][2] = {{1.2, .04}, {1.19551, .03994}};
+    const double initial_scales[] = {1, 1.5, 2, 4};
+    const double guide_targets[][2] = {{.25, .35}, {.75, .65}, {.5, .75}};
+    const double phone_aspect = 500.0 / 1080;
+    for (size_t c = 0; c < sizeof phone_curves / sizeof phone_curves[0]; c++) {
+        for (size_t s = 0; s < sizeof initial_scales / sizeof initial_scales[0]; s++) {
+            init(&f);
+            f.true_linear = phone_curves[c][0];
+            f.true_quadratic = phone_curves[c][1];
+            f.bounded_video = true;
+            CHECK(ph_pointer_set_scale(&f.pointer, initial_scales[s], initial_scales[s]));
+            for (size_t t = 0; t < sizeof guide_targets / sizeof guide_targets[0]; t++) {
+                CHECK(ph_pointer_target(&f.pointer, guide_targets[t][0], guide_targets[t][1],
+                                        phone_aspect, ++f.now));
+                settle(&f);
+                CHECK(ph_pointer_ready(&f.pointer, guide_targets[t][0], guide_targets[t][1],
+                                       phone_aspect));
+                CHECK(!f.pointer.failed && f.anchors == 8 && f.max_motion_batch <= 24);
+            }
+            CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true, .5, .75,
+                                     phone_aspect, ++f.now));
+            settle(&f);
+            double drag_scale_x = f.pointer.scale_x, drag_scale_y = f.pointer.scale_y;
+            for (int i = 1; i <= 15; i++) {
+                double y = .75 - i * .006;
+                CHECK(ph_pointer_target(&f.pointer, .5, y, phone_aspect, ++f.now));
+                settle(&f);
+                CHECK(f.pointer.buttons == PH_HID_BTN_LEFT && !f.pointer.failed);
+            }
+            CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, false, .5, .66,
+                                     phone_aspect, ++f.now));
+            settle(&f);
+            CHECK(!f.pointer.buttons && !f.pointer.failed && f.anchors == 8);
+            CHECK(hypot(f.x - 250, f.y - .66 * 1080) <= 4);
+            CHECK(f.pointer.scale_x == drag_scale_x && f.pointer.scale_y == drag_scale_y);
+        }
+    }
+
+    /* Directly reproduce the live final-target oscillation: a confirmed dot
+     * seven pixels left of (250,810), at an independently changed small gain. */
+    init(&f);
+    f.true_linear = 1.2;
+    f.true_quadratic = .04;
+    CHECK(ph_pointer_set_scale(&f.pointer, 1.5, 1.5));
+    f.bounded_video = true;
+    confirmed_position(&f, 243, 810, phone_aspect);
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true, .5, .75,
+                             phone_aspect, ++f.now));
+    CHECK(first_button(&f, PH_HID_BTN_LEFT) == f.count);
+    settle(&f);
+    pressed = first_button(&f, PH_HID_BTN_LEFT);
+    CHECK(pressed < f.count && !f.pointer.failed);
+    if (pressed < f.count)
+        CHECK(hypot(f.events[pressed].x - 250, f.events[pressed].y - 810) <= 4);
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, false, .52, .75,
+                             phone_aspect, ++f.now));
+    settle(&f);
+    CHECK(!f.pointer.buttons && !f.pointer.failed && f.anchors == 0);
+    CHECK(hypot(f.x - 260, f.y - 810) <= 4);
+
+    /* The quarter waypoint can be smaller than the model's smallest report.
+     * Still emit one unit, then use its observed result rather than queuing an
+     * empty move and waiting forever for an image that cannot change. */
+    init(&f);
+    f.true_linear = 1.2;
+    f.true_quadratic = .04;
+    f.bounded_video = true;
+    CHECK(ph_pointer_set_scale(&f.pointer, 20, 20));
+    confirmed_position(&f, 243, 810, phone_aspect);
+    CHECK(ph_pointer_target(&f.pointer, .495, .75, phone_aspect, ++f.now));
+    CHECK(f.count == 1 && f.events[0].mouse.dx == 1 && !f.events[0].mouse.dy);
+    settle(&f);
+    CHECK(ph_pointer_ready(&f.pointer, .495, .75, phone_aspect) && !f.pointer.failed);
+
+    /* A partial prediction within four pixels of an unchanged frame is not
+     * evidence of movement. Ignored tiny corrections must still exhaust the
+     * retry budget, including releasing a drag whose endpoint cannot be reached. */
+    for (int held = 0; held < 2; held++) {
+        init(&f);
+        CHECK(ph_pointer_target(&f.pointer, .5, .5, .46, f.now));
+        settle(&f);
+        if (held) {
+            CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true, .5, .5, .46, ++f.now));
+            settle(&f);
+        }
+        f.true_x_scale = f.true_y_scale = 0;
+        if (held)
+            CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, false, .514, .5, .46, ++f.now));
+        else
+            CHECK(ph_pointer_target(&f.pointer, .514, .5, .46, ++f.now));
+        for (int i = 0; i < 100 && !f.pointer.failed; i++)
+            step(&f);
+        CHECK(f.pointer.failed && !f.pointer.known && !f.pointer.buttons && !f.pointer.count);
+        CHECK(f.events[f.count - 1].mouse.buttons == 0);
+    }
 
     /* Ignored reports still exhaust the bounded retry budget. */
     init(&f);

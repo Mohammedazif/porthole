@@ -66,6 +66,16 @@ static double move_axis(ph_pointer *p, double pixels, bool horizontal, int *repo
     if (!scale)
         scale = 1;
     double remaining = fabs(pixels), moved = 0;
+    bool correction = remaining < 20;
+    if (correction) {
+        /* A changed tracking sensitivity can amplify tiny reports much more
+         * than the large reports used for the saved scale. Approach a nearby
+         * target in confirmed partial steps instead of oscillating across it.
+         * Already-aligned axes need no nudge while the other axis catches up. */
+        if (remaining <= ALIGNMENT_PX / 2)
+            return 0;
+        remaining *= .25;
+    }
     int sign = pixels < 0 ? -1 : 1;
     for (size_t i = 0; i < sizeof steps / sizeof steps[0]; i++) {
         int step = steps[i];
@@ -80,6 +90,13 @@ static double move_axis(ph_pointer *p, double pixels, bool horizontal, int *repo
         *reports_left -= count;
         moved += count * travel;
         remaining -= count * travel;
+    }
+    if (correction && !moved && *reports_left > 0) {
+        /* Quantization must not turn a real correction into an empty batch
+         * that never reveals the cursor. Still confirm this one-unit result. */
+        emit_mouse(p, horizontal ? sign : 0, horizontal ? 0 : sign);
+        (*reports_left)--;
+        moved = (.25 + .055) * scale;
     }
     return sign * moved;
 }
@@ -396,14 +413,17 @@ void ph_pointer_observe(ph_pointer *p, bool found, double x, double y, uint64_t 
     if (p->phase != PH_POINTER_WAIT_VIDEO || now_ms - p->wait_since < FRAME_SETTLE_MS
         || !found || !valid(x, y, p->aspect) || !held_observation(p, x, y))
         return;
-    if (distance(x, y, p->hint_x, p->hint_y, p->aspect) <= ALIGNMENT_PX)
-        p->attempts = 0; /* a moving target is progress, not a failure to converge */
+    double width = model_width(p->aspect);
+    double moved_x = (x - p->sent_start_x) * width;
+    double moved_y = (y - p->sent_start_y) * width / p->aspect;
+    double travel = hypot(p->sent_dx, p->sent_dy);
+    if (!p->anchoring && travel > 0
+        && (p->sent_dx * moved_x + p->sent_dy * moved_y) / travel >= .5
+        && distance(x, y, p->hint_x, p->hint_y, p->aspect) <= ALIGNMENT_PX)
+        p->attempts = 0; /* confirmed progress, including a moving drag target */
     if (p->learn_move) {
-        double width = model_width(p->aspect);
-        p->scale_x = learned_scale(p->scale_x, p->sent_dx,
-                                   (x - p->sent_start_x) * width);
-        p->scale_y = learned_scale(p->scale_y, p->sent_dy,
-                                   (y - p->sent_start_y) * width / p->aspect);
+        p->scale_x = learned_scale(p->scale_x, p->sent_dx, moved_x);
+        p->scale_y = learned_scale(p->scale_y, p->sent_dy, moved_y);
     }
     p->actual_x = x;
     p->actual_y = y;
