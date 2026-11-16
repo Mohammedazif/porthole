@@ -2,7 +2,8 @@
 option(PORTHOLE_WITH_WINDOWS_BLUETOOTH "Publish the Windows WinRT Bluetooth helper" ON)
 if(PORTHOLE_WITH_WINDOWS_BLUETOOTH)
     target_compile_definitions(porthole PRIVATE PORTHOLE_HAVE_WINDOWS_BLUETOOTH=1)
-    find_program(DOTNET_EXECUTABLE dotnet REQUIRED)
+    # MSYS2 CI keeps a minimal PATH; setup-dotnet still exports DOTNET_ROOT.
+    find_program(DOTNET_EXECUTABLE NAMES dotnet HINTS "$ENV{DOTNET_ROOT}" REQUIRED)
     set(_ble_project "${PROJECT_SOURCE_DIR}/helpers/ble-winrt/Porthole.Ble.WinRT.csproj")
     file(GLOB_RECURSE _ble_sources CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/helpers/ble-winrt/*.cs"
