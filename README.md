@@ -11,7 +11,9 @@ Free and open source (GPL-3.0). Nothing to install on the iPhone: it uses built-
 > pointer tracking, taps, secondary clicks and drags have been verified with the C controller
 > on the live iPhone. Integrated mouse, click, drag and scroll checks also pass in the app.
 > Audio playback through the PC is implemented and verified on the live iPhone.
-> USB capture and the Windows receiver remain planned.
+> A full Windows Wi-Fi mirror now builds with native discovery and portable dependencies.
+> The user confirmed mirroring with the Windows preview on the host. Windows Bluetooth
+> control and USB capture remain separate roadmap items.
 > See [PLAN.md](PLAN.md) for the full plan, feature list and roadmap.
 >
 > | Spike | Question | Result |
@@ -63,6 +65,18 @@ Command on the iPhone. **F1** opens local controls and setup help; input is paus
 is open. The waiting screen shows mirroring and Bluetooth setup steps, and a status banner
 identifies when the mirror is available without controls.
 
+**F2** opens guided setup: confirm AssistiveTouch/Dwell settings on the iPhone, wait for
+Bluetooth and mirroring readiness, then check three pointer targets. The check sends no
+taps and saves calibration only after all targets are confirmed; cancellation or failure
+restores the previous calibration. First-run setup opens automatically until completed.
+Use `--setup` to reopen it on launch, or `--no-setup` to skip automatic setup.
+
+**F3** shows measured local diagnostics: displayed video FPS, receive-to-decode/present
+time, accepted-input handoff time, helper dispatch ACK time, and queue/drop counters.
+Use `--diagnostics` to show it on launch and log summaries. An idle phone can report zero
+video FPS because AirPlay stops sending unchanged pictures. Radio interval and iPhone
+capture latency remain explicitly unmeasured; helper ACK is not an iPhone response time.
+
 Mirrored iPhone audio plays through the PC's default speakers. AAC-ELD, AAC-LC and ALAC
 are decoded with FFmpeg and played through SDL; AirPlay volume changes are respected.
 Use `--no-audio` to mute playback on the PC. The playback queue is bounded to avoid
@@ -85,9 +99,15 @@ away. A new gesture after a pause rechecks the bounds with a one-unit probe, so 
 on the phone or a changing device list cannot leave an old edge permanently latched.
 One unchanged frame cannot prove an edge. Navigation clears the learned bounds.
 The release build reached both actual ends of the long Bluetooth device list and stopped
-sustained input at each edge. Earlier Settings checks also covered cursor movement after
-stopping. Custom scroll views without an indicator and rapid cursor changes during pointer
-recovery need further live testing.
+sustained input at each edge. The final Settings stress check also reached both ends with
+183 PC wheel events in each direction, including cursor movement after stopping, and sent
+no wheel reports after either stop. Custom scroll views without an indicator and longer
+sessions still need broader live testing.
+
+Pointer recovery retains outstanding helper acknowledgements before accepting replacement
+actions, caps each movement batch at 24 reports and restarts an unresponsive helper while
+video continues. Small corrections converge across the tested tracking sensitivities;
+the final live setup check confirmed all three targets and saved calibration.
 
 The mouse controller uses the previous video-confirmed movement path. Each move is checked
 against the mirrored pointer before the next correction or button press. Keyboard and
@@ -105,23 +125,37 @@ For everyday use build the optimized `release` preset (`cmake --preset release`)
 ### Windows (MSYS2)
 
 1. Install [MSYS2](https://www.msys2.org) and open an **MSYS2 UCRT64** terminal.
-2. Install dependencies and build:
+2. Install dependencies and build the full mirror:
 
 ```sh
 ./scripts/install-deps-msys2.sh
-cmake --preset release-no-airplay
-cmake --build --preset release-no-airplay
-./build/release-no-airplay/src/porthole.exe --version
+cmake --preset windows-release -DPORTHOLE_WARNINGS_AS_ERRORS=ON
+cmake --build --preset windows-release
+ctest --preset windows-release
+./build/windows-release/src/porthole.exe --name "Porthole Windows"
 ```
 
-The Windows build doesn't include the Wi-Fi receiver yet. UxPlay's core needs Apple's Bonjour SDK
-on Windows; Porthole will use Windows' built-in mDNS instead (Phase 1).
+The Windows mirror uses native DNS-SD (`DnsServiceRegister`), with no Bonjour installation.
+It requires Windows 10 version 1903 or newer, or Windows 11. Keep the phone and PC on the
+same Private Wi-Fi network, then choose **Porthole Windows** in Screen Mirroring.
+This Windows workstream is viewing-only; the WinRT Bluetooth backend remains item 4.
+
+Create a portable bundle from a clean committed build with
+`bash scripts/package-windows.sh`. It gathers runtime DLLs, licenses, exact dependency
+metadata and matching source archives. The CI full Windows job builds/tests this preset
+and uploads the portable bundle and sources. The no-AirPlay presets remain available as
+minimal build checks.
+
+If the Windows firewall blocks discovery or mirroring, the bundle includes a reviewed
+`windows-firewall.ps1` helper for the mirror executable and fixed ports on Private networks.
+Installer/uninstaller work remains with the separate polish workstream.
 
 ### Build presets
 
 | Preset | What it builds |
 |---|---|
 | `debug` / `release` | Everything, including the AirPlay core (needs all dependencies) |
+| `windows-release` | Full Windows Wi-Fi mirror with native DNS-SD (MSYS2 UCRT64) |
 | `debug-no-airplay` / `release-no-airplay` | Without the AirPlay core; needs only a C compiler and CMake |
 
 ## Repository layout

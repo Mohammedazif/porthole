@@ -9,8 +9,11 @@
 
 ## Current status — 2026-11-17
 
-The working application is the **Linux prototype in the VMware guest**. The complete
-Windows app is still a future milestone; Windows CI currently builds the no-AirPlay CLI.
+The working controls run in the **Linux prototype in the VMware guest**. A full Windows
+Wi-Fi mirror now cross-builds with native discovery and portable dependencies. The user
+confirmed Windows host mirroring with the versioned preview. Windows Bluetooth control
+remains item 4. Windows CI is configured to build/test the full mirror and retain a minimal
+smoke build; this workstream did not trigger a remote CI run.
 The detailed M5 measurements later in this file include an archived experimental controller.
 
 | Work | Current state |
@@ -19,28 +22,46 @@ The detailed M5 measurements later in this file include an archived experimental
 | Claude's M1 mirror | Working AirPlay discovery, H.264 → FFmpeg → SDL window, crop/aspect ratio, resize and rotation |
 | Claude's M2 controls | BlueZ composite keyboard/mouse/consumer device; typing, Ctrl→Command, Home, Spotlight, Back, App Switcher, Control Center, Notification Center, volume and iPhone screenshot shortcuts |
 | Claude's M3 pointer | Video-confirmed positioning, click, secondary click, held drag, wheel routing, rotation, focus-loss releases, per-axis calibration and automated/live checks |
-| Claude's M4 usability | F1 controls/setup help, viewing-only status and helper retry; guided pairing/calibration wizard remains open |
+| Claude's M4 usability | F1 controls/setup help, viewing-only status and helper retry; the later Codex workstream adds the guided F2 wizard |
 | Claude's M5 work retained | Separate key/consumer queue, paced notification dispatch, complete release drain, faster busy input loop, renderer without vsync and slow-drag retry fix |
 | Experimental M5 work archived | Streamed hover and automatic curve fitting withdrawn at the user's request after unstable scrolling calibration; previous controller active |
 | Bluetooth follow-up | Registration/advertising ordering, stale-link and timer races, bonded subscription reuse, 19 helper regressions; actual adapter stall and stale pairing recovery documented below |
 | Scroll follow-up | Continuous overscroll guard retained; new gestures discard stale bounds and probe gently; unchanged frames require confirmation instead of stopping a list early |
 | Audio follow-up | PC playback implemented for AAC-ELD/AAC-LC/ALAC with volume, flush and bounded queue; `--no-audio` mutes PC output; live validation recorded below |
 
-The current release passes 40 CTest checks across debug, release and no-AirPlay builds;
-release also builds with warnings treated as errors. Pointer, scroll and audio checks pass
-with address/undefined sanitizers. Live PC audio and both ends of the Bluetooth list are
-verified; rapid cursor changes during pointer recovery remain a longer-session test case.
+The final committed source passes 60 CTest executions across debug (23), release (23) and
+no-AirPlay (14) builds, all with warnings treated as errors. Pointer, scroll, metrics, decoder
+timing/reset, helper shutdown and native-discovery checks pass address/undefined sanitizers.
+Live PC audio and both ends of the Bluetooth list were verified earlier. The final isolated
+build confirmed all three guided calibration targets and saved the calibration. The
+small-correction sensitivity case and its regressions are recorded below.
 
-### Remaining roadmap, in delivery order
+### Roadmap and delivery status
 
-1. **Stabilize Linux controls:** verify long/dynamic lists and both edges, sustained drags,
-   clicks after idle and changed tracking sensitivity; finish guided AssistiveTouch,
-   pairing and calibration setup. Keep streaming/curve experiments isolated until proven.
-2. **Measure responsiveness:** negotiated Bluetooth interval, frame age and visible pointer
-   lag; add FPS/latency diagnostics. Optimize reports, clicks, drags and wheel batching
-   without losing confirmed positions or releases.
-3. **Windows Wi-Fi mirror:** native Windows mDNS, complete AirPlay/FFmpeg/SDL build,
-   packaged dependencies, firewall rules and a real Windows executable tested on the host.
+**Workstream ownership (2026-11-17):** Codex delivered the baseline for items **1–3**, using
+parallel agents for control recovery, latency diagnostics and the Windows mirror. Grok owns
+items **5–7** in parallel. Item **4** remains unchanged and outside this Codex workstream.
+Shared application changes in this workstream are limited to setup, input recovery,
+diagnostics and Windows mirror portability; audio/polish, USB and advanced features stay
+with Grok.
+
+| Item | Codex implementation and validation |
+|---|---|
+| 1 | Cancellation retains helper ACK fences; pointer batches are capped at 24 reports; missing ACKs restart the helper without blocking rendering. F2 guides preparation, pairing, mirroring and transactional three-target calibration. Rapid-cancel, modal-input and reconnect tests pass; all three live calibration targets confirmed and saved on the final build. |
+| 2 | F3 and `--diagnostics` report local FPS, receive/decode/present, accepted input handoff, helper dispatch ACK and queue counters. Decoder generations prevent stale frames after reconnect. The actual Bluetooth radio interval remains unknown without a privileged trace. |
+| 3 | Native Windows DNS-SD replaces Bonjour, preserves protocol identity/TXT records, and builds the complete SDL/FFmpeg mirror. All 85 UCRT cross-build targets compile with warnings as errors. Portable runtime/source packaging and full MSYS2 CI are in place; the user confirmed host mirroring with preview c18f7ac. |
+
+1. **Linux controls — baseline delivered:** bounded pointer recovery, long-list edge checks,
+   drag/release regressions and guided AssistiveTouch, pairing and calibration setup.
+   Continue longer sessions, custom scroll views and additional sensitivity checks.
+   Keep streaming/curve experiments isolated until proven.
+2. **Responsiveness — diagnostics and queue fixes delivered:** F3 measures local frame stages,
+   input handoff and helper acknowledgements. Follow up with a privileged Bluetooth trace
+   and external visible-input measurements; radio interval and end-to-end latency remain
+   unmeasured. Preserve confirmed positions and releases during later optimizations.
+3. **Windows Wi-Fi mirror — preview delivered:** native mDNS, full AirPlay/FFmpeg/SDL build,
+   portable dependencies/sources and Private-network firewall helper. User-confirmed host
+   mirroring; repeat native MSYS2 CI and wider network/host testing before release.
 4. **Windows control:** WinRT GATT helper feasibility (S2), reliable pairing/subscriptions
    and connection interval, same input protocol and tests; ESP32 USB-serial HID fallback
    if Windows cannot publish the required HID service. Then port the setup wizard.
@@ -112,7 +133,7 @@ iOS does not let any app inject touches. So we use two channels that iOS already
 ## 3. Features
 
 ### MVP (v0.1): Wi-Fi mirror and basic control
-Linux prototype status below; the Windows implementations remain on the roadmap above.
+Linux controls and the Windows viewing preview are implemented as described above.
 
 - [x] PC appears automatically in iPhone **Control Center → Screen Mirroring** (Avahi/mDNS)
 - [x] Live iPhone screen in a resizable window, aspect ratio kept, handles rotation
@@ -122,7 +143,7 @@ Linux prototype status below; the Windows implementations remain on the roadmap 
 - [x] Shortcut keys: **Home, App Switcher, Control Center, Notification Center,
       Spotlight, Back, Volume +/−, Screenshot**
 - [ ] Toolbar buttons and Lock Screen verification
-- [ ] Setup wizard that walks the user through enabling AssistiveTouch and pairing
+- [x] F2 setup wizard for AssistiveTouch, pairing, mirror readiness and three-target calibration
 
 ### v0.2: everyday use
 - [x] **Basic audio** forwarding through PC speakers; `--no-audio` toggle
@@ -249,10 +270,9 @@ porthole/
 - **Linux build** in the VM for fast iteration on AirPlay, decoding, rendering and mapping. The VM's
   bridged network lets the iPhone find it.
 - **Windows build** via GitHub Actions (MSYS2 UCRT64); the user tests the `.exe` on the Windows host.
-  Until Porthole has its own Windows mDNS code, Windows CI builds without the AirPlay core
-  (UxPlay needs Apple's Bonjour SDK there).
-- **Bluetooth work happens on Windows** (the VM has no Bluetooth). Optionally, pass the host
-  Bluetooth adapter through to the VM for BlueZ experiments.
+  The full mirror now uses native Windows DNS-SD; CI retains a separate minimal build.
+- **Bluetooth controls currently run in the Linux VM**, using the passed-through Intel
+  adapter and BlueZ. The native Windows WinRT control backend remains item 4.
 
 ---
 
@@ -338,7 +358,7 @@ Windows. Platform-specific code stays behind small interfaces so the port only s
 | **M1** Mirror window | ✅ done | `porthole` shows the iPhone screen: UxPlay core → FFmpeg decode → SDL2 window | Avahi mDNS | Windows mDNS API |
 | **M2** Keyboard & shortcuts | ✅ done | typing, Home/App Switcher/Control Center/… hotkeys, scroll wheel, right-click | BLE helper: Python + BlueZ (from the spike) | BLE helper: WinRT |
 | **M3** Pointer | ✅ done | the phone pointer follows the PC cursor over the window; clicks and drags land where you click; drift corrected from the decoded video | same helper | same helper |
-| **M4** Polish | ✅ help, status and reconnect done; guided wizard still open | status/help overlay, reconnect handling, setup checks (AssistiveTouch on, Dwell off) | — | — |
+| **M4** Polish | ✅ help, status, reconnect and F2 guided setup implemented | actual connection gates, user-confirmed iPhone settings and video-confirmed calibration | Linux controls | Windows mirror-only guide |
 | **M5** Responsiveness | 🔧 previous video-confirmed mouse controller restored 2026-11-17; Bluetooth and overscroll fixes retained | stable pointer and scroll edges, responsive typing, measured latency; streaming and curve fitting require further validation | same helper, faster Bluetooth connection interval | same helper; WinRT must request the same interval |
 
 **Bluetooth helper protocol:** the main app starts the helper and writes framed HID reports to
@@ -728,6 +748,45 @@ sanitizer checks pass. The actual iPhone negotiated AAC-ELD / 480 samples and be
 playback at log time 77.125 in `build/live/porthole-20261117-012849.log`; the user confirmed
 hearing it through the PC speakers. Precise audio/video sync remains a polish task.
 
+### Items 1–3 delivery checks (2026-11-17, 02:40–02:44)
+
+Implementation commits are `c70352f` (control recovery, guided setup and diagnostics),
+`c18f7ac` (Windows mirror/discovery/portable packaging) and `274469c` (small pointer
+corrections). Final Linux builds use the isolated checkout `build/codex-items123` at
+`274469c`, so Grok's concurrent, uncommitted work is excluded. All 60 CTest executions
+passed; debug/minimal transcripts are `build/live/final-items123-debug.log` and
+`build/live/final-items123-minimal.log`.
+
+The first live guide attempts exposed a third-target oscillation at the current Tracking
+Sensitivity. Small residual moves now use partial corrections, and progress must include
+observed movement toward the target. Simulated phone curves cover three guide targets,
+held drags, quantization, ignored tiny reports and several initial scale estimates. The
+final live Calculator check confirmed **3/3 targets**, saved scales **2.103 / 3.105** and
+completed setup. Its last target was (250,810), observed at (251,807), within the four-pixel
+tolerance. Captures and logs are under `build/live/setup-final-20261117-024000/`.
+
+The final rapid Settings scroll check sent **183 PC wheel events in each direction**.
+The app emitted 23 downward wheel reports and 25 upward reports, reached the actual
+bottom and top, then emitted **zero reports after each boundary stop**, including cursor
+movement while events continued. Resting screenshots show normal bounds. Evidence is
+under `build/live/scroll-20261117-024236/`. This closes the earlier tested reversal/recovery
+gap; custom views and longer sessions remain follow-ups.
+
+One local diagnostic sample during calibration showed 47 FPS, receive-to-decode 1 ms,
+receive-to-present 13 ms and helper ACK 17 ms. These are local observations, not an
+end-to-end latency claim or the negotiated Bluetooth interval.
+
+The user confirmed Windows host mirroring with
+`build/porthole-windows-c18f7ac-ucrt-preview.zip`. The preview contains the committed
+`c18f7ac` source, 86 UCRT runtime DLLs, license/dependency/source metadata and checksums.
+Its SHA-256 is `5eae6fdd6811e19d30c184847e3b6d99df420eeaa704da0d7914290995f4bb60`.
+Windows Bluetooth remains item 4. No Grok work was included in these commits or the preview.
+
+Integration note for the parallel audio/video-sync workstream: `ph_frame_timing` measures
+local monotonic receipt/decode time. This delivery uses decoder packet PTS to carry local
+receipt provenance; future media-timestamp scheduling must preserve that metadata
+separately rather than treat it as the phone's media clock.
+
 Targets for future M5 experiments: pointer within ~70 ms of the mouse while moving; a key press handed to
 Bluetooth within one connection interval; no corner sweep in normal use; a changed tracking
 speed absorbed within about six moves.
@@ -758,9 +817,9 @@ Still open in M5, in this order:
    swipe has no inertia. Needs cursor tracking that survives moving content.
 6. **Faster clicks after a pause** (the reveal nudge costs ~130 ms after 1.2 s of rest) and
    **faster wheel** (more than one notch per batch away from the edges).
-7. **Latency on screen**: hop time, video age, Bluetooth interval, model curve and FPS in
-   the F1 overlay, so regressions show up without reading logs. Use the optimized release
-   build for daily use and measure what it saves over the debug build.
+7. **Latency on screen:** F3 local timing/FPS diagnostics are delivered. Phone capture,
+   radio interval and visible end-to-end response still need independent measurements.
+   Use the optimized release build for daily use.
 8. Video path: check frame age end to end (AirPlay itself is ~80–100 ms here); USB capture
    in Phase 4 is the real fix.
 
@@ -822,18 +881,18 @@ Still open in M5, in this order:
    on purpose).
 5. ~~Finish the **integrated app mouse-event check on Linux**.~~ ✅ Pointer alignment,
    taps, secondary-click, drags in both directions and wheel boundaries verified live.
-   The current Linux controls are complete; a guided pairing/calibration wizard remains
-   on the later roadmap before the Windows port.
-6. **Restored-controller verification:** alignment and both ends of the long Bluetooth
-   list now pass, as does PC audio. Repeat Calculator, sustained drags and fast pointer
-   recovery checks, then measure latency on this version. The earlier 65 ms / 83–93 ms hover results
-   and 190–650 ms click timings describe the withdrawn experimental controller.
+   F2 guided pairing/calibration is now implemented and its final live three-target check
+   passes. F3 local diagnostics and the Windows Wi-Fi mirror are also implemented.
+6. **Restored-controller verification:** alignment, guided Calculator calibration, both
+   list edges and rapid wheel reversal with cursor movement now pass, as does PC audio.
+   Repeat sustained live drags and longer sessions. The earlier 65 ms / 83–93 ms hover
+   results and 190–650 ms click timings describe the withdrawn experimental controller.
 7. **M5 bad observations:** find where the moves that fit no curve come from (about one in
    eight in the log), starting with wheel scrolling.
 8. **M5 Bluetooth connection interval:** read the negotiated interval with `btmon`, try
    11.25–15 ms in `/etc/bluetooth/main.conf`, re-measure.
-9. **M5 follow-ups:** fewer reports per move, streamed drags, faster click-after-pause and
-   wheel, latency overlay (details in the M5 section).
+9. **M5 follow-ups:** fewer reports per move, streamed drags and faster click-after-pause
+   and wheel. The F3 local latency overlay is implemented (details in the M5 section).
 10. **S2:** the same Bluetooth device on the Windows host with the WinRT GATT server (fast
    advertising, LE-only, re-subscribe handling, 11.25–15 ms connection interval), as part of
    the Windows port.
