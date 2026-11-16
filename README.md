@@ -13,7 +13,8 @@ Free and open source (GPL-3.0). Nothing to install on the iPhone: it uses built-
 > Audio playback through the PC is implemented and verified on the live iPhone.
 > A full Windows Wi-Fi mirror now builds with native discovery and portable dependencies.
 > The user confirmed mirroring with the Windows preview on the host. Windows Bluetooth
-> control and USB capture remain separate roadmap items.
+> control now has a native WinRT helper; its iPhone pairing/input check is pending on
+> the Windows host. USB capture remains a separate roadmap item.
 > See [PLAN.md](PLAN.md) for the full plan, feature list and roadmap.
 >
 > | Spike | Question | Result |
@@ -125,7 +126,10 @@ For everyday use build the optimized `release` preset (`cmake --preset release`)
 ### Windows (MSYS2)
 
 1. Install [MSYS2](https://www.msys2.org) and open an **MSYS2 UCRT64** terminal.
-2. Install dependencies and build the full mirror:
+2. Install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) and reopen
+   the UCRT64 terminal. The SDK builds the separate WinRT Bluetooth helper; the portable
+   bundle includes its runtime, so users need no .NET installation.
+3. Install dependencies and build:
 
 ```sh
 ./scripts/install-deps-msys2.sh
@@ -138,7 +142,29 @@ ctest --preset windows-release
 The Windows mirror uses native DNS-SD (`DnsServiceRegister`), with no Bonjour installation.
 It requires Windows 10 version 1903 or newer, or Windows 11. Keep the phone and PC on the
 same Private Wi-Fi network, then choose **Porthole Windows** in Screen Mirroring.
-This Windows workstream is viewing-only; the WinRT Bluetooth backend remains item 4.
+
+Bluetooth controls require **Windows 10 version 2004 (build 19041) or later**, plus an
+adapter/driver supporting **Bluetooth LE peripheral mode**. Ordinary Bluetooth accessory
+support alone is insufficient. Controls start by default; `--no-bluetooth` keeps viewing
+available. Keep the generated `ble-winrt/` folder beside `porthole.exe`. For an explicit
+mirror-only build, configure `-DPORTHOLE_WITH_WINDOWS_BLUETOOTH=OFF`.
+
+Close Porthole before running the hardware probe in PowerShell:
+
+```powershell
+.\build\windows-release\src\ble-winrt\porthole-ble-winrt.exe --probe
+```
+
+The probe creates the real HID service and characteristics without advertising. On
+success, launch Porthole, enable AssistiveTouch and disable Dwell Control on iPhone,
+then pair **the PC's Windows Bluetooth name** in iPhone Bluetooth settings. Accept any
+Windows pairing prompt. This name can differ from the Screen Mirroring name. F2 guides
+pairing, video readiness and calibration; all three report subscriptions are required
+before controls activate. A probe pass still requires a live iPhone input check.
+
+See [the Windows helper guide](helpers/ble-winrt/README.md) for its protocol, diagnostics
+and adapter requirements. The helper uses the same keyboard/mouse/consumer report map
+and paced lanes as Linux, with notifications targeted to a single subscribed phone.
 
 Create a portable bundle from a clean committed build with
 `bash scripts/package-windows.sh`. It gathers runtime DLLs, licenses, exact dependency

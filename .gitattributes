@@ -4,3 +4,6 @@
 *.ps1 text eol=crlf
 *.png binary
 *.ico binary
+
+# Preserve the upstream Windows SDK rich-text license byte-for-byte.
+helpers/ble-winrt/licenses/Windows-SDK-LICENSE.rtf binary

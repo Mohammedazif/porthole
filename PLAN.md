@@ -11,8 +11,10 @@
 
 The working controls run in the **Linux prototype in the VMware guest**. A full Windows
 Wi-Fi mirror now cross-builds with native discovery and portable dependencies. The user
-confirmed Windows host mirroring with the versioned preview. Windows Bluetooth control
-remains item 4. Windows CI is configured to build/test the full mirror and retain a minimal
+confirmed Windows host mirroring with the versioned preview. The item 4 WinRT Bluetooth
+helper and native process connection are implemented. The user's Windows host passed
+the real HID publication probe; iPhone pairing/input remain a host validation gate.
+Windows CI is configured to build/test the full mirror and retain a minimal
 smoke build; this workstream did not trigger a remote CI run.
 The detailed M5 measurements later in this file include an archived experimental controller.
 
@@ -40,7 +42,7 @@ small-correction sensitivity case and its regressions are recorded below.
 
 **Workstream ownership (2026-11-17):** Codex delivered the baseline for items **1–3**, using
 parallel agents for control recovery, latency diagnostics and the Windows mirror. Grok owns
-items **5–7** in parallel. Item **4** remains unchanged and outside this Codex workstream.
+items **5–7** in parallel. The user subsequently authorized Codex to implement item **4**.
 Shared application changes in this workstream are limited to setup, input recovery,
 diagnostics and Windows mirror portability; audio/polish, USB and advanced features stay
 with Grok.
@@ -50,6 +52,7 @@ with Grok.
 | 1 | Cancellation retains helper ACK fences; pointer batches are capped at 24 reports; missing ACKs restart the helper without blocking rendering. F2 guides preparation, pairing, mirroring and transactional three-target calibration. Rapid-cancel, modal-input and reconnect tests pass; all three live calibration targets confirmed and saved on the final build. |
 | 2 | F3 and `--diagnostics` report local FPS, receive/decode/present, accepted input handoff, helper dispatch ACK and queue counters. Decoder generations prevent stale frames after reconnect. The actual Bluetooth radio interval remains unknown without a privileged trace. |
 | 3 | Native Windows DNS-SD replaces Bonjour, preserves protocol identity/TXT records, and builds the complete SDL/FFmpeg mirror. All 85 UCRT cross-build targets compile with warnings as errors. Portable runtime/source packaging and full MSYS2 CI are in place; the user confirmed host mirroring with preview c18f7ac. |
+| 4 | Native WinRT HID-over-GATT helper, Windows process/pipe transport, single-peer subscription gates, existing input protocol and guided setup integration. The user's host passed the real HID publication/peripheral-role probe; iPhone pairing/input validation remains pending. |
 
 1. **Linux controls — baseline delivered:** bounded pointer recovery, long-list edge checks,
    drag/release regressions and guided AssistiveTouch, pairing and calibration setup.
@@ -62,9 +65,12 @@ with Grok.
 3. **Windows Wi-Fi mirror — preview delivered:** native mDNS, full AirPlay/FFmpeg/SDL build,
    portable dependencies/sources and Private-network firewall helper. User-confirmed host
    mirroring; repeat native MSYS2 CI and wider network/host testing before release.
-4. **Windows control:** WinRT GATT helper feasibility (S2), reliable pairing/subscriptions
-   and connection interval, same input protocol and tests; ESP32 USB-serial HID fallback
-   if Windows cannot publish the required HID service. Then port the setup wizard.
+4. **Windows control — native implementation delivered, host check pending:** WinRT
+   GATT HID helper and process transport, encrypted pairing, per-phone subscriptions,
+   paced keyboard/mouse/consumer input and F2 setup. The host adapter probe passed;
+   validate pairing, typing, pointer/calibration, wheel edges and reconnect on the
+   Windows host. Windows owns the radio interval; software pacing is not that interval.
+   An ESP32 fallback remains future work for hosts without BLE peripheral support.
 5. **Everyday-use polish (v0.2):** audio/video sync and audio UI, fullscreen/always-on-top/
    saved window placement, PNG screenshots, MP4 recording, clipboard text paste,
    connection PIN/allow-list, tray, diagnostics and installer/uninstaller.
@@ -76,6 +82,38 @@ with Grok.
 
 This status summary describes implemented work and remaining delivery steps. The original
 design, spike results and chronological implementation evidence follow.
+
+### Windows Bluetooth delivery — item 4 (2026-11-17)
+
+The native helper uses .NET 10 LTS and WinRT `GattServiceProvider`, leaving the mirror
+on C/MSYS2. It publishes encrypted HID 1812 with the same 161-byte keyboard/mouse/consumer
+descriptor as the C app. Windows owns pairing, the advertised PC name, CCCDs and radio
+timing. The helper requires build 19041+ and a driver with BLE peripheral-role support.
+Microsoft's [VirtualKeyboard sample](https://github.com/microsoft/BluetoothLEExplorer/blob/master/BluetoothLEExplorer/BluetoothLEExplorer/Models/VirtualKeyboard.cs)
+demonstrates HID publication; its [GATT server documentation](https://learn.microsoft.com/en-us/windows/apps/develop/devices-sensors/gatt-server)
+describes system-owned attributes and services.
+
+Input activates only for one peer subscribed to all three Reports. Neutral reports
+prime each dispatch epoch; queued/in-flight reports carry peer/epoch checks. Because
+unread pipe bytes have no generation field, losing the first ready session permanently
+ends that helper instance. The app restarts it with a fresh pipe and resets outstanding
+fences after exit. Windows overlapped writes and a bounded FIFO keep a hung helper from
+blocking rendering. F2 supplies Windows-specific pairing instructions and calibration.
+
+Validation: all 91 Windows cross-build targets compile with warnings as errors;
+the self-contained helper publishes with zero warnings/errors. The final Linux regression
+suite passes 23/23. The portable .NET sender passes 10/10 checks, including malformed
+frames, queue saturation, epoch isolation, real dispatch ACKs, pacing and bounded
+release cleanup. Actual Wine execution of the native Windows pipe test writes a Win32
+PASS marker and verifies Unicode/quoting, inherited-handle isolation, partial I/O,
+hung stdin, early stdout EOF, descendant-held output, termination and no handle leaks.
+Logs are `build/live/item4-final-{windows,linux,windows-link}.log`.
+
+The user ran the real Windows hardware probe and reported
+`probe ok peripheral=true hid_service=1812`. This confirms creation of the full HID
+service on that adapter, without advertising. Live iPhone pairing, report subscriptions,
+typing, pointer/drag/wheel input and reconnect still require the full preview check.
+Grok's items 5–7 remain excluded from this delivery.
 
 ---
 
@@ -272,7 +310,8 @@ porthole/
 - **Windows build** via GitHub Actions (MSYS2 UCRT64); the user tests the `.exe` on the Windows host.
   The full mirror now uses native Windows DNS-SD; CI retains a separate minimal build.
 - **Bluetooth controls currently run in the Linux VM**, using the passed-through Intel
-  adapter and BlueZ. The native Windows WinRT control backend remains item 4.
+  adapter and BlueZ. The native Windows WinRT helper now implements item 4, with its
+  real host pairing/input gate pending.
 
 ---
 

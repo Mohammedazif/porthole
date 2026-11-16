@@ -29,7 +29,7 @@ static void print_usage(FILE *out, const char *argv0)
             "      --setup        Open guided pairing and calibration setup\n"
             "      --no-setup     Skip automatic first-run setup (F2 still opens it)\n"
             "      --diagnostics  Show local timing diagnostics and log summaries\n"
-            "      --ble-helper PATH  Bluetooth helper script (default: the one in the source tree)\n"
+            "      --ble-helper PATH  Bluetooth helper (Windows executable or Linux Python script)\n"
             "      --debug       Log AirPlay protocol details\n"
             "  -v, --verbose     Show debug messages\n"
             "  -V, --version     Print version and build features, then exit\n"
@@ -53,8 +53,8 @@ int main(int argc, char **argv)
     const char *name = PORTHOLE_NAME;
     bool fixed_ports = true;
     bool debug = false;
-#ifdef _WIN32
-    bool bluetooth = false; /* mirror-only Windows build; WinRT HID is a later workstream */
+#if defined(_WIN32) && !defined(PORTHOLE_HAVE_WINDOWS_BLUETOOTH)
+    bool bluetooth = false;
 #else
     bool bluetooth = true;
 #endif
@@ -99,6 +99,9 @@ int main(int argc, char **argv)
                 return 2;
             }
             ble_helper = argv[++i];
+#ifdef _WIN32
+            bluetooth = true; /* explicit helper also works in a mirror-only build */
+#endif
         } else if (!strcmp(arg, "-n") || !strcmp(arg, "--name")) {
             if (i + 1 >= argc || !argv[i + 1][0]) {
                 fprintf(stderr, "%s: %s needs a value\n", argv[0], arg);
@@ -115,6 +118,23 @@ int main(int argc, char **argv)
     PH_LOGI("%s %s, receiver name \"%s\"", PORTHOLE_NAME, PORTHOLE_VERSION, name);
 #ifdef PORTHOLE_HAVE_AIRPLAY
     {
+#ifdef _WIN32
+        char *windows_helper = NULL;
+        if (!ble_helper) {
+            char *base = SDL_GetBasePath();
+            if (base) {
+                static const char suffix[] = "ble-winrt/porthole-ble-winrt.exe";
+                size_t length = strlen(base) + sizeof suffix;
+                windows_helper = malloc(length);
+                if (windows_helper)
+                    snprintf(windows_helper, length, "%s%s", base, suffix);
+                SDL_free(base);
+            }
+            ble_helper = windows_helper;
+            if (bluetooth && !ble_helper)
+                PH_LOGW("couldn't locate the Windows Bluetooth helper beside this executable");
+        }
+#endif
         ph_app_options opt = {.name = name,
                               .fixed_ports = fixed_ports,
                               .debug = debug,
@@ -124,7 +144,11 @@ int main(int argc, char **argv)
                               .auto_setup = auto_setup,
                               .setup = setup,
                               .ble_helper = ble_helper};
-        return ph_app_run(&opt);
+        int result = ph_app_run(&opt);
+#ifdef _WIN32
+        free(windows_helper);
+#endif
+        return result;
     }
 #else
     (void)fixed_ports;

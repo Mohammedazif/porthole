@@ -1,0 +1,17 @@
+Windows SDK for .NET
+Package: Microsoft.Windows.SDK.NET.Ref (exact version in COMPONENTS.txt and nuspec)
+License: Windows-SDK-LICENSE.rtf
+Canonical license URL: https://aka.ms/WinSDKLicenseURL
+Downloaded license URL: https://download.microsoft.com/download/0/F/F/0FF2B061-47DD-4F55-89B6-FD1D8C44F14D/sdk_license.rtf
+
+C#/WinRT runtime (WinRT.Runtime.dll)
+Assembly/file versions: RuntimeList.xml
+Project: https://github.com/microsoft/CsWinRT
+MIT license text: CsWinRT-LICENSE.txt
+Source license URL: https://raw.githubusercontent.com/microsoft/CsWinRT/master/LICENSE
+
+.NET runtime
+Package: Microsoft.NETCore.App.Runtime.win-x64 (exact version in COMPONENTS.txt)
+Its upstream LICENSE.TXT and THIRD-PARTY-NOTICES.TXT are copied from the runtime pack
+into ../dotnet by the publish target. Runtime dependency versions are also recorded
+in porthole-ble-winrt.deps.json and porthole-ble-winrt.runtimeconfig.json.

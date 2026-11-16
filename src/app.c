@@ -187,10 +187,20 @@ static void handle_ble_status(app *a, const char *line)
         PH_LOGW("Bluetooth helper: %s", line);
     else
         PH_LOGI("Bluetooth: %s", line);
+#ifdef _WIN32
+    /* Windows input belongs to one ready peer per helper pipe. Recover native
+     * or protocol errors through a fresh process, not buffered old reports. */
+    if (!strncmp(line, "error", 5) && a->link && !a->link_stopping) {
+        a->link_stopping = true;
+        ph_hid_link_request_stop(a->link);
+    }
+    if (a->link_stopping && strcmp(line, "exited"))
+        state = "recovering";
+#endif
     /* "connected" is followed by "subscribed" once reports flow; keep "on" if already on. */
     if (state && !(!strcmp(line, "connected") && !strcmp(a->ble_status, "on")))
         snprintf(a->ble_status, sizeof a->ble_status, "%s", state);
-    ph_input_set_enabled(&a->input, !strcmp(a->ble_status, "on"));
+    ph_input_set_enabled(&a->input, !a->link_stopping && !strcmp(a->ble_status, "on"));
     ph_pointer_set_enabled(&a->pointer, a->input.enabled && a->phone_name[0], SDL_GetTicks64());
     if (!a->input.enabled)
         ph_scroll_reset(&a->wheel);
@@ -703,7 +713,11 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
 
 static void start_bluetooth(app *a)
 {
+#ifdef _WIN32
+    char *argv[] = {(char *)a->opt->ble_helper, NULL};
+#else
     char *argv[] = {"python3", "-u", (char *)a->opt->ble_helper, NULL};
+#endif
 
     if (!a->opt->bluetooth || !a->opt->ble_helper)
         return;

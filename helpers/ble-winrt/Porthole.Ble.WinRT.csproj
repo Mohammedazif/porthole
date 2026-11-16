@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>porthole-ble-winrt</AssemblyName>
+    <RootNamespace>Porthole.Ble.WinRT</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <PublishTrimmed>false</PublishTrimmed>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Update="licenses/*" PortholeNotice="true" />
+    <Compile Include="Program.cs" />
+    <Compile Include="PipeSessionLifetime.cs" />
+    <Compile Include="WinRtHidPeripheral.cs" />
+    <ProjectReference Include="Core/Porthole.Ble.Core.csproj" />
+  </ItemGroup>
+  <Target Name="PortholePublishNotices" AfterTargets="Publish">
+    <ItemGroup>
+      <_PortholeBundledPack Include="@(ResolvedRuntimePack)"
+        Condition="'%(ResolvedRuntimePack.NuGetPackageId)' == 'Microsoft.NETCore.App.Runtime.$(RuntimeIdentifier)' Or '%(ResolvedRuntimePack.NuGetPackageId)' == 'Microsoft.Windows.SDK.NET.Ref'" />
+      <_PortholeRuntimeNotice Include="%(ResolvedRuntimePack.PackageDirectory)/LICENSE.TXT;%(ResolvedRuntimePack.PackageDirectory)/THIRD-PARTY-NOTICES.TXT"
+        Condition="'%(ResolvedRuntimePack.NuGetPackageId)' == 'Microsoft.NETCore.App.Runtime.$(RuntimeIdentifier)'" />
+      <_PortholeSdkMetadata Include="%(ResolvedRuntimePack.PackageDirectory)/microsoft.windows.sdk.net.ref.nuspec;%(ResolvedRuntimePack.PackageDirectory)/data/RuntimeList.xml"
+        Condition="'%(ResolvedRuntimePack.NuGetPackageId)' == 'Microsoft.Windows.SDK.NET.Ref'" />
+      <_PortholeComponentInfo Include="SDK=$(NETCoreSdkVersion);TFM=$(TargetFramework);RID=$(RuntimeIdentifier);SelfContained=$(SelfContained)" />
+      <_PortholeComponentInfo Include="@(_PortholeBundledPack->'%(NuGetPackageId)=%(NuGetPackageVersion)')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PortholeRuntimeNotice)" DestinationFolder="$(PublishDir)licenses/dotnet" Condition="'$(SelfContained)' == 'true'" />
+    <Copy SourceFiles="@(_PortholeSdkMetadata)" DestinationFolder="$(PublishDir)licenses/windows-sdk" />
+    <Copy SourceFiles="@(None->WithMetadataValue('PortholeNotice', 'true'))" DestinationFolder="$(PublishDir)licenses/windows-sdk" />
+    <Copy SourceFiles="README.md" DestinationFolder="$(PublishDir)" />
+    <WriteLinesToFile File="$(PublishDir)COMPONENTS.txt" Lines="@(_PortholeComponentInfo)" Overwrite="true" />
+  </Target>
+</Project>

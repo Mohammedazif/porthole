@@ -9,6 +9,13 @@ if [[ "${MSYSTEM:-}" != "UCRT64" ]]; then
     exit 1
 fi
 
+# WinRT stays in a separate managed helper; its self-contained bundle needs no
+# installed .NET runtime on the user's PC. The build requires the .NET 10 SDK.
+if ! command -v dotnet >/dev/null 2>&1 || ! dotnet --list-sdks | grep -q '^10\.'; then
+    echo 'Install the .NET 10 SDK from https://dotnet.microsoft.com/download/dotnet/10.0, then reopen UCRT64.' >&2
+    exit 1
+fi
+
 pacman -S --needed --noconfirm \
     git \
     mingw-w64-ucrt-x86_64-gcc \

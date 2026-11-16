@@ -122,3 +122,19 @@ set_tests_properties(cli_version PROPERTIES PASS_REGULAR_EXPRESSION "Porthole ${
 
 add_test(NAME cli_rejects_unknown_option COMMAND porthole --no-such-option)
 set_tests_properties(cli_rejects_unknown_option PROPERTIES WILL_FAIL TRUE)
+
+if(WIN32)
+    add_executable(fake_windows_ble_helper fake_windows_ble_helper.c)
+    target_include_directories(fake_windows_ble_helper PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    porthole_set_warnings(fake_windows_ble_helper)
+    add_executable(test_windows_link test_windows_link.c ../src/hid/link.c)
+    target_link_libraries(test_windows_link PRIVATE porthole_core)
+    porthole_set_warnings(test_windows_link)
+    if(MINGW)
+        target_link_options(test_windows_link PRIVATE -municode -static-libgcc)
+        target_link_options(fake_windows_ble_helper PRIVATE -municode -static-libgcc)
+    endif()
+    add_test(NAME windows_hid_link
+        COMMAND test_windows_link $<TARGET_FILE:fake_windows_ble_helper>)
+    set_tests_properties(windows_hid_link PROPERTIES TIMEOUT 30)
+endif()

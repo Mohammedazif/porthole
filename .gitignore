@@ -16,3 +16,7 @@ Thumbs.db
 __pycache__/
 *.pyc
 .venv/
+
+# .NET helper outputs (CMake normally redirects these under build/)
+helpers/ble-winrt/**/bin/
+helpers/ble-winrt/**/obj/

@@ -15,6 +15,13 @@ jobs:
         with:
           submodules: recursive
 
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Test portable Windows Bluetooth protocol and sender
+        run: dotnet run --project helpers/ble-winrt/Tests --configuration Release --artifacts-path build/dotnet-tests
+
       - name: Install dependencies
         run: sudo ./scripts/install-deps-linux.sh
 
@@ -28,7 +35,7 @@ jobs:
         run: ctest --preset release
 
   windows:
-    name: Windows Wi-Fi mirror (MSYS2 UCRT64)
+    name: Windows Wi-Fi mirror and Bluetooth (MSYS2 UCRT64)
     runs-on: windows-2022
     defaults:
       run:
@@ -37,6 +44,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
 
       - uses: msys2/setup-msys2@v2
         with:
@@ -60,6 +71,10 @@ jobs:
 
       - name: Test
         run: ctest --preset windows-release
+
+      - name: Test Windows Bluetooth sender
+        shell: pwsh
+        run: dotnet run --project helpers/ble-winrt/Tests --configuration Release --artifacts-path build/dotnet-tests
 
       - name: Package portable mirror and matching source archives
         run: bash scripts/package-windows.sh

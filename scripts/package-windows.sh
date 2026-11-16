@@ -22,6 +22,10 @@ cp "$binary" "$package_dir/porthole.exe"
 cp "$repo_root/LICENSE" "$package_dir/LICENSE"
 cp "$repo_root/third_party/UxPlay/LICENSE" "$package_dir/licenses/UxPlay-LICENSE"
 cp "$repo_root/scripts/windows-firewall.ps1" "$package_dir/windows-firewall.ps1"
+helper_dir="$(dirname -- "$binary")/ble-winrt"
+if [[ -f "$helper_dir/porthole-ble-winrt.exe" ]]; then
+    cp -a "$helper_dir" "$package_dir/ble-winrt"
+fi
 git -C "$repo_root" rev-parse HEAD > "$package_dir/REVISION.txt"
 
 # Inspect every PE import recursively; never execute arbitrary dependency DLLs.
@@ -88,12 +92,27 @@ git -C "$repo_root/third_party/UxPlay" archive --format=tar --prefix=UxPlay/ HEA
     | gzip -n > "$source_dir/UxPlay-source.tar.gz"
 cp "$package_dir/REVISION.txt" "$source_dir/REVISION.txt"
 cat > "$package_dir/READ-ME.txt" <<'TEXT'
-Porthole Windows Wi-Fi mirror (portable prototype)
+Porthole Windows Wi-Fi mirror and Bluetooth controls (portable prototype)
 
 Requires Windows 10 version 1903 or newer, or Windows 11. No Bonjour installation.
 Keep porthole.exe and all bundled DLLs together. Launch porthole.exe, join the same
 Private Wi-Fi network as the iPhone, then select Porthole in Screen Mirroring.
-Windows Bluetooth control is a separate roadmap item; this bundle is view-only.
+Bluetooth controls require Windows 10 version 2004 or later and an adapter/driver
+that supports Bluetooth LE peripheral mode. Keep the entire ble-winrt/ folder
+beside porthole.exe; no Python or installed .NET runtime is required.
+The mirror-only build can omit that folder; --no-bluetooth disables controls.
+
+On iPhone enable AssistiveTouch and disable Dwell Control, then pair the PC's
+Windows Bluetooth name in Settings > Bluetooth. Accept any Windows pairing
+prompt. The Bluetooth name can differ from the Screen Mirroring name. F2 walks
+through pairing, mirroring and safe pointer calibration. Keep Tracking
+Sensitivity fixed after calibration.
+
+To check hardware support before pairing, run in PowerShell:
+  .\ble-winrt\porthole-ble-winrt.exe --probe
+The probe creates the real HID service without advertising or connecting.
+Hardware/policy failures leave the Wi-Fi mirror usable. Read the probe's error
+before retrying pairing; do not remove unrelated Bluetooth devices.
 
 If discovery/video is blocked, review windows-firewall.ps1 and run it explicitly
 in an elevated PowerShell window. It allows only the fixed mirror ports and mDNS
@@ -103,6 +122,6 @@ Corresponding project/UxPlay and dependency sources are in the matching -sources
 artifact with the same revision. DEPENDENCIES.txt records exact runtime packages;
 licenses/ contains their installed copyright/license files. See LICENSE (GPL-3.0).
 TEXT
-(cd "$package_dir" && sha256sum -- *.exe *.dll > SHA256SUMS.txt)
+(cd "$package_dir" && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
 (cd "$source_dir" && sha256sum -- *.tar.gz *.tar.zst > SHA256SUMS.txt)
 printf 'Binary bundle: %s\nMatching sources: %s\n' "$package_dir" "$source_dir"

@@ -1,0 +1,495 @@
+using Porthole.Ble.Core;
+using Windows.Devices.Bluetooth;
+using Windows.Devices.Bluetooth.GenericAttributeProfile;
+using Windows.Devices.Enumeration;
+using Windows.Devices.Radios;
+using Windows.Storage.Streams;
+
+namespace Porthole.Ble.WinRT;
+
+/// <summary>One native Windows HOGP service. Windows owns pairing, CCCDs and radio timing.</summary>
+internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
+{
+    private readonly object stateLock = new();
+    private readonly PipeSessionLifetime pipeLifetime = new();
+    private readonly SessionGate gate;
+    private readonly Action<string> status;
+    private readonly Action<string> log;
+    private readonly Dictionary<ReportKind, GattLocalCharacteristic> reports = new();
+    private readonly Dictionary<ReportKind, byte[]> lastReports = new();
+    private readonly Dictionary<ReportKind, GattSubscribedClient> targets = new();
+    private readonly Dictionary<GattSession, PeerSession> observedSessions = new();
+    private readonly List<GattLocalCharacteristic> readable = new();
+    private readonly List<GattLocalCharacteristic> writable = new();
+    private readonly TaskCompletionSource<Exception> failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private GattServiceProvider? provider;
+    private PeerSession? activePeer;
+    private byte[] keyboardLeds = [0];
+    private bool suspended;
+    private bool disposed;
+    private bool advertisingReported;
+
+    public WinRtHidPeripheral(SessionGate gate, Action<string> status, Action<string> log)
+    {
+        this.gate = gate;
+        this.status = status;
+        this.log = log;
+        foreach (ReportKind kind in Enum.GetValues<ReportKind>())
+            lastReports[kind] = new byte[HidDescriptor.GetReportLength(kind)];
+    }
+
+    public Task<Exception> Failure => failure.Task;
+    private static Guid Uuid(ushort id) => new($"0000{id:x4}-0000-1000-8000-00805f9b34fb");
+
+    public async Task InitializeAsync(CancellationToken ct)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(15));
+        BluetoothAdapter? adapter = await BluetoothAdapter.GetDefaultAsync().AsTask(deadline.Token);
+        if (adapter is null)
+            throw new InvalidOperationException("No Windows Bluetooth adapter was found. Enable or attach a Bluetooth adapter, then run --probe.");
+        if (!adapter.IsLowEnergySupported)
+            throw new InvalidOperationException("This Bluetooth adapter does not support Bluetooth Low Energy. Use a BLE adapter with Windows peripheral-role support.");
+        if (!adapter.IsPeripheralRoleSupported)
+            throw new InvalidOperationException("The Windows Bluetooth driver does not support the BLE peripheral role. Update its driver or use a peripheral-capable adapter; Wi-Fi viewing still works.");
+        Radio? radio = await adapter.GetRadioAsync().AsTask(deadline.Token);
+        if (radio is null || radio.State != RadioState.On)
+            throw new InvalidOperationException("The Windows Bluetooth radio is off or unavailable. Turn Bluetooth on in Windows Settings, then run --probe.");
+        DeviceAccessStatus access = DeviceAccessInformation.CreateFromId(adapter.DeviceId).CurrentStatus;
+        if (access is DeviceAccessStatus.DeniedBySystem or DeviceAccessStatus.DeniedByUser)
+            throw new UnauthorizedAccessException("Windows denied this desktop app access to the Bluetooth adapter.");
+        log($"BLE peripheral role supported; adapter '{Program.SingleLine(radio.Name)}'.");
+        log($"Pair this PC's Windows Bluetooth name (normally '{Program.SingleLine(Environment.MachineName)}') from the iPhone's Bluetooth settings. Windows controls the advertised name and pairing UI.");
+        GattServiceProviderResult result = await GattServiceProvider.CreateAsync(Uuid(0x1812)).AsTask(deadline.Token);
+        if (result.Error != BluetoothError.Success || result.ServiceProvider is null)
+            throw BluetoothFailure("create HID service 1812", result.Error);
+        provider = result.ServiceProvider;
+        provider.AdvertisementStatusChanged += AdvertisementChanged;
+
+        await CreateStaticAsync(0x2a4a, [0x11, 0x01, 0, 0x02], deadline.Token); // HID 1.11; normally connectable.
+        await CreateStaticAsync(0x2a4b, HidDescriptor.ReportMap.ToArray(), deadline.Token);
+        foreach (ReportKind kind in Enum.GetValues<ReportKind>())
+        {
+            GattLocalCharacteristic report = await CreateCharacteristicAsync(0x2a4d,
+                GattCharacteristicProperties.Read | GattCharacteristicProperties.Notify, deadline.Token);
+            reports.Add(kind, report);
+            report.ReadRequested += ReadReport;
+            readable.Add(report);
+            // Windows automatically supplies the CCCD for a Notify characteristic.
+            await CreateReportReferenceAsync(report, (byte)kind, 1, deadline.Token);
+            report.SubscribedClientsChanged += SubscribersChanged;
+        }
+        GattLocalCharacteristic output = await CreateCharacteristicAsync(0x2a4d,
+            GattCharacteristicProperties.Read | GattCharacteristicProperties.Write |
+            GattCharacteristicProperties.WriteWithoutResponse, deadline.Token);
+        output.ReadRequested += ReadKeyboardOutput;
+        output.WriteRequested += WriteKeyboardOutput;
+        readable.Add(output);
+        writable.Add(output);
+        await CreateReportReferenceAsync(output, (byte)ReportKind.Keyboard, 2, deadline.Token);
+
+        GattLocalCharacteristic protocol = await CreateCharacteristicAsync(0x2a4e,
+            GattCharacteristicProperties.Read | GattCharacteristicProperties.WriteWithoutResponse, deadline.Token);
+        protocol.ReadRequested += ReadProtocol;
+        protocol.WriteRequested += WriteProtocol;
+        readable.Add(protocol);
+        writable.Add(protocol);
+        GattLocalCharacteristic control = await CreateCharacteristicAsync(0x2a4c,
+            GattCharacteristicProperties.WriteWithoutResponse, deadline.Token);
+        control.WriteRequested += WriteControl;
+        writable.Add(control);
+        log("HID1812 created: encrypted keyboard/mouse/consumer reports, report map, report references, LED output, protocol mode and control point. No reserved GAP/GATT/Device Information services are registered.");
+    }
+
+    private async Task<GattLocalCharacteristic> CreateCharacteristicAsync(ushort id, GattCharacteristicProperties properties, CancellationToken ct)
+    {
+        var parameters = new GattLocalCharacteristicParameters
+        {
+            CharacteristicProperties = properties,
+            ReadProtectionLevel = GattProtectionLevel.EncryptionRequired,
+            WriteProtectionLevel = GattProtectionLevel.EncryptionRequired
+        };
+        GattLocalCharacteristicResult result = await provider!.Service.CreateCharacteristicAsync(Uuid(id), parameters).AsTask(ct);
+        if (result.Error != BluetoothError.Success || result.Characteristic is null)
+            throw BluetoothFailure($"create HID characteristic {id:x4}", result.Error);
+        return result.Characteristic;
+    }
+
+    private async Task CreateStaticAsync(ushort id, byte[] bytes, CancellationToken ct)
+    {
+        var parameters = new GattLocalCharacteristicParameters
+        {
+            CharacteristicProperties = GattCharacteristicProperties.Read,
+            ReadProtectionLevel = GattProtectionLevel.EncryptionRequired,
+            StaticValue = Buffer(bytes)
+        };
+        GattLocalCharacteristicResult result = await provider!.Service.CreateCharacteristicAsync(Uuid(id), parameters).AsTask(ct);
+        if (result.Error != BluetoothError.Success)
+            throw BluetoothFailure($"create HID characteristic {id:x4}", result.Error);
+    }
+
+    private static async Task CreateReportReferenceAsync(GattLocalCharacteristic report, byte id, byte type, CancellationToken ct)
+    {
+        var parameters = new GattLocalDescriptorParameters
+        {
+            ReadProtectionLevel = GattProtectionLevel.EncryptionRequired,
+            StaticValue = Buffer([id, type])
+        };
+        GattLocalDescriptorResult result = await report.CreateDescriptorAsync(Uuid(0x2908), parameters).AsTask(ct);
+        if (result.Error != BluetoothError.Success)
+            throw BluetoothFailure($"create Report Reference for report {id}", result.Error);
+    }
+
+    public async Task StartAsync(CancellationToken ct)
+    {
+        provider!.StartAdvertising(new GattServiceProviderAdvertisingParameters
+        {
+            IsConnectable = true,
+            IsDiscoverable = true
+        });
+        Task finished = await Task.WhenAny(started.Task, failure.Task, Task.Delay(TimeSpan.FromSeconds(12), ct));
+        ct.ThrowIfCancellationRequested();
+        if (finished == failure.Task)
+            throw await failure.Task;
+        if (finished != started.Task)
+            throw new TimeoutException("Windows did not start HID advertising. Turn Bluetooth off/on in Windows, close other peripheral publishers, then run --probe.");
+        await started.Task;
+    }
+
+    private void AdvertisementChanged(GattServiceProvider sender, GattServiceProviderAdvertisementStatusChangedEventArgs args)
+    {
+        lock (stateLock)
+        {
+            if (disposed) return;
+            log($"HID advertising status: {args.Status} ({args.Error}).");
+            if (args.Status is GattServiceProviderAdvertisementStatus.Started or GattServiceProviderAdvertisementStatus.StartedWithoutAllAdvertisementData)
+            {
+                if (!advertisingReported)
+                {
+                    advertisingReported = true;
+                    status("advertising");
+                }
+                started.TrySetResult();
+            }
+            else if (args.Status is GattServiceProviderAdvertisementStatus.Aborted or GattServiceProviderAdvertisementStatus.Stopped)
+            {
+                DropPeerLocked();
+                failure.TrySetResult(args.Error == BluetoothError.Success
+                    ? new InvalidOperationException("Windows stopped HID advertising. Check that Bluetooth is on and run --probe again.")
+                    : BluetoothFailure("advertise the HID service", args.Error));
+            }
+        }
+    }
+
+    private static Exception BluetoothFailure(string operation, BluetoothError error)
+    {
+        string action = error switch
+        {
+            BluetoothError.DisabledByPolicy => "Windows policy or a reserved service blocked publishing. Check Bluetooth permissions and administrator policy.",
+            BluetoothError.RadioNotAvailable => "Turn Bluetooth on and check the adapter driver.",
+            BluetoothError.ResourceInUse => "Close the other Bluetooth peripheral publisher and try again.",
+            BluetoothError.NotSupported => "This Windows adapter/driver does not support local GATT publishing.",
+            _ => "Check Bluetooth Settings and run porthole-ble-winrt --probe."
+        };
+        return new InvalidOperationException($"Cannot {operation}: {error}. {action}");
+    }
+
+    private void SubscribersChanged(GattLocalCharacteristic sender, object args)
+    {
+        try
+        {
+            lock (stateLock)
+            {
+                if (!disposed) ReconcileLocked();
+            }
+        }
+        catch (Exception e) { log("Cannot inspect HID subscriptions: " + e.Message); FailConnection(); }
+    }
+
+    private void ReconcileLocked()
+    {
+        if (pipeLifetime.RestartRequired) return;
+        long previousEpoch = gate.Epoch;
+        var clients = new Dictionary<ReportKind, List<GattSubscribedClient>>();
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach ((ReportKind kind, GattLocalCharacteristic characteristic) in reports)
+        {
+            var current = characteristic.SubscribedClients
+                .Where(c => c.Session.SessionStatus == GattSessionStatus.Active).ToList();
+            clients[kind] = current;
+            foreach (GattSubscribedClient client in current) ids.Add(client.Session.DeviceId.Id);
+        }
+        if (ids.Count != 1)
+        {
+            if (ids.Count > 1) log("Multiple Bluetooth peers subscribed; input paused until exactly one phone remains.");
+            DropPeerLocked();
+            return;
+        }
+        string id = ids.Single();
+        if (activePeer is null || activePeer.Value.ClientId != id)
+        {
+            DropPeerLocked();
+            if (pipeLifetime.RestartRequired) return;
+            activePeer = gate.Connect(id);
+            ClearValuesLocked();
+        }
+        if (activePeer is not PeerSession peer) return;
+        targets.Clear();
+        foreach ((ReportKind kind, List<GattSubscribedClient> subscribed) in clients)
+        {
+            // Duplicate or partial subscription snapshots must never broadcast reports.
+            bool enabled = subscribed.Count == 1 && !suspended;
+            if (enabled)
+            {
+                GattSubscribedClient client = subscribed[0];
+                targets[kind] = client;
+                GattSession session = client.Session;
+                if (!observedSessions.ContainsKey(session))
+                {
+                    observedSessions.Add(session, peer);
+                    session.SessionStatusChanged += SessionChanged;
+                    log($"{kind} subscription active; maximum notification {client.MaxNotificationSize} bytes, ATT MTU {session.MaxPduSize}.");
+                }
+            }
+            gate.SetSubscribed(peer, kind, enabled);
+        }
+        if (gate.Epoch != previousEpoch) ClearValuesLocked();
+        CheckPipeLifetimeLocked();
+    }
+
+    private void CheckPipeLifetimeLocked()
+    {
+        if (!disposed && pipeLifetime.Observe(gate.IsReady))
+        {
+            targets.Clear();
+            ClearValuesLocked();
+            failure.TrySetResult(new InvalidOperationException(
+                "Bluetooth input connection changed; restarting the helper with a fresh input pipe before reconnecting."));
+        }
+    }
+
+    private void SessionChanged(GattSession sender, GattSessionStatusChangedEventArgs args)
+    {
+        try
+        {
+            lock (stateLock)
+            {
+                if (disposed || args.Status != GattSessionStatus.Closed || sender.SessionStatus != GattSessionStatus.Closed) return;
+                if (observedSessions.TryGetValue(sender, out PeerSession peer) && peer == activePeer)
+                {
+                    DropPeerLocked();
+                    log("Bluetooth session closed; queued input and cached reports cleared.");
+                }
+            }
+        }
+        catch (Exception e) { log("HID session callback: " + e.Message); }
+    }
+
+    private void ClearValuesLocked()
+    {
+        foreach (byte[] bytes in lastReports.Values) Array.Clear(bytes);
+        keyboardLeds[0] = 0;
+    }
+
+    private void DropPeerLocked()
+    {
+        if (activePeer is PeerSession peer) gate.Disconnect(peer);
+        activePeer = null;
+        targets.Clear();
+        ClearValuesLocked();
+        foreach (GattSession session in observedSessions.Keys) session.SessionStatusChanged -= SessionChanged;
+        observedSessions.Clear();
+        suspended = false;
+        CheckPipeLifetimeLocked();
+    }
+
+    private void FailConnection()
+    {
+        lock (stateLock) DropPeerLocked();
+    }
+
+    public async ValueTask<bool> NotifyAsync(DispatchToken token, ReportKind kind, ReadOnlyMemory<byte> payload, CancellationToken ct)
+    {
+        GattLocalCharacteristic characteristic;
+        GattSubscribedClient client;
+        lock (stateLock)
+        {
+            if (disposed || pipeLifetime.RestartRequired || !gate.IsCurrent(token) || activePeer != token.Peer ||
+                !reports.TryGetValue(kind, out characteristic!) || !targets.TryGetValue(kind, out client!) ||
+                client.Session.SessionStatus != GattSessionStatus.Active ||
+                client.MaxNotificationSize < payload.Length)
+                return false;
+        }
+        ct.ThrowIfCancellationRequested();
+        // Target the captured peer, never the all-subscribers overload. A reconnect cannot
+        // redirect an already started WinRT operation to a different phone.
+        GattClientNotificationResult result;
+        try
+        {
+            Task<GattClientNotificationResult> notification;
+            lock (stateLock)
+            {
+                if (disposed || pipeLifetime.RestartRequired || !gate.IsCurrent(token) || activePeer != token.Peer)
+                    return false;
+                ct.ThrowIfCancellationRequested();
+                // Serialize the native operation's start with session invalidation,
+                // but release the lock before awaiting the OS completion.
+                notification = characteristic.NotifyValueAsync(Buffer(payload.ToArray()), client).AsTask(ct);
+            }
+            result = await notification;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception e)
+        {
+            lock (stateLock)
+            {
+                if (activePeer == token.Peer && gate.IsCurrent(token)) DropPeerLocked();
+            }
+            log($"{kind} notification failed: {e.Message}");
+            return false;
+        }
+        lock (stateLock)
+        {
+            if (pipeLifetime.RestartRequired || !gate.IsCurrent(token) || activePeer != token.Peer) return false;
+            if (result.Status != GattCommunicationStatus.Success)
+            {
+                log($"{kind} notification failed: {result.Status}; input session reset.");
+                DropPeerLocked();
+                return false;
+            }
+            lastReports[kind] = payload.ToArray();
+            return true;
+        }
+    }
+
+    private async void ReadReport(GattLocalCharacteristic sender, GattReadRequestedEventArgs args)
+    {
+        byte[] value;
+        lock (stateLock)
+        {
+            ReportKind kind = reports.FirstOrDefault(p => p.Value == sender).Key;
+            value = lastReports.TryGetValue(kind, out byte[]? bytes) ? bytes.ToArray() : [];
+
+        }
+        await RespondReadAsync(args, value);
+    }
+
+    private async void ReadKeyboardOutput(GattLocalCharacteristic sender, GattReadRequestedEventArgs args)
+    {
+        byte[] value;
+        lock (stateLock) value = keyboardLeds.ToArray();
+        await RespondReadAsync(args, value);
+    }
+
+    private static async void ReadProtocol(GattLocalCharacteristic sender, GattReadRequestedEventArgs args) =>
+        await RespondReadAsync(args, [1]); // Descriptor declares Report protocol only.
+
+    private static async Task RespondReadAsync(GattReadRequestedEventArgs args, byte[] value)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+        var deferral = args.GetDeferral();
+        try
+        {
+            GattReadRequest? request = await args.GetRequestAsync().AsTask(deadline.Token);
+            if (request is null) return;
+            if (request.Offset > value.Length) request.RespondWithProtocolError(0x07); // Invalid Offset.
+            else request.RespondWithValue(Buffer(value[(int)request.Offset..]));
+        }
+        catch (Exception e) { Program.Diagnostic("HID read request: " + e.Message); }
+        finally { deferral.Complete(); }
+    }
+
+    private async void WriteKeyboardOutput(GattLocalCharacteristic sender, GattWriteRequestedEventArgs args) =>
+        await RespondWriteAsync(args, value =>
+        {
+            lock (stateLock) keyboardLeds[0] = value;
+            return true;
+        });
+
+    private static async void WriteProtocol(GattLocalCharacteristic sender, GattWriteRequestedEventArgs args) =>
+        await RespondWriteAsync(args, value => value == 1);
+
+    private async void WriteControl(GattLocalCharacteristic sender, GattWriteRequestedEventArgs args) =>
+        await RespondWriteAsync(args, value =>
+        {
+            if (value > 1) return false;
+            lock (stateLock)
+            {
+                suspended = value == 0;
+                ClearValuesLocked();
+                ReconcileLocked();
+            }
+            return true;
+        });
+
+    private static async Task RespondWriteAsync(GattWriteRequestedEventArgs args, Func<byte, bool> accept)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+        var deferral = args.GetDeferral();
+        try
+        {
+            GattWriteRequest? request = await args.GetRequestAsync().AsTask(deadline.Token);
+            if (request is null) return;
+            byte? error = null;
+            if (request.Offset != 0) error = 0x07;
+            else if (request.Value.Length != 1) error = 0x0d; // Invalid Attribute Value Length.
+            else
+            {
+                using DataReader reader = DataReader.FromBuffer(request.Value);
+                if (!accept(reader.ReadByte())) error = 0x13; // Value Not Allowed.
+            }
+            if (request.Option == GattWriteOption.WriteWithResponse)
+            {
+                if (error is byte code) request.RespondWithProtocolError(code);
+                else request.Respond();
+            }
+        }
+        catch (Exception e) { Program.Diagnostic("HID write request: " + e.Message); }
+        finally { deferral.Complete(); }
+    }
+
+    private static IBuffer Buffer(byte[] bytes)
+    {
+        using var writer = new DataWriter();
+        writer.WriteBytes(bytes);
+        return writer.DetachBuffer();
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        lock (stateLock)
+        {
+            if (disposed) return ValueTask.CompletedTask;
+            disposed = true;
+            DropPeerLocked();
+            if (provider is not null)
+            {
+                provider.AdvertisementStatusChanged -= AdvertisementChanged;
+                try { provider.StopAdvertising(); }
+                catch (Exception e) { log("Stopping HID advertisement: " + e.Message); }
+            }
+            foreach (GattLocalCharacteristic report in reports.Values)
+            {
+                report.SubscribedClientsChanged -= SubscribersChanged;
+                report.ReadRequested -= ReadReport;
+            }
+            foreach (GattLocalCharacteristic item in readable)
+            {
+                item.ReadRequested -= ReadKeyboardOutput;
+                item.ReadRequested -= ReadProtocol;
+            }
+            foreach (GattLocalCharacteristic item in writable)
+            {
+                item.WriteRequested -= WriteKeyboardOutput;
+                item.WriteRequested -= WriteProtocol;
+                item.WriteRequested -= WriteControl;
+            }
+            reports.Clear();
+            readable.Clear();
+            writable.Clear();
+            provider = null;
+        }
+        return ValueTask.CompletedTask;
+    }
+}

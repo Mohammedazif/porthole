@@ -139,6 +139,12 @@ static const SDL_Color color_text = {232, 239, 246, 255};
 static const SDL_Color color_muted = {166, 182, 198, 255};
 static const SDL_Color color_accent = {89, 199, 255, 255};
 
+#ifdef _WIN32
+#define PH_PAIR_INSTRUCTION "Pair this PC's Bluetooth name on iPhone.\n"
+#else
+#define PH_PAIR_INSTRUCTION "Pair Porthole in iPhone Bluetooth.\n"
+#endif
+
 static void draw_waiting(ph_window *w, int width, int height)
 {
     int scale = text_scale(width), margin = 16 * scale;
@@ -160,7 +166,7 @@ static void draw_waiting(ph_window *w, int width, int height)
                   scale, color_text);
     y += 5 * scale;
     y = draw_text(w->renderer,
-                  "Pair Porthole in iPhone Bluetooth.\n"
+                  PH_PAIR_INSTRUCTION
                   "Accessibility > Touch > AssistiveTouch: On.\n"
                   "Dwell Control: Off.",
                   margin, y, content_width, scale, color_muted);
@@ -212,7 +218,7 @@ static void draw_help(ph_window *w, int width, int height)
     y = draw_text(w->renderer, "Setup", margin, y, content_width, scale, color_accent);
     draw_text(w->renderer,
                "AssistiveTouch: On. Dwell Control: Off.\n"
-               "Pair Porthole in iPhone Bluetooth.\n"
+               PH_PAIR_INSTRUCTION
                "Assign buttons 3-6 to App Switcher, Control Center, Notifications, Screenshot.",
                margin, y, content_width, scale, color_muted);
     SDL_RenderSetClipRect(w->renderer, clipped ? &old_clip : NULL);
@@ -270,8 +276,14 @@ static void draw_setup(ph_window *w, int width, int height)
         break;
     case PH_SETUP_BLUETOOTH:
         title = "Connect Bluetooth";
+#ifdef _WIN32
+        body = "On iPhone, open Settings > Bluetooth.\nSelect this PC's Bluetooth name under Other Devices.\n\n"
+               "Accept any Windows pairing prompt. Wait for all controls to connect. "
+               "If pairing fails, remove the stale pairing on both devices and pair again.";
+#else
         body = "On iPhone, open Settings > Bluetooth.\nSelect Porthole under Other Devices.\n\n"
                "Wait for all controls to connect. If pairing fails, forget the old Porthole entry and pair again.";
+#endif
         break;
     case PH_SETUP_MIRROR:
         title = "Mirror your screen";
