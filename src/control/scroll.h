@@ -25,7 +25,10 @@ typedef struct ph_scroll {
     double bar_top, bar_bottom, max_bar_length, track_top, track_bottom;
     double sent_bar_top, sent_bar_bottom;
     int blocked_y, sent_y;
-    uint64_t now_ms, wait_since;
+    unsigned int pinned_batches;
+    int pinned_direction;
+    bool have_request, probe;
+    uint64_t now_ms, wait_since, last_request_at;
 } ph_scroll;
 
 /* Target coordinates are fractions of the phone picture; aspect is its width/height.

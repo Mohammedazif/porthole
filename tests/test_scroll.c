@@ -204,10 +204,17 @@ int main(void)
     CHECK(f.scroll.waiting_frame);
     ph_scroll_observe(&f.scroll, true, 121.0 / 1080, 440.0 / 1080, 140);
     CHECK(f.scroll.blocked_y == 1 && f.scroll.pending_y == 0 && f.count == first_count);
+    /* The rebound can move the thumb off its learned minimum while the same
+     * wheel burst is still arriving. It must not reopen the stopped direction. */
+    ph_scroll_observe(&f.scroll, true, 135.0 / 1080, 466.0 / 1080, 160);
+    CHECK(f.scroll.blocked_y == 1);
     CHECK(ph_scroll_request(&f.scroll, 0.5, 0.65, 0.46, 0, 100));
     ph_scroll_observe(&f.scroll, false, 0, 0, 200);
-    ph_scroll_tick(&f.scroll, 1000);
+    ph_scroll_tick(&f.scroll, 300);
     CHECK(f.count == first_count);
+    /* Repositioning inside the same page does not forget that it is at an edge. */
+    CHECK(ph_scroll_request(&f.scroll, 0.7, 0.5, 0.46, 0, 100));
+    CHECK(f.count == first_count && f.scroll.blocked_y == 1);
     CHECK(ph_scroll_request(&f.scroll, 0.5, 0.65, 0.46, 0, -1));
     CHECK(f.count > first_count); /* reversing can leave the edge immediately */
     ph_scroll_ack(&f.scroll, f.last_sync);
@@ -223,6 +230,10 @@ int main(void)
     CHECK(wheel_total(&f) == -1); /* small probe when moving into the nearby edge */
     ph_scroll_ack(&f.scroll, f.last_sync);
     ph_scroll_observe(&f.scroll, true, 121.0 / 1080, 452.0 / 1080, 140);
+    CHECK(f.scroll.blocked_y == 0); /* one delayed picture cannot prove an edge */
+    CHECK(ph_scroll_request(&f.scroll, .5, .65, .46, 0, 1));
+    ph_scroll_ack(&f.scroll, f.last_sync);
+    ph_scroll_observe(&f.scroll, true, 121.0 / 1080, 452.0 / 1080, 180);
     CHECK(f.scroll.blocked_y == 1);
 
     /* Same reproduction at the bottom, including a jump straight to a short
@@ -236,10 +247,44 @@ int main(void)
     first_count = f.count;
     ph_scroll_observe(&f.scroll, true, 1006.0 / 1080, 1015.0 / 1080, 140);
     CHECK(f.scroll.blocked_y == -1 && f.count == first_count && f.scroll.pending_y == 0);
+    ph_scroll_observe(&f.scroll, true, 668.0 / 1080, 999.0 / 1080, 160);
+    CHECK(f.scroll.blocked_y == -1);
     CHECK(ph_scroll_request(&f.scroll, 0.5, 0.65, 0.46, 0, -40));
     CHECK(f.count == first_count);
     CHECK(ph_scroll_request(&f.scroll, 0.5, 0.65, 0.46, 0, 1));
     CHECK(f.count > first_count);
+
+    /* A large title expands near the top: the indicator's track starts lower
+     * than its earlier minimum. A shorter thumb at that new origin is still an
+     * edge, not permission to keep pushing into the rubber-band animation. */
+    init(&f);
+    f.scroll.feedback = true;
+    ph_scroll_observe(&f.scroll, true, 121.0 / 1080, 452.0 / 1080, 100);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, 1));
+    ph_scroll_ack(&f.scroll, f.last_sync);
+    first_count = f.count;
+    ph_scroll_observe(&f.scroll, true, 180.0 / 1080, 490.0 / 1080, 140);
+    CHECK(f.scroll.blocked_y == 1);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, 40));
+    CHECK(f.count == first_count);
+
+    /* The bottom track can move inward too (for example, a bottom toolbar).
+     * Its compressed indicator must not have to reach an obsolete maximum. */
+    init(&f);
+    f.scroll.feedback = true;
+    ph_scroll_observe(&f.scroll, true, 684.0 / 1080, 1015.0 / 1080, 100);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, -1));
+    CHECK(wheel_total(&f) == 1);
+    ph_scroll_ack(&f.scroll, f.last_sync);
+    first_count = f.count;
+    ph_scroll_observe(&f.scroll, true, 700.0 / 1080, 990.0 / 1080, 140);
+    CHECK(f.scroll.blocked_y == -1);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, -40));
+    CHECK(f.count == first_count);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 1, 0));
+    CHECK(f.count > first_count && pan_total(&f) == 1 && f.scroll.blocked_y == -1);
+    ph_scroll_reset(&f.scroll);
+    CHECK(!f.scroll.blocked_y && !f.scroll.have_bar);
 
     /* A normal moving indicator permits the next notch after a fresh frame;
      * missing frames have a bounded timeout instead of hanging scrolling. */
@@ -262,6 +307,48 @@ int main(void)
     CHECK(f.count > first_count);
     ph_scroll_reset(&f.scroll);
     CHECK(!f.scroll.have_bar && !f.scroll.blocked_y && !f.scroll.waiting_frame);
+
+    /* A delayed picture near the lower screen is followed by real progress.
+     * One unchanged frame must not latch the remainder of a long list. */
+    init(&f);
+    f.scroll.feedback = true;
+    ph_scroll_observe(&f.scroll, true, .62, .9, 100);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, -1));
+    ph_scroll_ack(&f.scroll, f.last_sync);
+    ph_scroll_observe(&f.scroll, true, .62, .9, 140);
+    CHECK(!f.scroll.blocked_y);
+    ph_scroll_observe(&f.scroll, true, .64, .92, 160);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, -1));
+    ph_scroll_ack(&f.scroll, f.last_sync);
+    ph_scroll_observe(&f.scroll, true, .66, .94, 200);
+    CHECK(!f.scroll.blocked_y);
+
+    /* Navigation on the phone and newly discovered Bluetooth devices can change
+     * the thumb length. A new gesture must not reuse another page's maximum. */
+    init(&f);
+    f.scroll.feedback = true;
+    ph_scroll_observe(&f.scroll, true, .4, .95, 100);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, -1));
+    ph_scroll_ack(&f.scroll, f.last_sync);
+    ph_scroll_observe(&f.scroll, true, .6, .95, 140);
+    CHECK(f.scroll.blocked_y == -1);
+    first_count = f.count;
+    int before_wheel = wheel_total(&f);
+    ph_scroll_tick(&f.scroll, 1000);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, -4));
+    CHECK(f.count > first_count && wheel_total(&f) == before_wheel + 1);
+    ph_scroll_ack(&f.scroll, f.last_sync);
+    ph_scroll_observe(&f.scroll, true, .65, .9, 1040);
+    CHECK(!f.scroll.blocked_y && fabs(f.scroll.max_bar_length - .25) < .001);
+
+    /* Old compression after reversal must not relatch a direction whose last
+     * batch has already finished, before the new pointer target is ready. */
+    ph_scroll_cancel(&f.scroll);
+    f.scroll.blocked_y = -1;
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, 1));
+    ph_scroll_cancel(&f.scroll);
+    ph_scroll_observe(&f.scroll, true, .8, .95, 1060);
+    CHECK(!f.scroll.blocked_y);
 
     if (failures)
         return 1;
