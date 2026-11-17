@@ -37,6 +37,9 @@ typedef struct ph_scroll {
 bool ph_scroll_request(ph_scroll *scroll, double x, double y, double aspect,
                        int notches_x, int notches_y);
 void ph_scroll_ack(ph_scroll *scroll, uint32_t id);
+/* Apply an already-received ACK before timeout/pump work. A follow-up batch
+ * starts at this arrival time rather than the preceding event-loop tick. */
+void ph_scroll_ack_at(ph_scroll *scroll, uint32_t id, uint64_t now_ms);
 /* Stop pending intent, retaining the current transport fence until its ACK so
  * replacement input cannot overtake cancelled output. Reset also forgets the
  * position/bounds, while transport_reset discards a replaced pipe's fence. */

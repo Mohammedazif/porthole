@@ -182,9 +182,10 @@ static void handle_ble_status(app *a, const char *line)
         unsigned int id;
         if (sscanf(line, "sync %u", &id) == 1) {
             ph_metrics_hid_ack(&a->metrics, (uint32_t)id, ph_metrics_now_ms());
-            ph_scroll_tick(&a->wheel, SDL_GetTicks64());
-            ph_scroll_ack(&a->wheel, (uint32_t)id);
-            ph_pointer_ack(&a->pointer, (uint32_t)id, SDL_GetTicks64());
+            Uint64 now = SDL_GetTicks64();
+            ph_pointer_ack(&a->pointer, (uint32_t)id, now);
+            ph_scroll_ack_at(&a->wheel, (uint32_t)id, now);
+            /* The main loop checks timeouts after queued ACK events are handled. */
         }
         PH_LOGD("Bluetooth: %s", line);
         return; /* internal bookkeeping */
@@ -899,9 +900,9 @@ int ph_app_run(const ph_app_options *opt)
         tick_setup(&a);
         tick_metrics(&a);
         if (a.link && !a.link_stopping
-            && ((a.pointer.failed && a.pointer.phase == PH_POINTER_DRAINING)
-                       || a.wheel.failed)) {
-            PH_LOGW("input helper stopped acknowledging queued reports; restarting control");
+            && (ph_pointer_transport_stalled(&a.pointer) || a.wheel.failed)) {
+            PH_LOGW("%s acknowledgement timed out; restarting control",
+                    ph_pointer_transport_stalled(&a.pointer) ? "pointer" : "scroll");
             ph_input_set_enabled(&a.input, false);
             ph_pointer_set_enabled(&a.pointer, false, SDL_GetTicks64());
             ph_hid_link_request_stop(a.link);

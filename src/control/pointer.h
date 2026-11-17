@@ -34,7 +34,7 @@ typedef enum ph_pointer_phase {
  * wheel readiness. */
 typedef struct ph_pointer {
     ph_pointer_output output;
-    bool enabled, active, known, failed;
+    bool enabled, active, known, failed, ack_timed_out;
     ph_pointer_phase phase;
     double target_x, target_y, aspect;
     double target_tolerance;
@@ -61,6 +61,10 @@ bool ph_pointer_button(ph_pointer *p, uint8_t button, bool down, double x, doubl
 void ph_pointer_ack(ph_pointer *p, uint32_t id, uint64_t now_ms);
 void ph_pointer_observe(ph_pointer *p, bool found, double x, double y, uint64_t now_ms);
 void ph_pointer_tick(ph_pointer *p, uint64_t now_ms);
+/* Only an expired transport fence sets this fault. Position/video failures can
+ * release a held button and drain normally without replacing a healthy link.
+ * A matching current ACK or explicit transport_reset clears the fault. */
+bool ph_pointer_transport_stalled(const ph_pointer *p);
 bool ph_pointer_ready(const ph_pointer *p, double x, double y, double aspect);
 /* Search radius is expressed as a fraction of picture WIDTH, even for Y search. */
 bool ph_pointer_hint(const ph_pointer *p, double *x, double *y, double *radius);

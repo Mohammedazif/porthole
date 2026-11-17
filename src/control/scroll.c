@@ -172,8 +172,9 @@ bool ph_scroll_request(ph_scroll *scroll, double x, double y, double aspect,
     return true;
 }
 
-void ph_scroll_ack(ph_scroll *scroll, uint32_t id)
+void ph_scroll_ack_at(ph_scroll *scroll, uint32_t id, uint64_t now_ms)
 {
+    scroll->now_ms = now_ms;
     if (scroll->in_flight && id == scroll->sync_id) {
         bool cancelled = scroll->cancelled || scroll->failed;
         scroll->in_flight = false;
@@ -185,6 +186,11 @@ void ph_scroll_ack(ph_scroll *scroll, uint32_t id)
         scroll->wait_since = scroll->now_ms;
         start_batch(scroll);
     }
+}
+
+void ph_scroll_ack(ph_scroll *scroll, uint32_t id)
+{
+    ph_scroll_ack_at(scroll, id, scroll->now_ms);
 }
 
 void ph_scroll_cancel(ph_scroll *scroll)

@@ -72,8 +72,68 @@ static int anchors(const fixture *f)
     return count;
 }
 
+static void timed_ack_sequences(void)
+{
+    fixture f;
+    init(&f);
+    ph_scroll_tick(&f.scroll, 100);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, -4));
+    uint32_t old_id = f.last_sync;
+    size_t first_count = f.count;
+    CHECK(f.scroll.pending_y == -3 && f.scroll.sent_at == 100);
+
+    /* The ACK is already present when this event is handled. Running an old
+     * batch's timeout first would discard the user's remaining wheel input. */
+    ph_scroll_ack_at(&f.scroll, old_id, 3101);
+    CHECK(!f.scroll.failed && f.scroll.in_flight);
+    CHECK(f.count > first_count && f.last_sync != old_id && f.syncs == 2);
+    CHECK(wheel_total(&f) == 2 && f.scroll.pending_y == -2);
+    CHECK(f.scroll.sent_at == 3101 && f.scroll.now_ms == 3101);
+    ph_scroll_tick(&f.scroll, 3101);
+    CHECK(!f.scroll.failed && f.scroll.pending_y == -2);
+    ph_scroll_tick(&f.scroll, 6100);
+    CHECK(!f.scroll.failed); /* The follow-up owns a full, unchanged deadline. */
+    ph_scroll_tick(&f.scroll, 6101);
+    CHECK(f.scroll.failed && f.scroll.in_flight && !f.scroll.pending_y);
+
+    /* Unrelated pointer fences update time without pumping or timing out a
+     * wheel batch. Its own ACK can then retire the old work before the tick. */
+    init(&f);
+    ph_scroll_tick(&f.scroll, 100);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, -2));
+    old_id = f.last_sync;
+    first_count = f.count;
+    ph_scroll_ack_at(&f.scroll, old_id + 1, 3101);
+    CHECK(!f.scroll.failed && f.scroll.in_flight && f.scroll.pending_y == -1);
+    CHECK(f.count == first_count && f.last_sync == old_id && f.scroll.sent_at == 100);
+    ph_scroll_ack_at(&f.scroll, old_id, 3110);
+    CHECK(f.scroll.sent_at == 3110 && f.count > first_count && !f.scroll.pending_y);
+    ph_scroll_tick(&f.scroll, 3110);
+    CHECK(!f.scroll.failed);
+
+    /* Video feedback waits from the actual ACK, rather than accepting an
+     * earlier frame or immediately expiring a wait based on a stale clock. */
+    init(&f);
+    f.scroll.feedback = true;
+    ph_scroll_observe(&f.scroll, true, .3, .6, 100);
+    CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, -2));
+    old_id = f.last_sync;
+    first_count = f.count;
+    ph_scroll_ack_at(&f.scroll, old_id, 3101);
+    CHECK(f.scroll.waiting_frame && !f.scroll.failed && f.scroll.pending_y == -1);
+    CHECK(f.scroll.wait_since == 3101 && f.count == first_count);
+    ph_scroll_tick(&f.scroll, 3101);
+    CHECK(f.scroll.waiting_frame && f.count == first_count);
+    ph_scroll_observe(&f.scroll, true, .31, .61, 3110);
+    CHECK(f.scroll.waiting_frame && f.count == first_count);
+    ph_scroll_observe(&f.scroll, true, .32, .62, 3140);
+    CHECK(f.scroll.in_flight && !f.scroll.waiting_frame && f.count > first_count);
+    CHECK(f.scroll.sent_at == 3140);
+}
+
 int main(void)
 {
+    timed_ack_sequences();
     fixture f;
     init(&f);
     CHECK(ph_scroll_request(&f.scroll, 0.5, 0.65, 0.46, 0, -1));

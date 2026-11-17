@@ -294,11 +294,49 @@ int main(void)
     ph_pointer_tick(&f.pointer, f.now + 3001);
     CHECK(f.pointer.failed && !f.pointer.buttons && !f.pointer.requested_buttons);
     CHECK(f.events[f.count - 1].mouse.buttons == 0);
+    CHECK(ph_pointer_transport_stalled(&f.pointer)); /* still true after the fresh release fence */
     initial = f.count;
     ph_pointer_ack(&f.pointer, stale_id, f.now + 3100);
     CHECK(f.count == initial && f.pointer.phase == PH_POINTER_DRAINING);
+    CHECK(ph_pointer_transport_stalled(&f.pointer)); /* old move ACK cannot settle the release */
     ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now + 3200);
     CHECK(f.count == initial && f.pointer.phase == PH_POINTER_IDLE);
+    CHECK(!ph_pointer_transport_stalled(&f.pointer));
+
+    /* Video confirmation failure during a drag emits a fresh release fence.
+     * Generic failed+DRAINING used to make the app kill the healthy helper
+     * before that release's ACK could arrive a few milliseconds later. */
+    init(&f);
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true, .5, .5, .46, f.now));
+    settle(&f);
+    CHECK(ph_pointer_target(&f.pointer, .8, .8, .46, ++f.now));
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, ++f.now);
+    CHECK(f.pointer.phase == PH_POINTER_WAIT_VIDEO && f.pointer.buttons == PH_HID_BTN_LEFT);
+    ph_pointer_tick(&f.pointer, f.now += 701);
+    CHECK(f.pointer.failed && f.pointer.phase == PH_POINTER_DRAINING && !f.pointer.buttons);
+    CHECK(!ph_pointer_transport_stalled(&f.pointer) && f.pointer.sent_at == f.now);
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now += 17);
+    CHECK(f.pointer.phase == PH_POINTER_IDLE && !ph_pointer_transport_stalled(&f.pointer));
+
+    /* A future timestamp must not underflow into a fictitious three-second
+     * stall, including target/button queries while draining a cancellation. */
+    init(&f);
+    CHECK(ph_pointer_target(&f.pointer, .8, .8, .46, f.now));
+    ph_pointer_cancel(&f.pointer, ++f.now);
+    uint64_t sent_at = f.pointer.sent_at;
+    ph_pointer_tick(&f.pointer, sent_at - 1);
+    CHECK(!ph_pointer_transport_stalled(&f.pointer));
+    CHECK(ph_pointer_target(&f.pointer, .4, .5, .46, sent_at - 1));
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true, .4, .5, .46, sent_at - 1));
+    CHECK(!ph_pointer_transport_stalled(&f.pointer));
+    ph_pointer_tick(&f.pointer, sent_at + 3000);
+    CHECK(ph_pointer_transport_stalled(&f.pointer));
+    ph_pointer_cancel(&f.pointer, sent_at + 3001);
+    ph_pointer_reset(&f.pointer, sent_at + 3002);
+    ph_pointer_set_enabled(&f.pointer, false, sent_at + 3003);
+    CHECK(ph_pointer_transport_stalled(&f.pointer)); /* intent changes cannot erase a real fault */
+    ph_pointer_transport_reset(&f.pointer, sent_at + 3004);
+    CHECK(!ph_pointer_transport_stalled(&f.pointer));
 
     /* A real sender dispatches asynchronously. Repeated leave/re-enter events
      * must not enqueue a fresh corner sweep for every cancellation while the
@@ -606,6 +644,12 @@ int main(void)
             step(&f);
         CHECK(f.pointer.failed && !f.pointer.known && !f.pointer.buttons && !f.pointer.count);
         CHECK(f.events[f.count - 1].mouse.buttons == 0);
+        CHECK(!ph_pointer_transport_stalled(&f.pointer));
+        if (held) {
+            CHECK(f.pointer.phase == PH_POINTER_DRAINING && f.pointer.sent_at == f.now);
+            ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now + 17);
+            CHECK(f.pointer.phase == PH_POINTER_IDLE && !ph_pointer_transport_stalled(&f.pointer));
+        }
     }
 
     /* Ignored reports still exhaust the bounded retry budget. */

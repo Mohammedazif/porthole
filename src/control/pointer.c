@@ -16,6 +16,18 @@
 
 static void pump(ph_pointer *p);
 
+static bool awaiting_ack(const ph_pointer *p)
+{
+    return p->phase == PH_POINTER_MOVING || p->phase == PH_POINTER_BUTTON
+           || p->phase == PH_POINTER_DRAINING;
+}
+
+static bool ack_expired(const ph_pointer *p, uint64_t now_ms)
+{
+    return awaiting_ack(p) && now_ms >= p->sent_at
+           && now_ms - p->sent_at >= ACK_TIMEOUT_MS;
+}
+
 static double model_width(double aspect)
 {
     /* The measured movement model uses a 500-pixel short edge, rather than a
@@ -226,8 +238,7 @@ static void pump(ph_pointer *p)
 void ph_pointer_cancel(ph_pointer *p, uint64_t now_ms)
 {
     p->now_ms = now_ms;
-    bool pending = p->phase == PH_POINTER_MOVING || p->phase == PH_POINTER_BUTTON
-                   || p->phase == PH_POINTER_DRAINING;
+    bool pending = awaiting_ack(p);
     if (p->phase == PH_POINTER_MOVING || p->phase == PH_POINTER_WAIT_VIDEO)
         p->known = false;
     /* Cancelling our intent cannot retract reports already in the helper's
@@ -270,6 +281,7 @@ void ph_pointer_transport_reset(ph_pointer *p, uint64_t now_ms)
 {
     ph_pointer_reset(p, now_ms);
     p->phase = PH_POINTER_IDLE;
+    p->ack_timed_out = false;
 }
 
 bool ph_pointer_set_scale(ph_pointer *p, double x, double y)
@@ -289,9 +301,10 @@ static bool target(ph_pointer *p, double x, double y, double aspect, uint64_t no
 {
     if (!p->enabled || !valid(x, y, aspect))
         return false;
-    if (p->phase == PH_POINTER_DRAINING && now_ms - p->sent_at >= ACK_TIMEOUT_MS) {
+    if (p->phase == PH_POINTER_DRAINING && ack_expired(p, now_ms)) {
         p->now_ms = now_ms;
         p->failed = true;
+        p->ack_timed_out = true;
         return false; /* wait for transport recovery, even if the target changes */
     }
     reachable(&x, &y, aspect);
@@ -334,8 +347,10 @@ bool ph_pointer_button(ph_pointer *p, uint8_t button, bool down, double x, doubl
 {
     if (!p->enabled || !valid(x, y, aspect) || !button || (button & (button - 1)))
         return false;
-    if (p->phase == PH_POINTER_DRAINING && now_ms - p->sent_at >= ACK_TIMEOUT_MS)
+    if (p->phase == PH_POINTER_DRAINING && ack_expired(p, now_ms)) {
+        p->ack_timed_out = true;
         return false;
+    }
     reachable(&x, &y, aspect);
     if (p->aspect && fabs(p->aspect - aspect) > 0.0001)
         ph_pointer_reset(p, now_ms);
@@ -361,6 +376,7 @@ void ph_pointer_ack(ph_pointer *p, uint32_t id, uint64_t now_ms)
 {
     if (id != p->sync_id || !(id & 0x80000000U))
         return;
+    p->ack_timed_out = false;
     p->now_ms = now_ms;
     if (p->phase == PH_POINTER_MOVING) {
         p->phase = PH_POINTER_WAIT_VIDEO;
@@ -438,9 +454,8 @@ void ph_pointer_observe(ph_pointer *p, bool found, double x, double y, uint64_t 
 void ph_pointer_tick(ph_pointer *p, uint64_t now_ms)
 {
     p->now_ms = now_ms;
-    if ((p->phase == PH_POINTER_MOVING || p->phase == PH_POINTER_BUTTON
-         || p->phase == PH_POINTER_DRAINING)
-        && now_ms - p->sent_at >= ACK_TIMEOUT_MS) {
+    if (ack_expired(p, now_ms)) {
+        p->ack_timed_out = true;
         fail(p);
         return;
     }
@@ -459,6 +474,11 @@ void ph_pointer_tick(ph_pointer *p, uint64_t now_ms)
         return;
     }
     pump(p);
+}
+
+bool ph_pointer_transport_stalled(const ph_pointer *p)
+{
+    return p->ack_timed_out;
 }
 
 static bool ready(const ph_pointer *p, double x, double y, double aspect, double tolerance)

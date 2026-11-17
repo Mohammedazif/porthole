@@ -205,6 +205,32 @@ while suspended. The Windows .NET target builds with zero warnings/errors. The n
 single-file preview is `Porthole-Windows-Portable-3.exe`; host idle/resume and calibration
 remain to be retested with this correction.
 
+The next Windows log identifies a separate native-app restart at 223.430 seconds:
+`input helper stopped acknowledging queued reports`, followed by pointer Sync
+2147483904 at 223.447 seconds. Reconnection and all three report subscriptions succeed;
+the helper build is `acbc34e`, confirming that the Suspend correction was running.
+Code review and a failing-before regression reproduce a false watchdog condition:
+generic pointer/video/alignment failure queues a fresh held-button release fence, then
+the app treats `failed && DRAINING` as a transport stall before that new fence can ACK.
+
+The pointer now records actual ACK expiry separately from generic positioning failure.
+Only an expired outstanding ACK sets the sticky transport fault; a current matching ACK
+or explicit transport reset clears it. Ordinary cancellation, geometry reset and disable
+cannot erase a real fault. Fresh release fences after positioning failure drain normally;
+the real three-second timeout and missing-ACK recovery remain in place. Expiry checks
+also reject reversed timestamps before unsigned subtraction.
+
+ACK callbacks now process pointer and timestamped scroll acknowledgements before the
+main loop advances timeout/pump work. Follow-up wheel batches and video waits start from
+the actual ACK time, preventing an old clock or pre-ACK timeout from discarding queued
+scrolling. Focused pointer and scroll regressions pass; pointer checks also pass
+address/undefined sanitizers. The old pointer implementation fails the new watchdog
+regressions. Windows live dragging and recovery still need testing in preview 4.
+Validation of the isolated committed baseline plus this correction passes all 23 Linux
+CTest cases, including real app/helper recovery when ACKs are genuinely absent. All 91
+Windows cross-build targets pass with warnings treated as errors. Transcripts are
+`build/live/ack-fix-{linux-build,linux-tests,windows-build}.log`.
+
 ---
 
 ## 1. Why this project
