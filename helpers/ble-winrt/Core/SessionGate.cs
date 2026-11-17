@@ -10,13 +10,14 @@ public sealed class SessionGate : IDisposable
     private PeerSession? peer;
     private long nextPeer, epoch;
     private byte subscriptions;
-    private bool disposed;
+    private bool disposed, hostSuspended;
     private const byte AllReports = (1 << 1) | (1 << 2) | (1 << 3);
 
     public SessionGate(Action<string> status) => this.status = status;
     public PeerSession? CurrentPeer { get { lock (stateLock) return peer; } }
     public long Epoch { get { lock (stateLock) return epoch; } }
     public bool IsReady { get { lock (stateLock) return ReadyLocked; } }
+    public bool HostSuspended { get { lock (stateLock) return hostSuspended; } }
     private bool ReadyLocked => !disposed && peer.HasValue && subscriptions == AllReports;
 
     public PeerSession? Connect(string clientId)
@@ -30,8 +31,20 @@ public sealed class SessionGate : IDisposable
             RotateLocked();
             peer = new PeerSession(++nextPeer, clientId);
             subscriptions = 0;
+            hostSuspended = false;
             status("connected");
             return peer;
+        }
+    }
+
+    // HID Suspend/Exit Suspend describes the host's power state. It does not
+    // revoke a live subscription or change the peer assigned to queued input.
+    public void SetHostSuspended(bool suspended)
+    {
+        lock (stateLock)
+        {
+            if (!disposed)
+                hostSuspended = suspended;
         }
     }
 
@@ -104,6 +117,7 @@ public sealed class SessionGate : IDisposable
         RotateLocked();
         peer = null;
         subscriptions = 0;
+        hostSuspended = false;
         if (connected)
             status("disconnected");
     }

@@ -34,7 +34,6 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
     private GattServiceProvider? provider;
     private PeerSession? activePeer;
     private byte[] keyboardLeds = [0];
-    private bool suspended;
     private bool disposed;
     private bool advertisingReported;
 
@@ -319,14 +318,14 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
             var current = raw.Where(c => c.Session.SessionStatus == GattSessionStatus.Active).ToList();
             clients[kind] = current;
             foreach (GattSubscribedClient client in current) ids.Add(client.Session.DeviceId.Id);
-            if (current.Count != 1 || suspended) missing.Add(kind.ToString().ToLowerInvariant());
+            if (current.Count != 1) missing.Add(kind.ToString().ToLowerInvariant());
             string sessions = string.Join(",", raw.Select(c =>
                 rawSessions.TryGetOrdinal(c.Session, out long ordinal)
                     ? $"s{ordinal}:{c.Session.SessionStatus}"
                     : "unobserved"));
             summaries.Add($"{kind.ToString().ToLowerInvariant()} raw={raw.Count} active={current.Count} sessions=[{sessions}]");
         }
-        log($"HID subscription snapshot ({reason}): {string.Join("; ", summaries)}; active_peers={ids.Count}; missing={(missing.Count == 0 ? "none" : string.Join(",", missing))}; suspended={suspended}.");
+        log($"HID subscription snapshot ({reason}): {string.Join("; ", summaries)}; active_peers={ids.Count}; missing={(missing.Count == 0 ? "none" : string.Join(",", missing))}; suspended={gate.HostSuspended}.");
         if (ids.Count != 1)
         {
             if (ids.Count > 1) log("Multiple Bluetooth peers subscribed; input paused until exactly one phone remains.");
@@ -347,7 +346,7 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         foreach ((ReportKind kind, List<GattSubscribedClient> subscribed) in clients)
         {
             // Duplicate or partial subscription snapshots must never broadcast reports.
-            bool enabled = subscribed.Count == 1 && !suspended;
+            bool enabled = subscribed.Count == 1;
             if (enabled)
             {
                 GattSubscribedClient client = subscribed[0];
@@ -425,7 +424,6 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         targets.Clear();
         ClearValuesLocked();
         sessionPeers.Clear();
-        suspended = false;
         CheckPipeLifetimeLocked();
     }
 
@@ -541,9 +539,11 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
             if (value > 1) return false;
             lock (stateLock)
             {
-                suspended = value == 0;
-                ClearValuesLocked();
-                ReconcileLocked();
+                gate.SetHostSuspended(value == 0);
+                // HOGP Suspend signals the host's power mode. It does not remove
+                // its CCCDs or change the identity of this ready input session.
+                // This desktop keeps operating while retaining the connection.
+                log($"HID control point {(value == 0 ? "Suspend" : "Exit Suspend")}: host_suspended={gate.HostSuspended}; preserving report subscriptions, dispatch epoch and current input state.");
             }
             return true;
         });

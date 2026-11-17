@@ -15,9 +15,11 @@ confirmed Windows host mirroring with the versioned preview. The item 4 WinRT Bl
 helper and native process connection are implemented. A follow-up platform check established
 that the first reported Bluetooth/pointer checks used the Linux VM. Actual Windows logs
 then confirmed video and full HID creation, but advertising aborted during startup.
-The one-file preview now launches on the Windows host, but controls remain waiting after
-pairing. A subscription-order fix now observes inactive raw sessions and refreshes on
-activation; Windows advertising, report subscriptions and input still need validation.
+The one-file preview now launches on the Windows host. Its actual host log confirms
+advertising, all three active report subscriptions and a helper input acknowledgement.
+Repeated control drops were traced to HID Suspend being mistaken for connection loss;
+the correction preserves subscriptions and input epochs across this power-mode hint.
+Live calibration, typing, wheel edges and reconnect still need Windows confirmation.
 Windows CI is configured to build/test the full mirror and retain a minimal
 smoke build; this workstream did not trigger a remote CI run.
 The detailed M5 measurements later in this file include an archived experimental controller.
@@ -56,7 +58,7 @@ with Grok.
 | 1 | Cancellation retains helper ACK fences; pointer batches are capped at 24 reports; missing ACKs restart the helper without blocking rendering. F2 guides preparation, pairing, mirroring and transactional three-target calibration. Rapid-cancel, modal-input and reconnect tests pass; all three live calibration targets confirmed and saved on the final build. |
 | 2 | F3 and `--diagnostics` report local FPS, receive/decode/present, accepted input handoff, helper dispatch ACK and queue counters. Decoder generations prevent stale frames after reconnect. The actual Bluetooth radio interval remains unknown without a privileged trace. |
 | 3 | Native Windows DNS-SD replaces Bonjour, preserves protocol identity/TXT records, and builds the complete SDL/FFmpeg mirror. All 85 UCRT cross-build targets compile with warnings as errors. Portable runtime/source packaging and full MSYS2 CI are in place; the user confirmed host mirroring with preview c18f7ac. |
-| 4 | Native WinRT HID-over-GATT helper, Windows process/pipe transport, single-peer subscription gates, existing input protocol and guided setup integration. Actual host logs confirm HID creation; the portable app launches but controls remain waiting. Advertising-startup and delayed-session fixes pass 12 portable checks; actual Windows subscriptions and input remain pending. |
+| 4 | Native WinRT HID-over-GATT helper, Windows process/pipe transport, single-peer subscription gates, existing input protocol and guided setup integration. Actual host logs confirm advertising, all three active subscriptions and an input ACK. The repeated restart cause is HID Suspend being treated as subscription loss; the correction preserves the connection. Full host input/calibration and reconnect validation remain pending. |
 
 1. **Linux controls — baseline delivered:** bounded pointer recovery, long-list edge checks,
    drag/release regressions and guided AssistiveTouch, pairing and calibration setup.
@@ -71,10 +73,10 @@ with Grok.
    mirroring; repeat native MSYS2 CI and wider network/host testing before release.
 4. **Windows control — native implementation delivered, host check pending:** WinRT
    GATT HID helper and process transport, encrypted pairing, per-phone subscriptions,
-   paced keyboard/mouse/consumer input and F2 setup. HID creation passed on the actual
-   host; retest advertising with `--probe-advertising`, then validate pairing, typing,
-   pointer/calibration, wheel edges and reconnect on the
-   Windows host. Windows owns the radio interval; software pacing is not that interval.
+   paced keyboard/mouse/consumer input and F2 setup. HID creation, advertising and all
+   report subscriptions passed on the actual host. Retest idle/resume after the Suspend
+   correction, then validate typing, pointer/calibration, wheel edges and reconnect on
+   Windows. Windows owns the radio interval; software pacing is not that interval.
    An ESP32 fallback remains future work for hosts without BLE peripheral support.
 5. **Everyday-use polish (v0.2):** audio/video sync and audio UI, fullscreen/always-on-top/
    saved window placement, PNG screenshots, MP4 recording, clipboard text paste,
@@ -176,10 +178,32 @@ into a false all-ready state. The helper now replaces the entire subscription sn
 under one gate lock after validating all targets. Full readiness and genuine readiness
 loss retain the existing epoch/fresh-pipe rules. Initial neutral-report failures identify
 the report kind, and startup diagnostics include the helper build revision. These changes
-do not establish the cause of the observed host disconnects without its log.
+did not establish the cause of the observed host disconnects without its log.
 The portable HID suite now passes 14/14 checks, including partial-to-partial snapshot
 replacement, stable readiness, real readiness loss, neutral-report failure for each report,
 shared priming across both input lanes and bounded shutdown after a stalled first report.
+
+The subsequent actual Windows log establishes the restart cause: at 491.277, 504.006 and
+519.027 seconds, all three reports still have one active subscriber for the same peer,
+but a HID Control Point `Suspend` write changes `suspended=True`. The old adapter turns
+that power hint into three disabled subscriptions, triggering its mandatory fresh-pipe
+restart. Advertising then starts successfully and the phone resubscribes, repeating the
+cycle. The same log records a 372 ms helper ACK; this confirms dispatch progress, not
+visible pointer accuracy or end-to-end latency. A focused excerpt is retained in
+`build/live/windows-v2-suspend-evidence.txt`.
+
+Suspend and Exit Suspend now record host power state independently from physical
+readiness. They do not disable targets, rotate epochs, clear held-report values, emit
+disconnect statuses or restart the helper while the peer and its CCCDs remain active.
+Actual session closure, subscription loss, peer changes and notification failures retain
+their invalidation and fresh-pipe rules. The HID descriptor and advertised wake flags are
+unchanged. This follows the separation of power hints and report subscriptions in the
+[HID over GATT profile, sections 4.8–4.10](https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/HOGP_v1.0/out/en/index-en.html).
+All 15 portable checks pass, including held keyboard/button releases and Sync across
+Suspend without an epoch or status change, plus genuine subscription/disconnect loss
+while suspended. The Windows .NET target builds with zero warnings/errors. The next
+single-file preview is `Porthole-Windows-Portable-3.exe`; host idle/resume and calibration
+remain to be retested with this correction.
 
 ---
 

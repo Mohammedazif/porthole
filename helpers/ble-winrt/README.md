@@ -28,6 +28,11 @@ reports cannot be redirected to a newly connected phone. After the first fully
 ready connection loses readiness, the helper exits and Porthole starts a fresh
 process and input pipe. This prevents unread old pipe bytes being assigned to a
 reconnected phone; the existing wire format does not carry generation IDs.
+HID Control Point Suspend/Exit Suspend records the host's power mode separately.
+It preserves active subscriptions, the current dispatch epoch, cached held reports
+and the input pipe. This powered desktop continues reporting input to the same active
+peer; it does not advertise any additional remote-wake capability. Real subscription
+or connection loss still requires a fresh pipe, even while the host is suspended.
 Notifications target
 the captured subscribed client, never all clients. Keyboard and consumer frames
 run independently from paced mouse/delay frames. Windows owns the actual radio
