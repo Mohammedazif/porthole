@@ -308,6 +308,55 @@ including 100 same-bond reconnect cycles, early CCCDs, late association and stal
 No code removes a bond during routine recovery. The earlier blocked attempt required one
 adapter power cycle; the patched receiver is waiting for its first controlled live pairing.
 
+### Live pointer, keyboard and orientation follow-up — 2026-11-17 evening
+
+Fresh Linux pairing restored all three input reports. Subsequent helper/provider restarts
+reconnected the same bond without another pairing request, but took about 37 seconds.
+Recovery now waits for successful service registration, gives the replacement provider a
+full discovery grace and permits one controlled reconnect for an entirely unsubscribed,
+bonded/trusted peer. Partial subscriptions are left alone; the attempt cannot repeat in
+the same helper lifetime. Forty helper tests cover these cases. Shutdown emits neutral
+keyboard, mouse and consumer reports before unregistering and prevents later queued input
+from following them. This does not yet establish long-session Windows reliability.
+
+The real Calculator sequence AC, 7, +, 8, = produced 15. The measured first-movement to
+button-release times were 557–1173 ms, so latency remains unfinished. Nine earlier live
+pointer targets were within 3.54 pixels. ACK settling and candidate stability now overlap
+without dropping either safety requirement, and a pending unpressed click may make one
+neutral reveal retry when its tiny movement is invisible. A filtered SDL frame event can
+also be retried instead of permanently suppressing later video. The consolidated sanitizer
+suite passed 41/41 before the subsequent crop and cancellation regressions were added.
+
+Focused App Library search accepted typing, Ctrl+A selected the complete query and the
+next character replaced it. Calculator accepted 7 and 8 as 78. Home and Spotlight also
+passed live checks. Alt+S/C/N emitted the expected extra-button reports but did not trigger
+their actions during the controlled checks; the user reports correct device assignments.
+That discrepancy remains open. Repeating Alt+N is not implemented as a close toggle.
+
+The reported jump to a corner is reproduced in the live log: leaving during a move's
+video-confirmation wait discards its endpoint, then each re-entry sends eight large
+top-left reports. Cancellation now clears the old target/click while retaining feedback
+for already-sent unpressed motion. It emits no probe while inactive; held-drag cancellation,
+geometry reset and transport failure still invalidate the position. Four paced SDL tests
+cover leave/focus loss before and after the ACK: old code sends a second corner sweep,
+fixed code does not, and the subsequent click lands within 0.96 pixels. Controller stress
+passes 25,600 actions with 320 actual presses and 254 missing-ACK recoveries. The final
+integrated Linux ASAN/UBSAN/leak-detection suite passes 45/45. Live verification of this
+latest cancellation change still follows; simulations do not establish its radio timing.
+
+A live 1920x888 landscape stream exposed a separate crop error: dark frames repeatedly
+became 412x888 portrait crops, resetting pointer coordinates. Native rotated geometry now
+keeps the full frame, and ambiguous dark frames retain a confirmed crop only at the same
+stream dimensions. Crop and app integration sanitizer checks pass 24/24. Netflix's iOS
+AirPlay/Screen Mirroring restriction is independent of this orientation fix; see its
+[official support page](https://help.netflix.com/en/node/11634).
+
+The Windows Portable-4 artifact remains at 994cf42 and lacks the newer pointer, cursor,
+cleanup and orientation fixes. Its performance cannot yet be compared with the updated
+Linux receiver as the same version. The current portable WinRT core suite passes 23/23
+locally; it does not verify Windows radio delivery. No additional Windows preview has
+been sent during these live Linux checks. Grok's items 5–7 remain outside this work.
+
 ---
 
 ## 1. Why this project

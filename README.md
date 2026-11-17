@@ -65,7 +65,10 @@ continues. Input is discarded until control is ready.
 Left Alt shortcuts: **H** Home, **F** Spotlight, **S** App Switcher, **C** Control Center,
 **N** Notification Center, **P** Screenshot, **←** Back, **↑/↓** Volume. Buttons 3–6 must be
 assigned to the corresponding actions in AssistiveTouch's device settings. PC Ctrl acts as
-Command on the iPhone. **F1** opens local controls and setup help; input is paused while help
+Command on the iPhone; click a text field before using editing shortcuts such as Ctrl+A.
+Check the button assignments again after forgetting and re-pairing the device. Alt+N sends
+the assigned Notification Center action; it does not implement a second-press close toggle.
+Use Alt+H to return Home. **F1** opens local controls and setup help; input is paused while help
 is open. The waiting screen shows mirroring and Bluetooth setup steps, and a status banner
 identifies when the mirror is available without controls.
 
@@ -85,6 +88,12 @@ Mirrored iPhone audio plays through the PC's default speakers. AAC-ELD, AAC-LC a
 are decoded with FFmpeg and played through SDL; AirPlay volume changes are respected.
 Use `--no-audio` to mute playback on the PC. The playback queue is bounded to avoid
 accumulating audible lag; precise audio/video synchronization remains on the roadmap.
+
+Some streaming apps restrict mirroring of their video. Netflix explicitly does not support
+iPhone/iPad AirPlay or Screen Mirroring; use Netflix directly on the PC for those videos
+([Netflix support](https://help.netflix.com/en/node/11634)). This is separate from picture
+orientation: native landscape frames keep their full width even during black frames,
+and a confirmed portrait crop is retained through same-size dark transitions.
 
 Mouse movement over the phone picture now drives a continuous pointer controller. Left click
 queues a tap, right click queues a secondary click, and holding and dragging queues a swipe.
