@@ -354,8 +354,14 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
                 targets[kind] = client;
                 sessionPeers[client.Session] = peer;
             }
-            gate.SetSubscribed(peer, kind, enabled);
         }
+        // Publish readiness only after every target is validated. Updating one
+        // report at a time can turn two incomplete snapshots into a transient
+        // all-ready state and start input before the final snapshot is usable.
+        gate.SetSubscriptions(peer,
+            targets.ContainsKey(ReportKind.Keyboard),
+            targets.ContainsKey(ReportKind.Mouse),
+            targets.ContainsKey(ReportKind.Consumer));
         if (gate.Epoch != previousEpoch) ClearValuesLocked();
         CheckPipeLifetimeLocked();
     }

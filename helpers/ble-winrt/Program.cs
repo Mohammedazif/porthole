@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Reflection;
 using System.Text;
 using Porthole.Ble.Core;
 
@@ -60,6 +61,8 @@ internal static class Program
         }
 
         using var shutdown = new CancellationTokenSource();
+        string build = typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
+        Diagnostic($"Helper build {build}; PID {Environment.ProcessId}; .NET {Environment.Version}.");
         ConsoleCancelEventHandler onCancel = (_, e) => { e.Cancel = true; shutdown.Cancel(); };
         Console.CancelKeyPress += onCancel;
         using var gate = new SessionGate(Status);

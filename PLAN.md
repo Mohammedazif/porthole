@@ -167,6 +167,20 @@ the adjacent-log assertion. The updated `Porthole-Windows-Portable-2.exe` writes
 log beside itself (with a private TEMP fallback for read-only folders). Windows HID
 subscriptions, typing, pointer/calibration, wheel edges and reconnect remain unvalidated.
 
+The user then reported that preview 2 connects but repeatedly drops controls during
+checking. The screenshot shows `unavailable; retrying`; a Windows connection log was
+requested to distinguish host link loss, notification failure and app-initiated restart.
+Independent code review found a separate readiness race: replacing one partial report
+snapshot with another one report at a time could temporarily combine old and new bits
+into a false all-ready state. The helper now replaces the entire subscription snapshot
+under one gate lock after validating all targets. Full readiness and genuine readiness
+loss retain the existing epoch/fresh-pipe rules. Initial neutral-report failures identify
+the report kind, and startup diagnostics include the helper build revision. These changes
+do not establish the cause of the observed host disconnects without its log.
+The portable HID suite now passes 14/14 checks, including partial-to-partial snapshot
+replacement, stable readiness, real readiness loss, neutral-report failure for each report,
+shared priming across both input lanes and bounded shutdown after a stalled first report.
+
 ---
 
 ## 1. Why this project

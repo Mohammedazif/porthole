@@ -42,20 +42,41 @@ public sealed class SessionGate : IDisposable
         {
             if (disposed || peer != session)
                 return;
-            bool wasReady = ReadyLocked;
             byte bit = (byte)(1 << (int)kind);
-            subscriptions = enabled ? (byte)(subscriptions | bit) : (byte)(subscriptions & ~bit);
-            if (wasReady && !ReadyLocked)
-            {
-                RotateLocked();
-                // The main app must stop input; "connected" alone deliberately
-                // preserves its previous ready state for late BlueZ events.
-                status("disconnected");
-                status("connected");
-            }
-            else if (!wasReady && ReadyLocked)
-                status("subscribed");
+            ApplySubscriptionsLocked(enabled ? (byte)(subscriptions | bit) : (byte)(subscriptions & ~bit));
         }
+    }
+
+    // A native CCCD snapshot is one state change. Applying its reports one at
+    // a time can temporarily combine new subscriptions with old ones and expose
+    // false readiness to the input reader and main app.
+    public void SetSubscriptions(PeerSession session, bool keyboard, bool mouse, bool consumer)
+    {
+        byte snapshot = (byte)((keyboard ? 1 << (int)ReportKind.Keyboard : 0)
+            | (mouse ? 1 << (int)ReportKind.Mouse : 0)
+            | (consumer ? 1 << (int)ReportKind.Consumer : 0));
+        lock (stateLock)
+        {
+            if (disposed || peer != session)
+                return;
+            ApplySubscriptionsLocked(snapshot);
+        }
+    }
+
+    private void ApplySubscriptionsLocked(byte snapshot)
+    {
+        bool wasReady = ReadyLocked;
+        subscriptions = snapshot;
+        if (wasReady && !ReadyLocked)
+        {
+            RotateLocked();
+            // The main app must stop input; "connected" alone deliberately
+            // preserves its previous ready state for late BlueZ events.
+            status("disconnected");
+            status("connected");
+        }
+        else if (!wasReady && ReadyLocked)
+            status("subscribed");
     }
 
     public void Disconnect(PeerSession session)

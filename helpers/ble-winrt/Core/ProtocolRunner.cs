@@ -134,7 +134,7 @@ public sealed class ProtocolRunner
                                     runCancellation).ConfigureAwait(false))
             {
                 if (gate.IsCurrent(ticket.Token) && !runCancellation.IsCancellationRequested)
-                    Fail("error initial neutral report could not be delivered");
+                    Fail($"error initial neutral {kind.ToString().ToLowerInvariant()} report could not be delivered");
                 return false;
             }
             await DelayAsync(ticket, options.IntervalMilliseconds, runCancellation).ConfigureAwait(false);

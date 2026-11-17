@@ -269,6 +269,8 @@ internal static class Program
         [
             ("descriptor matches C", Descriptor), ("split/complete/malformed framing", Framing),
             ("readiness, stale sessions and pipe lifetime", ReadinessAndPipeLifetime),
+            ("atomic subscription snapshots", SessionSnapshotTests.Run),
+            ("first-neutral priming barriers and failures", PrimingTests.Run),
             ("advertising startup transitions", AdvertisingStartup),
             ("raw session observation and late activation", RawSessionTests.Run),
             ("empty fence, priming and EOF releases", EmptyFenceAndEof), ("motion order and pacing", PacingAndOrder),
