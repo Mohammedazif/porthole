@@ -9,14 +9,34 @@ static const double directions[16][2] = {
     {-.383, -.924}, {0, -1}, {.383, -.924}, {.707, -.707}, {.924, -.383},
 };
 
-static double score(const ph_yuv_planes *p, int x, int y, double r)
+typedef struct cursor_samples {
+    int inner[16][2], outer[16][2], change[2][16][2];
+    int reach;
+} cursor_samples;
+
+/* Sampling geometry depends on cursor size, not on the candidate pixel. Compute
+ * it once per search rather than repeating rounding in every candidate score. */
+static void sample_offsets(cursor_samples *s, double r)
+{
+    s->reach = (int)lround(r);
+    for (int i = 0; i < 16; i++) {
+        for (int axis = 0; axis < 2; axis++) {
+            s->inner[i][axis] = (int)lround((r - 1) * directions[i][axis]);
+            s->outer[i][axis] = (int)lround((r + 2) * directions[i][axis]);
+            s->change[0][i][axis] = (int)lround(r * .6 * directions[i][axis]);
+            s->change[1][i][axis] = (int)lround(r * directions[i][axis]);
+        }
+    }
+}
+
+static double score(const ph_yuv_planes *p, int x, int y, const cursor_samples *s)
 {
     int positive = 0, negative = 0, total = 0;
     for (int i = 0; i < 16; i++) {
-        int ix = x + (int)lround((r - 1) * directions[i][0]);
-        int iy = y + (int)lround((r - 1) * directions[i][1]);
-        int ox = x + (int)lround((r + 2) * directions[i][0]);
-        int oy = y + (int)lround((r + 2) * directions[i][1]);
+        int ix = x + s->inner[i][0];
+        int iy = y + s->inner[i][1];
+        int ox = x + s->outer[i][0];
+        int oy = y + s->outer[i][1];
         int delta = p->y[iy * p->y_stride + ix] - p->y[oy * p->y_stride + ox];
         positive += delta >= 8;
         negative += delta <= -8;
@@ -35,14 +55,14 @@ static bool valid(const ph_yuv_planes *p, const ph_rect *screen)
 }
 
 static bool changed(const ph_yuv_planes *p, const ph_rect *screen,
-                    const ph_yuv_planes *before, const ph_rect *bs, int x, int y, double r)
+                    const ph_yuv_planes *before, const ph_rect *bs, int x, int y,
+                    const cursor_samples *s)
 {
     int count = 0;
     for (int i = 0; i < 16; i++) {
         for (int ring = 0; ring < 2; ring++) {
-            double sample = ring ? r : r * .6;
-            int dx = (int)lround(sample * directions[i][0]);
-            int dy = (int)lround(sample * directions[i][1]);
+            int dx = s->change[ring][i][0];
+            int dy = s->change[ring][i][1];
             int a = p->y[(screen->y + y + dy) * p->y_stride + screen->x + x + dx];
             int b = before->y[(bs->y + y + dy) * before->y_stride + bs->x + x + dx];
             count += abs(a - b) >= 8;
@@ -55,15 +75,15 @@ static bool changed(const ph_yuv_planes *p, const ph_rect *screen,
 
 static double changed_ring(const ph_yuv_planes *p, const ph_rect *screen,
                             const ph_yuv_planes *before, const ph_rect *bs,
-                            int x, int y, double r)
+                            int x, int y, const cursor_samples *s)
 {
     int matching = 0, edges = 0, total = 0;
     double sum = 0, old_sum = 0, squares = 0, old_squares = 0;
     for (int i = 0; i < 16; i++) {
-        int ix = (int)lround((r - 1) * directions[i][0]);
-        int iy = (int)lround((r - 1) * directions[i][1]);
-        int ox = (int)lround((r + 2) * directions[i][0]);
-        int oy = (int)lround((r + 2) * directions[i][1]);
+        int ix = s->inner[i][0];
+        int iy = s->inner[i][1];
+        int ox = s->outer[i][0];
+        int oy = s->outer[i][1];
         int inside = p->y[(screen->y + y + iy) * p->y_stride + screen->x + x + ix];
         int outside = p->y[(screen->y + y + oy) * p->y_stride + screen->x + x + ox];
         int old_in = before->y[(bs->y + y + iy) * before->y_stride + bs->x + x + ix];
@@ -88,10 +108,10 @@ static double changed_ring(const ph_yuv_planes *p, const ph_rect *screen,
 
 static double candidate(const ph_yuv_planes *p, const ph_rect *screen,
                          const ph_yuv_planes *before, const ph_rect *bs,
-                         int x, int y, double r, double hx, double hy)
+                         int x, int y, const cursor_samples *s, double hx, double hy)
 {
     if (before) {
-        int reach = (int)lround(r);
+        int reach = s->reach;
         const int offsets[5][2] = {{0, 0}, {-reach, 0}, {reach, 0}, {0, -reach}, {0, reach}};
         bool dirty = false;
         for (int i = 0; i < 5; i++) {
@@ -106,22 +126,22 @@ static double candidate(const ph_yuv_planes *p, const ph_rect *screen,
         if (!dirty)
             return 0;
     }
-    double result = score(p, screen->x + x, screen->y + y, r);
+    double result = score(p, screen->x + x, screen->y + y, s);
     if (before)
-        result = fmax(result, changed_ring(p, screen, before, bs, x, y, r));
-    if (result < 250 || (before && !changed(p, screen, before, bs, x, y, r)))
+        result = fmax(result, changed_ring(p, screen, before, bs, x, y, s));
+    if (result < 250 || (before && !changed(p, screen, before, bs, x, y, s)))
         return 0;
     return result - hypot(x - hx, y - hy) * 0.15;
 }
 
 static double cursor_shapes(const ph_yuv_planes *p, const ph_rect *screen,
                              const ph_yuv_planes *before, const ph_rect *bs,
-                             int x, int y, double r, double hx, double hy)
+                             int x, int y, const cursor_samples shapes[2], double hx, double hy)
 {
     /* iOS contracts the dot during a held click. A hover-only coarse search can
      * skip that smaller dot entirely when its centre falls between grid points. */
-    return fmax(candidate(p, screen, before, bs, x, y, r, hx, hy),
-                candidate(p, screen, before, bs, x, y, r * .82, hx, hy));
+    return fmax(candidate(p, screen, before, bs, x, y, &shapes[0], hx, hy),
+                candidate(p, screen, before, bs, x, y, &shapes[1], hx, hy));
 }
 
 static bool locate(const ph_yuv_planes *p, const ph_rect *screen,
@@ -133,6 +153,11 @@ static bool locate(const ph_yuv_planes *p, const ph_rect *screen,
         || (before && (!valid(before, bs) || screen->w != bs->w || screen->h != bs->h)))
         return false;
     double r = fmin(screen->w, screen->h) * 11.0 / 500;
+    cursor_samples shapes[3][2];
+    for (int dr = -1; dr <= 1; dr++) {
+        sample_offsets(&shapes[dr + 1][0], r + dr);
+        sample_offsets(&shapes[dr + 1][1], (r + dr) * .82);
+    }
     int margin = (int)ceil(r + 4);
     double left = fmax(margin, hint_x - radius);
     double right = fmin(screen->w - margin - 1, hint_x + radius);
@@ -145,7 +170,7 @@ static bool locate(const ph_yuv_planes *p, const ph_rect *screen,
     int bx = 0, by = 0;
     for (int cy = y0; cy <= y1; cy += 2) {
         for (int cx = x0; cx <= x1; cx += 2) {
-            double s = cursor_shapes(p, screen, before, bs, cx, cy, r, hint_x, hint_y);
+            double s = cursor_shapes(p, screen, before, bs, cx, cy, shapes[1], hint_x, hint_y);
             if (s > best) {
                 best = s;
                 bx = cx;
@@ -158,7 +183,7 @@ static bool locate(const ph_yuv_planes *p, const ph_rect *screen,
     for (int cy = y0; cy <= y1; cy += 2) {
         for (int cx = x0; cx <= x1; cx += 2) {
             if (hypot(cx - bx, cy - by) > 2 * r
-                && cursor_shapes(p, screen, before, bs, cx, cy, r, hint_x, hint_y) > best * .92)
+                && cursor_shapes(p, screen, before, bs, cx, cy, shapes[1], hint_x, hint_y) > best * .92)
                 return false;
         }
     }
@@ -167,7 +192,7 @@ static bool locate(const ph_yuv_planes *p, const ph_rect *screen,
     for (int cy = by - 1; cy <= by + 1; cy++) {
         for (int cx = bx - 1; cx <= bx + 1; cx++) {
             for (int dr = -1; dr <= 1; dr++) {
-                double s = cursor_shapes(p, screen, before, bs, cx, cy, r + dr,
+                double s = cursor_shapes(p, screen, before, bs, cx, cy, shapes[dr + 1],
                                           hint_x, hint_y);
                 if (s > refined) {
                     refined = s;
