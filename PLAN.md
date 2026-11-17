@@ -380,6 +380,20 @@ metadata. This is ready for a real Windows host check, not a Windows Bluetooth l
 or reliability pass. The last Linux receiver received SIGTERM before the remaining live
 device-settings check could finish; the source of that external termination is unknown.
 
+### Physical iPhone smoothness investigation — 2026-11-18
+
+The user reports scrolling stutters on both the physical phone and mirror, persists after
+disconnection, and clears after a full iPhone restart. Turning AssistiveTouch off with
+mirroring stopped did not clear the existing condition. After a clean restart, mirroring
+alone reproduced the physical-phone slowdown with AssistiveTouch off, no Bluetooth helper
+process and BlueZ reporting the phone disconnected. The saved bond was preserved.
+This isolates a mirroring trigger without Bluetooth input; it does not identify the
+underlying iOS condition or establish the physical panel's refresh rate. The receiver
+advertises 60 Hz and a maximum 60 FPS stream. No frame-rate or pairing code was changed
+based on this report. The diagnostic receiver is running with `--no-bluetooth --no-setup`
+as user service `porthole-mirror-diagnostic`; local evidence is in
+`build/live/local-validation/native-phone-stutter-diagnostic.json`.
+
 ---
 
 ## 1. Why this project
