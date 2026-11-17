@@ -227,16 +227,49 @@ class ConnectionTests(unittest.TestCase):
                             emit=Mock(), clock=Mock(return_value=10.0), bonded=True,
                             timers=[], states={}, reports={kind: Mock(subscribed_at=0.0)
                                                           for kind in (1, 2, 3)})
+        h.objects = {str(path): {name: dict(properties) for name, properties in interfaces.items()}
+                     for path, interfaces in (initial_devices or {}).items()}
+        h.devices = {}
+        h.application = Mock(get_path=lambda: ble.APP_PATH)
+        h.registration_checks = []
+        h.gatt.RegisterApplication.side_effect = lambda *args, **kwargs: h.registration_checks.append(
+            {'InterfacesAdded', 'InterfacesRemoved', 'PropertiesChanged'}.issubset(
+                call.kwargs.get('signal_name') for call in h.bus.add_signal_receiver.call_args_list)
+            and h.manager.GetManagedObjects.called
+            and callable(h.application.on_device))
         h.bus.get_object.side_effect = lambda service, path: path
-        h.manager.GetManagedObjects.return_value = initial_devices or {}
+        h.manager.GetManagedObjects.side_effect = lambda: h.objects
         h.properties.Get.return_value = 'Porthole'
+
+        def properties_for(path):
+            return h.objects.setdefault(str(path), {}).setdefault(ble.DEVICE_IFACE, {})
+
+        def get_property(path, property_name):
+            properties = properties_for(path)
+            if property_name == 'Connected':
+                return bool(h.states.get(str(path), properties.get('Connected', False)))
+            if property_name == 'Bonded':
+                return bool(properties.get('Bonded', h.bonded))
+            return properties.get(property_name, False)
+
+        def set_property(path, property_name, value):
+            properties_for(path)[property_name] = bool(value)
+
+        def device_for(path):
+            path = str(path)
+            if path not in h.devices:
+                h.devices[path] = Mock()
+                h.devices[path].Disconnect.side_effect = lambda *args, **kwargs: h.device.Disconnect(path)
+            return h.devices[path]
 
         def interface(obj, name):
             if name == ble.DBUS_PROP_IFACE:
                 if obj == '/adapter':
                     return h.properties
-                return Mock(Get=lambda iface, prop: h.bonded if prop == 'Bonded'
-                            else h.states.get(str(obj), True))
+                return SimpleNamespace(Get=lambda iface, prop: get_property(obj, prop),
+                                       Set=lambda iface, prop, value: set_property(obj, prop, value))
+            if name == ble.DEVICE_IFACE:
+                return device_for(obj)
             return {ble.GATT_MANAGER_IFACE: h.gatt, ble.LE_ADV_MANAGER_IFACE: h.adv,
                     ble.AGENT_MANAGER_IFACE: h.agent, ble.DBUS_OM_IFACE: h.manager,
                     ble.DEVICE_IFACE: h.device}[name]
@@ -245,16 +278,37 @@ class ConnectionTests(unittest.TestCase):
             h.timers.append((ms, callback, args))
             return len(h.timers)
 
-        def event(connected, path='/phone'):
+        def event(connected, path='/adapter/dev_PHONE'):
+            first = path not in h.objects
+            properties_for(path).setdefault('Icon', 'phone')
+            properties_for(path).setdefault('Trusted', True)
+            properties_for(path)['Connected'] = connected
             h.states[path] = connected
+            if first:
+                for call in h.bus.add_signal_receiver.call_args_list:
+                    if call.kwargs.get('signal_name') == 'InterfacesAdded':
+                        call.args[0](path, {ble.DEVICE_IFACE: dict(properties_for(path))})
             callback = next(call.args[0] for call in h.bus.add_signal_receiver.call_args_list
                             if call.kwargs.get('signal_name') == 'PropertiesChanged')
             callback(ble.DEVICE_IFACE, {'Connected': connected}, [], path=path)
 
+        def added(path, properties):
+            properties_for(path).update(properties)
+            h.states[path] = bool(properties.get('Connected', False))
+            callback = next(call.args[0] for call in h.bus.add_signal_receiver.call_args_list
+                            if call.kwargs.get('signal_name') == 'InterfacesAdded')
+            callback(path, {ble.DEVICE_IFACE: properties})
+
+        def subscribed(at):
+            h.clock.return_value = at
+            for report in h.reports.values():
+                report.subscribed_at = at
+                report.on_subscribe()
+
         def find_timer(name):
             return next(item for item in reversed(h.timers) if item[1].__name__ == name)
 
-        h.event, h.timer = event, find_timer
+        h.event, h.added, h.subscribe, h.timer = event, added, subscribed, find_timer
         h.fire = lambda item: item[1](*item[2])
         h.registered = lambda: h.gatt.RegisterApplication.call_args.kwargs['reply_handler']()
         h.loop.run.side_effect = lambda: scenario(h)
@@ -265,7 +319,7 @@ class ConnectionTests(unittest.TestCase):
                     (ble.dbus, 'Interface', interface),
                     (ble, 'find_adapter', Mock(return_value='/adapter')),
                     (ble, 'load_report_descriptor', Mock(return_value=(b'HID', {}))),
-                    (ble, 'Application', Mock(return_value=Mock(get_path=lambda: ble.APP_PATH))),
+                    (ble, 'Application', Mock(return_value=h.application)),
                     (ble, 'Advertisement', Mock(return_value=Mock(get_path=lambda: ble.ADV_PATH))),
                     (ble, 'Agent', Mock()),
                     (ble, 'build_hid', Mock(return_value=h.reports)),
@@ -280,6 +334,7 @@ class ConnectionTests(unittest.TestCase):
 
     def test_advertising_waits_for_hid_registration(self):
         def scenario(h):
+            self.assertEqual(h.registration_checks, [True])
             h.adv.RegisterAdvertisement.assert_not_called()
             h.registered()
             h.adv.RegisterAdvertisement.assert_called_once()
@@ -294,16 +349,24 @@ class ConnectionTests(unittest.TestCase):
 
     def test_startup_cleanup_does_not_disconnect_a_fresh_link(self):
         def scenario(h):
-            h.event(True)
-            h.fire(h.timer('drop_stale_links'))
+            h.added('/adapter/dev_FRESH', {'Connected': True, 'Icon': 'phone',
+                                         'Bonded': False, 'Paired': False, 'Trusted': False})
+            self.assertFalse(any(timer[0] == 2000 for timer in h.timers))
+            h.fire(h.timer('check_resubscribed'))
             h.device.Disconnect.assert_not_called()
-        self.run_helper(scenario, {'/phone': {ble.DEVICE_IFACE: {'Connected': True}}})
+            h.gatt.UnregisterApplication.assert_not_called()
+        self.run_helper(scenario)
 
     def test_startup_cleanup_still_drops_an_old_link(self):
         def scenario(h):
-            h.fire(h.timer('drop_stale_links'))
+            self.assertFalse(any(timer[0] == 2000 for timer in h.timers))
+            self.assertGreaterEqual(h.timer('check_resubscribed')[0], 15000)
+            h.fire(h.timer('check_resubscribed'))
+            h.fire(h.timer('reconnect_if_stale'))
             h.device.Disconnect.assert_called_once()
-        self.run_helper(scenario, {'/phone': {ble.DEVICE_IFACE: {'Connected': True}}})
+            self.assertEqual(h.device.Disconnect.call_args.args, ('/adapter/dev_PHONE',))
+        self.run_helper(scenario, {'/adapter/dev_PHONE': {ble.DEVICE_IFACE: {
+            'Connected': True, 'Icon': 'phone', 'Bonded': True, 'Trusted': True}}})
 
     def test_disconnected_and_replaced_link_timers_cannot_refresh_services(self):
         def scenario(h):
@@ -341,8 +404,7 @@ class ConnectionTests(unittest.TestCase):
     def test_subscribed_connection_is_left_alone(self):
         def scenario(h):
             h.event(True)
-            for report in h.reports.values():
-                report.subscribed_at = 11.0
+            h.subscribe(11.0)
             h.fire(h.timer('check_resubscribed'))
             h.gatt.UnregisterApplication.assert_not_called()
             h.device.Disconnect.assert_not_called()
@@ -351,8 +413,7 @@ class ConnectionTests(unittest.TestCase):
     def test_bonded_reconnect_reuses_enabled_notifications(self):
         def scenario(h):
             h.event(True)
-            for report in h.reports.values():
-                report.subscribed_at = 11.0
+            h.subscribe(11.0)
             h.event(False)
             h.clock.return_value = 20.0
             h.emit.reset_mock()
@@ -384,6 +445,146 @@ class ConnectionTests(unittest.TestCase):
         report = SimpleNamespace(subscribed_at=10.0)
         ble.Characteristic.StopNotify(report)
         self.assertEqual(report.subscribed_at, 0.0)
+
+    def test_initial_unknown_private_client_is_identified_by_our_gatt_read(self):
+        def scenario(h):
+            path = '/adapter/dev_PRIVATE'
+            h.added(path, {'Connected': True, 'AddressType': 'random', 'Paired': False,
+                           'Bonded': False, 'Trusted': False})
+            self.assertNotIn(('connected',), [call.args for call in h.emit.call_args_list])
+            characteristic = SimpleNamespace(service=SimpleNamespace(app=h.application), value=b'HID')
+            characteristic.observe_device = lambda options: ble.Characteristic.observe_device(characteristic, options)
+            self.assertEqual(bytes(ble.Characteristic.ReadValue(characteristic, {'device': path})), b'HID')
+            h.emit.assert_any_call('connected')
+            ble.Characteristic.WriteValue(characteristic, b'\x01', {'device': path})
+            self.assertEqual([call.args for call in h.emit.call_args_list].count(('connected',)), 1)
+            h.fire(h.timer('check_resubscribed'))
+            h.device.Disconnect.assert_not_called()
+            h.gatt.UnregisterApplication.assert_not_called()
+            h.subscribe(12.0)
+            h.emit.assert_any_call('subscribed')
+        self.run_helper(scenario)
+
+    def test_other_adapter_and_headset_events_cannot_replace_the_phone(self):
+        def scenario(h):
+            h.event(True)
+            phone_timer = h.timer('check_resubscribed')
+            h.emit.reset_mock()
+            h.added('/other_adapter/dev_PHONE', {'Connected': True, 'Icon': 'phone',
+                                                'Bonded': True, 'Trusted': True})
+            h.added('/adapter/dev_HEADSET', {'Connected': True, 'Icon': 'audio-headset',
+                                            'Bonded': True, 'Trusted': True})
+            h.event(False, '/adapter/dev_HEADSET')
+            h.emit.assert_not_called()
+            h.fire(phone_timer)
+            h.fire(h.timer('reconnect_if_stale'))
+            self.assertEqual(h.device.Disconnect.call_args_list[0].args, ('/adapter/dev_PHONE',))
+            self.assertEqual(h.device.Disconnect.call_count, 1)
+        self.run_helper(scenario)
+
+    def test_early_cccds_are_reconciled_when_unknown_client_is_identified_later(self):
+        def scenario(h):
+            path = '/adapter/dev_PRIVATE'
+            h.added(path, {'Connected': True, 'Paired': False, 'Bonded': False, 'Trusted': False})
+            h.subscribe(11.0)  # No Device1 Connected delta or identifying read yet.
+            self.assertNotIn(('subscribed',), [call.args for call in h.emit.call_args_list])
+            h.clock.return_value = 20.0
+            h.application.on_device(path)
+            h.emit.assert_any_call('connected')
+            h.emit.assert_any_call('subscribed')
+            self.assertFalse(h.timers)
+            h.device.Disconnect.assert_not_called()
+        self.run_helper(scenario)
+
+    def test_late_gatt_callback_cannot_resurrect_a_disconnected_phone(self):
+        def scenario(h):
+            h.event(True)
+            h.subscribe(11.0)
+            h.event(False)
+            h.emit.reset_mock()
+            timers = len(h.timers)
+            h.application.on_device('/adapter/dev_PHONE')
+            h.emit.assert_not_called()
+            self.assertEqual(len(h.timers), timers)
+            h.device.Disconnect.assert_not_called()
+        self.run_helper(scenario)
+
+    def test_startup_ignores_connected_headsets_and_other_adapters(self):
+        def scenario(h):
+            self.assertFalse(h.timers)
+            h.device.Disconnect.assert_not_called()
+            self.assertNotIn(('connected',), [call.args for call in h.emit.call_args_list])
+        self.run_helper(scenario, {
+            '/adapter/dev_HEADSET': {ble.DEVICE_IFACE: {'Connected': True, 'Icon': 'audio-headset',
+                                                     'Bonded': True, 'Trusted': True}},
+            '/other_adapter/dev_PHONE': {ble.DEVICE_IFACE: {'Connected': True, 'Icon': 'phone',
+                                                         'Bonded': True, 'Trusted': True}}})
+
+    def test_automatic_disconnect_requires_current_trust_and_bond(self):
+        def scenario(h):
+            path = '/adapter/dev_PHONE'
+            h.added(path, {'Connected': True, 'Icon': 'phone', 'Bonded': True,
+                           'Paired': False, 'Trusted': False})
+            recovery = h.timer('check_resubscribed')
+            h.fire(recovery)
+            h.gatt.UnregisterApplication.assert_not_called()
+            h.device.Disconnect.assert_not_called()
+            h.objects[path][ble.DEVICE_IFACE]['Trusted'] = True
+            h.fire(recovery)
+            h.gatt.UnregisterApplication.assert_called_once()
+            disconnect = h.timer('reconnect_if_stale')
+            h.objects[path][ble.DEVICE_IFACE]['Trusted'] = False
+            h.fire(disconnect)
+            h.device.Disconnect.assert_not_called()
+            h.objects[path][ble.DEVICE_IFACE].update(Trusted=True, Bonded=False)
+            h.fire(disconnect)
+            h.device.Disconnect.assert_not_called()
+        self.run_helper(scenario)
+
+    def test_one_hundred_same_bond_idle_reconnect_cycles_need_no_new_pairing(self):
+        def scenario(h):
+            h.event(True)
+            h.subscribe(11.0)
+            timers = len(h.timers)
+            for cycle in range(100):
+                h.event(False)
+                h.clock.return_value = 20.0 + cycle * 60
+                h.emit.reset_mock()
+                h.event(True)
+                h.emit.assert_any_call('subscribed')
+                self.assertEqual(len(h.timers), timers)
+            h.device.Disconnect.assert_not_called()
+            h.gatt.UnregisterApplication.assert_not_called()
+        self.run_helper(scenario)
+
+    def test_a_different_phone_cannot_reuse_the_previous_peer_cccds(self):
+        def scenario(h):
+            h.event(True)
+            h.subscribe(11.0)
+            h.event(False)
+            h.clock.return_value = 20.0
+            h.emit.reset_mock()
+            h.added('/adapter/dev_PHONE_B', {'Connected': True, 'Icon': 'phone',
+                                           'Bonded': True, 'Trusted': True})
+            self.assertTrue(all(report.subscribed_at == 0 for report in h.reports.values()))
+            self.assertNotIn(('subscribed',), [call.args for call in h.emit.call_args_list])
+        self.run_helper(scenario)
+
+    def test_removing_the_active_device_invalidates_its_cached_subscriptions(self):
+        def scenario(h):
+            h.event(True)
+            old = h.timer('check_resubscribed')
+            h.subscribe(11.0)
+            removed = next(call.args[0] for call in h.bus.add_signal_receiver.call_args_list
+                           if call.args[0].__name__ == 'on_device_removed')
+            h.emit.reset_mock()
+            removed('/adapter/dev_PHONE', [ble.DEVICE_IFACE])
+            h.emit.assert_any_call('disconnected')
+            self.assertTrue(all(report.subscribed_at == 0 for report in h.reports.values()))
+            h.fire(old)
+            h.device.Disconnect.assert_not_called()
+            h.gatt.UnregisterApplication.assert_not_called()
+        self.run_helper(scenario)
 
 
 if __name__ == "__main__":

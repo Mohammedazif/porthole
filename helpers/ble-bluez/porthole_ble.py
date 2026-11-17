@@ -97,6 +97,7 @@ class Application(dbus.service.Object):
     def __init__(self, bus):
         self.path = APP_PATH
         self.services = []
+        self.on_device = None
         super().__init__(bus, self.path)
 
     def get_path(self):
@@ -118,6 +119,7 @@ class Service(dbus.service.Object):
     def __init__(self, bus, app, uuid):
         self.path = f"{app.path}/service{len(app.services)}"
         self.bus = bus
+        self.app = app
         self.uuid = uuid
         self.characteristics = []
         super().__init__(bus, self.path)
@@ -175,11 +177,18 @@ class Characteristic(dbus.service.Object):
 
     @dbus.service.method(GATT_CHRC_IFACE, in_signature="a{sv}", out_signature="ay")
     def ReadValue(self, options):
+        self.observe_device(options)
         return dbus.Array(self.value[int(options.get("offset", 0)):], signature="y")
 
     @dbus.service.method(GATT_CHRC_IFACE, in_signature="aya{sv}")
     def WriteValue(self, value, options):
+        self.observe_device(options)
         self.value = bytes(value)
+
+    def observe_device(self, options):
+        callback = self.service.app.on_device
+        if callback and options.get("device"):
+            callback(str(options["device"]))
 
     @dbus.service.method(GATT_CHRC_IFACE)
     def StartNotify(self):
@@ -514,37 +523,42 @@ def main():
         emit(f"error advertising: {e}")
         loop.quit()
 
-    register_app()
-
     subscribed_announced = [0.0]
     connected_since = [0.0]
     connected_path = [None]
     connection_generation = [0]
+    subscription_peer = [None]
+    devices = {}
+    hid_devices = set()
+    connection_observed = {}
 
-    def drop_stale_links():
-        """An iPhone still connected from an earlier session keeps its old subscriptions,
-        which don't carry over to this service. Disconnecting makes it reconnect at once
-        and subscribe afresh (tested: back within ~2 s)."""
-        objects = dbus.Interface(bus.get_object(BLUEZ, "/"), DBUS_OM_IFACE).GetManagedObjects()
-        for path, ifaces in objects.items():
-            dev = ifaces.get(DEVICE_IFACE)
-            if (dev and dev.get("Connected") and str(path) != connected_path[0]
-                    and not reports_subscribed(reports)):
-                log(f"dropping stale connection {path} so it subscribes again")
-                try:
-                    dbus.Interface(bus.get_object(BLUEZ, path), DEVICE_IFACE).Disconnect(
-                        reply_handler=lambda: None,
-                        error_handler=lambda e: log(f"disconnect failed: {e.get_dbus_message()}"))
-                except dbus.exceptions.DBusException as e:
-                    log(f"disconnect failed: {e.get_dbus_message()}")
-        return False
+    def selected_adapter(path):
+        return str(path).startswith(str(adapter_path).rstrip("/") + "/")
 
-    GLib.timeout_add(2000, drop_stale_links)
+    def phone_device(properties):
+        name = str(properties.get("Alias", properties.get("Name", ""))).lower()
+        return (properties.get("Icon") == "phone"
+                or (int(properties.get("Class", 0)) & 0x1f00) == 0x0200
+                or "iphone" in name)
+
+    def bonded_and_trusted(path):
+        """Never Disconnect an untrusted LE link: BlueZ blocks its incoming reconnects."""
+        try:
+            dev = dbus.Interface(bus.get_object(BLUEZ, path), DBUS_PROP_IFACE)
+            try:
+                bonded = bool(dev.Get(DEVICE_IFACE, "Bonded"))
+            except dbus.exceptions.DBusException:
+                bonded = bool(dev.Get(DEVICE_IFACE, "Paired"))
+            return (bonded and bool(dev.Get(DEVICE_IFACE, "Trusted"))
+                    and bool(dev.Get(DEVICE_IFACE, "Connected")))
+        except dbus.exceptions.DBusException:
+            return False
 
     def on_subscribe():
-        if (reports_subscribed(reports, connected_since[0])
+        if (connected_path[0] and reports_subscribed(reports, connected_since[0])
                 and time.time() - subscribed_announced[0] > 1.0):
             subscribed_announced[0] = time.time()
+            subscription_peer[0] = connected_path[0]
             emit("subscribed")
     for report in reports.values():
         report.on_subscribe = on_subscribe
@@ -553,6 +567,8 @@ def main():
         if generation != connection_generation[0] or path != connected_path[0]:
             return False  # a timer from an old link must never disconnect a new one
         if reports_subscribed(reports, connected_at):
+            return False
+        if not selected_adapter(path) or not bonded_and_trusted(path):
             return False
         try:
             device = bus.get_object(BLUEZ, path)
@@ -568,6 +584,8 @@ def main():
     def check_resubscribed(connected_at, path, generation):
         if generation != connection_generation[0] or path != connected_path[0]:
             return False
+        if not bonded_and_trusted(path):
+            return False  # Fresh pairing may still need user approval/encryption.
         if not reports_subscribed(reports, connected_at):
             log("iPhone reconnected without subscribing; re-registering the HID service")
             reregister()
@@ -575,37 +593,101 @@ def main():
         return False
 
     def on_device_changed(interface, changed, invalidated, path=None):
-        if interface != DEVICE_IFACE:
+        if interface != DEVICE_IFACE or path is None or not selected_adapter(path):
             return
+        path = str(path)
+        properties = devices.setdefault(path, {})
+        paired_before = bool(properties.get("Paired"))
+        was_connected = bool(properties.get("Connected"))
+        properties.update(changed)
+        if changed.get("Connected") and not was_connected:
+            connection_observed[path] = time.time()
+        elif "Connected" in changed and not changed["Connected"]:
+            connection_observed.pop(path, None)
         dev = dbus.Interface(bus.get_object(BLUEZ, path), DBUS_PROP_IFACE)
-        if "Connected" in changed:
+        eligible = path in hid_devices or phone_device(properties)
+        if properties.get("Connected") and eligible and connected_path[0] is None:
             connection_generation[0] += 1
-            if changed["Connected"]:
-                connected_since[0] = time.time()
-                connected_path[0] = str(path)
-                emit("connected")
-                # BlueZ retains enabled notifications for bonded peers across
-                # link loss. iOS need not call StartNotify again in this service
-                # instance; demanding fresh timestamps would disable valid input.
-                try:
-                    cached = reports_subscribed(reports) and dev.Get(DEVICE_IFACE, "Bonded")
-                except dbus.exceptions.DBusException:
-                    cached = False
-                if cached:
-                    subscribed_announced[0] = time.time()
-                    emit("subscribed")
-                else:
-                    # Allow encryption and service discovery to finish before recovery.
-                    GLib.timeout_add(15000, check_resubscribed, connected_since[0], str(path),
-                                     connection_generation[0])
+            connected_since[0] = connection_observed.get(path, time.time())
+            connected_path[0] = path
+            if subscription_peer[0] not in (None, path):
+                for report in reports.values():
+                    report.subscribed_at = 0.0
+                subscription_peer[0] = None
+            emit("connected")
+            # Only the same bonded peer can reuse this service's enabled CCCDs.
+            if (subscription_peer[0] == path and reports_subscribed(reports)
+                    and bonded_and_trusted(path)):
+                subscribed_announced[0] = time.time()
+                emit("subscribed")
+            elif reports_subscribed(reports, connected_since[0]):
+                subscription_peer[0] = path
+                subscribed_announced[0] = time.time()
+                emit("subscribed")
             else:
-                connected_path[0] = None
-                emit("disconnected")
-        if changed.get("Paired"):
-            dev.Set(DEVICE_IFACE, "Trusted", dbus.Boolean(True))
+                GLib.timeout_add(15000, check_resubscribed, connected_since[0], path,
+                                 connection_generation[0])
+        if "Connected" in changed and not changed["Connected"] and path == connected_path[0]:
+            connection_generation[0] += 1
+            connected_path[0] = None
+            emit("disconnected")
+        if properties.get("Paired") and path == connected_path[0]:
+            try:
+                if not properties.get("Trusted"):
+                    dev.Set(DEVICE_IFACE, "Trusted", dbus.Boolean(True))
+                    properties["Trusted"] = True
+                if changed.get("Paired") and not paired_before:
+                    # Pairing completion gets its own full discovery grace.
+                    connection_generation[0] += 1
+                    GLib.timeout_add(15000, check_resubscribed, connected_since[0], path,
+                                     connection_generation[0])
+            except dbus.exceptions.DBusException as e:
+                log(f"trusting the paired phone failed: {e}")
+
+    def on_gatt_device(path):
+        if not selected_adapter(path):
+            return
+        try:
+            dev = dbus.Interface(bus.get_object(BLUEZ, path), DBUS_PROP_IFACE)
+            if not dev.Get(DEVICE_IFACE, "Connected"):
+                return  # A queued request from a closed link cannot resurrect it.
+        except dbus.exceptions.DBusException:
+            return
+        hid_devices.add(str(path))
+        # A server read/write proves the caller is connected even if its initial
+        # Device1 object arrived already connected, without a property delta.
+        on_device_changed(DEVICE_IFACE, {"Connected": True}, [], path=path)
+
+    def on_device_added(path, interfaces):
+        if DEVICE_IFACE in interfaces:
+            on_device_changed(DEVICE_IFACE, interfaces[DEVICE_IFACE], [], path=path)
+
+    def on_device_removed(path, interfaces):
+        path = str(path)
+        if DEVICE_IFACE not in interfaces or not selected_adapter(path):
+            return
+        on_device_changed(DEVICE_IFACE, {"Connected": False}, [], path=path)
+        devices.pop(path, None)
+        hid_devices.discard(path)
+        connection_observed.pop(path, None)
+        if subscription_peer[0] == path:
+            subscription_peer[0] = None
+            for report in reports.values():
+                report.subscribed_at = 0.0
 
     bus.add_signal_receiver(on_device_changed, dbus_interface=DBUS_PROP_IFACE,
-                            signal_name="PropertiesChanged", path_keyword="path")
+                            signal_name="PropertiesChanged", path_keyword="path", bus_name=BLUEZ)
+    bus.add_signal_receiver(on_device_added, dbus_interface=DBUS_OM_IFACE,
+                            signal_name="InterfacesAdded", bus_name=BLUEZ)
+    bus.add_signal_receiver(on_device_removed, dbus_interface=DBUS_OM_IFACE,
+                            signal_name="InterfacesRemoved", bus_name=BLUEZ)
+    app.on_device = on_gatt_device
+    # Snapshot before service publication; newly arriving devices are observed
+    # through InterfacesAdded. There is no blanket startup Disconnect timer.
+    objects = dbus.Interface(bus.get_object(BLUEZ, "/"), DBUS_OM_IFACE).GetManagedObjects()
+    for path, interfaces in objects.items():
+        on_device_added(path, interfaces)
+    register_app()
 
     frames, key_frames = queue.Queue(), queue.Queue()
     threading.Thread(target=stdin_reader, args=(frames, key_frames), daemon=True).start()
