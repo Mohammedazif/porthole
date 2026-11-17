@@ -48,6 +48,11 @@ The final Linux preview log records the display-layout pause and restoration on 
 Photos frames. The subsequent interactive grid check did not pass: after the preview
 restart, BlueZ reported the bonded phone disconnected, so mouse readiness could not be
 established. This is not evidence that Bluetooth or live control recovery is solved.
+The subsequent log records the USB adapter leaving the VM, returning, and reaching all
+three input subscriptions. After the closed preview was reopened without another build,
+the user confirmed working pointer control in Calculator; the app also logged dispatched
+mouse reports, ACKs and observed pointer movement. Full-screen Photos zoom and interactive
+Photos/grid recovery remain separate unverified outcomes.
 
 **Windows controls preview (source `5f58874`):** all 150 Release cross-build targets
 compile with warnings as errors; 23/23 portable WinRT HID-core tests pass. The native
