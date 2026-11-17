@@ -75,8 +75,18 @@ static void push_event(app *a, int which, void *data)
     SDL_zero(e);
     e.type = a->ev_base + (Uint32)which;
     e.user.data1 = data;
-    if (SDL_PushEvent(&e) < 0)
+    if (SDL_PushEvent(&e) != 1)
         free(data);
+}
+
+static void discard_pending_events(app *a)
+{
+    if (a->ev_base == (Uint32)-1)
+        return;
+    SDL_Event e;
+    while (SDL_PeepEvents(&e, 1, SDL_GETEVENT, a->ev_base,
+                          a->ev_base + EV_COUNT - 1) > 0)
+        free(e.user.data1);
 }
 
 static void on_frame(void *user)
@@ -935,6 +945,7 @@ done:
     ph_receiver_stop(a.rx); /* stop the network first so no more video arrives */
     ph_audio_destroy(a.audio);
     ph_decoder_stop(a.dec);
+    discard_pending_events(&a); /* all event producers have stopped */
     ph_window_destroy(a.win);
     av_frame_free(&frame);
     av_frame_free(&a.view_frame);

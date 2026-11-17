@@ -691,6 +691,23 @@ int main(void)
     CHECK(!ph_pointer_scroll_target(&f.pointer, .7, .5, .46, f.now));
     CHECK(f.pointer.phase == PH_POINTER_MOVING); /* stale video must be refreshed */
 
+    /* A tiny residual with stale scale must converge before pressing. Increasing
+     * the correction fraction makes this case oscillate despite faster normal drags. */
+    init(&f);
+    f.true_linear = 1.2;
+    f.true_quadratic = .04;
+    CHECK(ph_pointer_set_scale(&f.pointer, .5, .5));
+    confirmed_position(&f, 250, 700, .46);
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true,
+                             245.9 / 500, 700 * .46 / 500, .46, ++f.now));
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, false,
+                             245.9 / 500, 700 * .46 / 500, .46, ++f.now));
+    settle(&f);
+    pressed = first_button(&f, PH_HID_BTN_LEFT);
+    CHECK(pressed < f.count);
+    CHECK(hypot(f.events[pressed].x - 245.9, f.events[pressed].y - 700) <= 4);
+    CHECK(!f.pointer.failed && !f.pointer.buttons && !f.pointer.count);
+
     /* Disconnection and bad inputs cannot emit mouse reports. */
     init(&f);
     CHECK(!ph_pointer_target(&f.pointer, NAN, .5, .46, f.now));

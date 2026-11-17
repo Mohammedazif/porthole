@@ -19,7 +19,7 @@ static ph_decoder decoder;
 static ph_receiver receiver;
 static int windows_created, decoders_started, receivers_started;
 static int decoders_stopped, receivers_stopped, ready_count;
-static bool timed_out, ack_timeout_mode, motion_injected;
+static bool timed_out, ack_timeout_mode, healthy_no_video, motion_injected;
 static Uint64 first_tick, motion_at, recovered_at;
 
 static void quit(void)
@@ -75,6 +75,10 @@ void ph_window_tick(ph_window *w)
         event.motion.y = 700;
         SDL_PushEvent(&event);
     }
+    /* The actual helper process acknowledges every paced fence, while video
+     * stays absent. Video confirmation failure must not kill healthy input. */
+    if (healthy_no_video && motion_injected && SDL_GetTicks64() - motion_at >= 4600)
+        quit();
 }
 
 void ph_window_present(ph_window *w, const struct AVFrame *frame, const ph_rect *screen)
@@ -142,9 +146,14 @@ void ph_receiver_stop(ph_receiver *r) { (void)r; receivers_stopped++; }
 
 int main(int argc, char **argv)
 {
-    if (argc > 2 || (argc == 2 && strcmp(argv[1], "--ack-timeout")))
+    if (argc > 2 || (argc == 2 && strcmp(argv[1], "--ack-timeout")
+                    && strcmp(argv[1], "--healthy-no-video")))
         return 1;
     ack_timeout_mode = argc == 2;
+    healthy_no_video = argc == 2 && !strcmp(argv[1], "--healthy-no-video");
+    char config[] = "/tmp/porthole-reconnect-config-XXXXXX";
+    if (!mkdtemp(config)) return 1;
+    setenv("XDG_CONFIG_HOME", config, 1);
     char counter[] = "/tmp/porthole-reconnect-XXXXXX";
     int fd = mkstemp(counter);
     if (fd < 0)
@@ -167,11 +176,25 @@ int main(int argc, char **argv)
         }
         /* Remains alive and consumes every report, but never acknowledges any
          * fence. Only the app's timeout recovery will close its stdin. */
-        fputs("import os, sys\nfrom pathlib import Path\n"
+        fputs("import os, sys, time\nfrom pathlib import Path\n"
               "p = Path(os.environ['PORTHOLE_TEST_BLE_COUNTER'])\n"
               "p.write_text(str(int(p.read_text() or '0') + 1))\n"
-              "print('ready\\nsubscribed', flush=True)\n"
-              "sys.stdin.buffer.read()\n", script);
+              "print('ready\\nsubscribed', flush=True)\n", script);
+        if (healthy_no_video)
+            fputs("while True:\n"
+                  " h = sys.stdin.buffer.read(2)\n"
+                  " if not h: break\n"
+                  " if len(h) != 2: raise SystemExit(4)\n"
+                  " data = sys.stdin.buffer.read(h[1])\n"
+                  " if len(data) != h[1]: raise SystemExit(5)\n"
+                  " if h[0] == 18: time.sleep(int.from_bytes(data, 'little') / 1000)\n"
+                  " else: time.sleep(0.017)\n"
+                  " if h[0] == 16:\n"
+                  "  sync = int.from_bytes(data, 'little')\n"
+                  "  print('sync', sync, flush=True)\n"
+                  "  if sync > 2147483649: print('sync', sync - 1, flush=True)\n", script);
+        else
+            fputs("sys.stdin.buffer.read()\n", script);
         if (fclose(script)) {
             unlink(ack_helper);
             unlink(counter);
@@ -190,10 +213,16 @@ int main(int argc, char **argv)
         fclose(file);
     }
     unlink(counter);
-    if (result || timed_out || attempts != 2 || ready_count != 2 || windows_created != 1
+    char config_dir[sizeof config + 16];
+    snprintf(config_dir, sizeof config_dir, "%s/porthole", config);
+    rmdir(config_dir);
+    rmdir(config);
+    int expected_attempts = healthy_no_video ? 1 : 2;
+    if (result || timed_out || attempts != expected_attempts || ready_count != expected_attempts || windows_created != 1
         || decoders_started != 1 || receivers_started != 1 || decoders_stopped != 1
         || receivers_stopped != 1
-        || (ack_timeout_mode && (!motion_injected || recovered_at - motion_at < 7500))) {
+        || (ack_timeout_mode && !motion_injected)
+        || (ack_timeout_mode && !healthy_no_video && recovered_at - motion_at < 7500)) {
         fprintf(stderr, "reconnect failed: rc=%d timeout=%d helpers=%d ready=%d windows=%d "
                         "decoders=%d/%d receivers=%d/%d\n", result, timed_out, attempts,
                 ready_count, windows_created, decoders_started, decoders_stopped,
@@ -203,7 +232,8 @@ int main(int argc, char **argv)
                     motion_injected, (unsigned long long)(recovered_at - motion_at));
         return 1;
     }
-    puts(ack_timeout_mode ? "Missing helper ACK triggered control recovery without restarting mirroring"
+    puts(healthy_no_video ? "Real paced helper remained connected despite missing video and stale duplicate ACKs"
+         : ack_timeout_mode ? "Missing helper ACK triggered control recovery without restarting mirroring"
                           : "Bluetooth recovered without restarting mirroring");
     return 0;
 }
