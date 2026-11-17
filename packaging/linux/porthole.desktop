@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Porthole
+Exec=porthole
+Terminal=false
+Categories=Utility;AudioVideo;

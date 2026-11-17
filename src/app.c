@@ -2,6 +2,7 @@
 
 #include <stdatomic.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,7 +22,13 @@
 #include "core/metrics.h"
 #include "core/version.h"
 #include "hid/link.h"
+#include "polish/runtime.h"
 #include "ui/window.h"
+#include "usb/capture.h"
+#include "usb/packet.h"
+#include "usb/sample.h"
+#include "usb/switch.h"
+#include "video/codecs.h"
 #include "video/crop.h"
 #include "video/cursor.h"
 #include "video/decoder.h"
@@ -37,6 +44,7 @@ typedef struct app {
     ph_decoder *dec;
     ph_receiver *rx;
     ph_audio *audio;
+    ph_polish *polish;
     ph_hid_link *link;
     bool link_stopping;
     Uint32 ev_base;
@@ -66,6 +74,11 @@ typedef struct app {
     bool input_pending;
     uint64_t input_at;
     Uint64 metrics_at, metrics_log_at;
+    ph_src_switch src;
+    pthread_mutex_t src_lock;
+    pthread_t usb_thread;
+    atomic_bool usb_stop;
+    bool usb_started;
 } app;
 
 /* ------------------------------------------------------------ cross-thread notifications */
@@ -103,8 +116,29 @@ static void on_frame(void *user)
 static void on_video(void *user, const uint8_t *data, size_t len, uint64_t timestamp_ns)
 {
     app *a = user;
-    (void)timestamp_ns; /* shown as soon as decoded: lowest latency */
+    bool show;
+
+    pthread_mutex_lock(&a->src_lock);
+    show = ph_src_switch_wifi_frame(&a->src, ph_usb_annexb_keyframe(data, len),
+                                    ph_metrics_now_ms()) == PH_SRC_WIFI;
+    pthread_mutex_unlock(&a->src_lock);
+    if (!show)
+        return;
+    if (a->audio)
+        ph_audio_note_video_pts(a->audio, timestamp_ns);
+    if (a->polish && !ph_polish_accepts_video(a->polish))
+        return;
+    if (a->polish)
+        ph_polish_on_video(a->polish, data, len, timestamp_ns);
     ph_decoder_push(a->dec, data, len);
+}
+
+static bool on_admit(void *user, const char *device_id, const char *name, const char *model)
+{
+    app *a = user;
+    if (!a->polish)
+        return true;
+    return ph_polish_admit(a->polish, device_id, name, model);
 }
 
 static void on_connected(void *user, const char *name, const char *model)
@@ -113,10 +147,12 @@ static void on_connected(void *user, const char *name, const char *model)
     push_event(user, EV_CONNECTED, strdup(name && *name ? name : "iPhone"));
 }
 
-static void on_audio(void *user, unsigned char compression, const uint8_t *data, size_t len)
+static void on_audio(void *user, unsigned char compression, const uint8_t *data, size_t len,
+                     uint64_t timestamp_ns)
 {
     app *a = user;
-    ph_audio_push(a->audio, compression, data, len);
+    if (a->audio)
+        ph_audio_push_timed(a->audio, compression, data, len, timestamp_ns);
 }
 
 static void on_audio_format(void *user, unsigned char compression, unsigned short samples)
@@ -162,6 +198,12 @@ static void update_title(app *a)
         snprintf(title, sizeof title,
                  "%s - on your iPhone: Control Center > Screen Mirroring > %s", PORTHOLE_NAME,
                  a->opt->name);
+    {
+        char pin[8];
+        size_t used = strlen(title);
+        if (a->polish && ph_polish_copy_pin(a->polish, pin, sizeof pin) && used + 1 < sizeof title)
+            snprintf(title + used, sizeof title - used, "  PIN %s", pin);
+    }
     ph_window_set_title(a->win, title);
     ph_window_set_status(a->win, a->phone_name[0] != 0, !strcmp(control, "on"), control);
     ph_setup_update(&a->setup, a->input.enabled,
@@ -349,6 +391,14 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
                      : event->button == SDL_BUTTON_RIGHT ? PH_HID_BTN_RIGHT : 0;
     if (!button)
         return;
+    if (a->polish && ph_polish_precise(a->polish) && event->button == SDL_BUTTON_LEFT) {
+        double nx, ny;
+        int vw = 0, vh = 0;
+        ph_window_video_size(a->win, &vw, &vh);
+        if (ph_window_to_video(a->win, event->x, event->y, &nx, &ny) &&
+            ph_polish_click(a->polish, event->type == SDL_MOUSEBUTTONDOWN, nx, ny, vw, vh))
+            return;
+    }
     if (!pointer_coordinates(a, event->x, event->y, &x, &y, &aspect)) {
         a->input_pending = false;
         if (event->type == SDL_MOUSEBUTTONUP) {
@@ -539,6 +589,11 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
             ph_window_toggle_diagnostics(a->win);
         return;
     }
+    if (a->polish && ph_polish_key(a->polish, e, &a->input,
+                                   SDL_GetWindowFromID(ph_window_id(a->win)), a->picture_w,
+                                   a->picture_h, a->view_frame,
+                                   !a->setup.visible && !ph_window_help_visible(a->win)))
+        return;
     if (sc == SDL_SCANCODE_F1) {
         if (e->type == SDL_KEYDOWN && !e->repeat) {
             a->input_pending = false;
@@ -681,6 +736,8 @@ static void show_frame(app *a, const AVFrame *f)
     if (a->wheel.blocked_y && previous_edge != a->wheel.blocked_y)
         PH_LOGD("wheel stopped at %s boundary", a->wheel.blocked_y > 0 ? "top" : "bottom");
     ph_window_present(a->win, f, &screen);
+    if (a->polish)
+        ph_polish_layout(a->polish, SDL_GetWindowFromID(ph_window_id(a->win)), screen.w, screen.h);
     ph_metrics_frame(&a->metrics, a->frame_timing.valid ? a->frame_timing.received_ms : 0,
                       a->frame_timing.valid ? a->frame_timing.decoded_ms : 0, ph_metrics_now_ms());
 }
@@ -724,6 +781,11 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
         ph_decoder_reset(a->dec);
         ph_pointer_set_enabled(&a->pointer, false, SDL_GetTicks64());
         a->phone_name[0] = '\0';
+        pthread_mutex_lock(&a->src_lock);
+        ph_src_switch_wifi_lost(&a->src, ph_metrics_now_ms());
+        pthread_mutex_unlock(&a->src_lock);
+        if (a->polish)
+            ph_polish_disconnected(a->polish);
         ph_window_clear(a->win);
         update_title(a);
         break;
@@ -825,6 +887,142 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
     return true;
 }
 
+#ifdef PH_USB_HAVE_LIBUSB
+static void usb_pause(app *a, int ms)
+{
+    int left = ms;
+
+    while (left > 0 && !atomic_load(&a->usb_stop)) {
+        int step = left > 50 ? 50 : left;
+        SDL_Delay((Uint32)step);
+        left -= step;
+    }
+}
+
+static void usb_bad_sample(void)
+{
+    static atomic_int logged;
+
+    if (atomic_exchange(&logged, 1) == 0)
+        PH_LOGW("a USB video sample was not Annex-B or length-prefixed NALs");
+}
+
+static void take_usb_sample(app *a, const ph_usb_sample *sample, uint8_t *annexb, size_t cap)
+{
+    size_t n;
+    ph_src before, after;
+
+    if (!sample->video) {
+        static atomic_int logged;
+        if (atomic_exchange(&logged, 1) == 0)
+            PH_LOGI("USB audio stays on the phone; the PC plays Wi-Fi audio");
+        return;
+    }
+    if (!sample->data || sample->len == 0)
+        return;
+    n = ph_usb_to_annexb(sample->data, sample->len, annexb, cap);
+    if (n == 0) {
+        usb_bad_sample();
+        return;
+    }
+    pthread_mutex_lock(&a->src_lock);
+    before = a->src.current;
+    after = ph_src_switch_usb_frame(&a->src, ph_usb_annexb_keyframe(annexb, n), ph_metrics_now_ms());
+    pthread_mutex_unlock(&a->src_lock);
+    if (before != PH_SRC_USB && after == PH_SRC_USB) {
+        if (a->polish)
+            ph_polish_usb_present(a->polish, true);
+        ph_decoder_reset(a->dec);
+        PH_LOGI("showing the USB picture");
+    }
+    if (after != PH_SRC_USB)
+        return;
+    if (a->polish && !ph_polish_accepts_usb(a->polish))
+        return;
+    if (a->polish)
+        ph_polish_on_video(a->polish, annexb, n, 0);
+    ph_decoder_push(a->dec, annexb, n);
+}
+
+static void usb_unplugged(app *a)
+{
+    ph_src after;
+
+    pthread_mutex_lock(&a->src_lock);
+    after = ph_src_switch_usb_unplugged(&a->src, ph_metrics_now_ms());
+    pthread_mutex_unlock(&a->src_lock);
+    if (a->polish)
+        ph_polish_usb_present(a->polish, false);
+    if (a->dec)
+        ph_decoder_reset(a->dec);
+    if (after == PH_SRC_WIFI)
+        PH_LOGI("USB unplugged; showing Wi-Fi");
+    else
+        PH_LOGI("USB unplugged");
+}
+
+#endif
+
+static void *usb_thread_main(void *user)
+{
+    app *a = user;
+
+#ifndef PH_USB_HAVE_LIBUSB
+    (void)a;
+    PH_LOGI("USB screen capture needs libusb-1.0");
+    return NULL;
+#else
+    uint8_t *copy_buf = malloc(PH_USB_FRAME_MAX);
+    uint8_t *annexb = malloc(PH_USB_FRAME_MAX);
+    bool announced = false;
+    bool wrote_inf = false;
+
+    if (!copy_buf || !annexb) {
+        free(copy_buf);
+        free(annexb);
+        PH_LOGE("couldn't allocate the USB screen buffer");
+        return NULL;
+    }
+    while (!atomic_load(&a->usb_stop)) {
+        ph_usb_capture *cap = ph_usb_libusb_open();
+        if (!cap) {
+            char path[1100];
+            if (!announced) {
+                PH_LOGI("waiting for an iPhone on USB");
+                announced = true;
+            }
+            if (!wrote_inf && ph_config_path("porthole-winusb.inf", path, sizeof path) &&
+                ph_usb_write_winusb_inf(path) == 0) {
+                PH_LOGI("wrote a WinUSB driver for the capture interface: %s", path);
+                wrote_inf = true;
+            }
+            usb_pause(a, 2000);
+            continue;
+        }
+        pthread_mutex_lock(&a->src_lock);
+        a->src.usb_unplugged = false;
+        pthread_mutex_unlock(&a->src_lock);
+        PH_LOGI("USB screen interface open");
+        while (!atomic_load(&a->usb_stop)) {
+            ph_usb_sample sample;
+            int rc = ph_usb_capture_poll(cap, &sample, copy_buf, PH_USB_FRAME_MAX);
+            if (atomic_load(&a->usb_stop))
+                break;
+            if (rc < 0) {
+                usb_unplugged(a);
+                break;
+            }
+            if (rc > 0)
+                take_usb_sample(a, &sample, annexb, PH_USB_FRAME_MAX);
+        }
+        ph_usb_capture_close(cap);
+    }
+    free(copy_buf);
+    free(annexb);
+    return NULL;
+#endif
+}
+
 int ph_app_run(const ph_app_options *opt)
 {
     app a = {.opt = opt};
@@ -843,11 +1041,12 @@ int ph_app_run(const ph_app_options *opt)
         else
             PH_LOGW("invalid pointer calibration; using the default movement model");
     }
+    ph_codec_advertise picture = ph_codec_advertise_for(opt->four_k);
     ph_receiver_options rx_opt = {
         .name = opt->name,
-        .width = 1920,
-        .height = 1080,
-        .max_fps = 60,
+        .width = picture.width,
+        .height = picture.height,
+        .max_fps = picture.max_fps,
         .fixed_ports = opt->fixed_ports,
         .debug = opt->debug,
     };
@@ -860,6 +1059,7 @@ int ph_app_run(const ph_app_options *opt)
         .audio_flush = on_audio_flush,
         .connected = on_connected,
         .disconnected = on_disconnected,
+        .admit = on_admit,
     };
     AVFrame *frame = NULL;
     uint64_t seq = 0;
@@ -872,6 +1072,8 @@ int ph_app_run(const ph_app_options *opt)
         PH_LOGE("couldn't initialise SDL: %s", SDL_GetError());
         return 1;
     }
+    pthread_mutex_init(&a.src_lock, NULL);
+    ph_src_switch_init(&a.src);
     a.ev_base = SDL_RegisterEvents(EV_COUNT);
     frame = av_frame_alloc();
     a.view_frame = av_frame_alloc();
@@ -880,9 +1082,19 @@ int ph_app_run(const ph_app_options *opt)
     a.dec = ph_decoder_start(on_frame, &a);
     if (opt->audio)
         a.audio = ph_audio_create();
+    a.polish = ph_polish_create(&(ph_polish_options){.pin_required = opt->pin_required,
+                                                     .autostart = opt->autostart,
+                                                     .precise_touch = opt->precise_touch,
+                                                     .exe_path = opt->exe_path});
+    if (a.audio && opt->audio_delay_ms)
+        ph_audio_set_sync_offset_ms(a.audio, opt->audio_delay_ms);
+    if (a.polish)
+        ph_polish_set_audio(a.polish, a.audio);
     if (a.ev_base == (Uint32)-1 || !frame || !a.view_frame || !a.pointer_baseline
         || !a.win || !a.dec)
         goto done;
+    if (a.polish)
+        ph_polish_apply_saved(a.polish, SDL_GetWindowFromID(ph_window_id(a.win)));
     update_title(&a);
     if (opt->diagnostics)
         ph_window_toggle_diagnostics(a.win);
@@ -897,6 +1109,10 @@ int ph_app_run(const ph_app_options *opt)
     PH_LOGI("waiting for the iPhone: Control Center > Screen Mirroring > %s", opt->name);
     start_bluetooth(&a);
     update_title(&a);
+    if (opt->usb && pthread_create(&a.usb_thread, NULL, usb_thread_main, &a) == 0)
+        a.usb_started = true;
+    else if (opt->usb)
+        PH_LOGW("couldn't start USB screen capture");
 
     while (running) {
         SDL_Event e;
@@ -910,6 +1126,13 @@ int ph_app_run(const ph_app_options *opt)
             } while (SDL_PollEvent(&e));
         }
         ph_window_tick(a.win);
+        if (a.audio)
+            ph_audio_pump(a.audio, ph_metrics_now_ms());
+        if (a.polish) {
+            ph_polish_tick(a.polish, &a.input);
+            if (ph_polish_quit(a.polish))
+                running = false;
+        }
         observe_pointer(&a);
         ph_pointer_tick(&a.pointer, SDL_GetTicks64());
         ph_scroll_tick(&a.wheel, SDL_GetTicks64());
@@ -938,6 +1161,11 @@ int ph_app_run(const ph_app_options *opt)
     rc = 0;
 
 done:
+    if (a.usb_started) {
+        atomic_store(&a.usb_stop, true);
+        pthread_join(a.usb_thread, NULL);
+    }
+    pthread_mutex_destroy(&a.src_lock);
     if (a.calibration_saved)
         finish_calibration(&a, false);
     if (a.pointer.observed_at && a.pointer.known && !a.pointer.failed
@@ -951,6 +1179,9 @@ done:
     release_everything(&a);
     ph_hid_link_stop(a.link);
     ph_receiver_stop(a.rx); /* stop the network first so no more video arrives */
+    if (a.polish && a.win)
+        ph_polish_save_window(a.polish, SDL_GetWindowFromID(ph_window_id(a.win)));
+    ph_polish_destroy(a.polish);
     ph_audio_destroy(a.audio);
     ph_decoder_stop(a.dec);
     discard_pending_events(&a); /* all event producers have stopped */

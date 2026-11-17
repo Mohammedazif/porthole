@@ -11,6 +11,7 @@
 
 #include "core/log.h"
 #include "core/metrics.h"
+#include "video/codecs.h"
 
 #define MAX_QUEUED 240 /* ~4 s at 60 fps; beyond that we're hopelessly behind */
 
@@ -64,16 +65,14 @@ static void reset_locked(ph_decoder *d)
     d->consumed_seq = d->latest_seq;
 }
 
-static AVCodecContext *open_codec(void)
+static AVCodecContext *open_codec(enum AVCodecID codec_id)
 {
-    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    const AVCodec *decoder = avcodec_find_decoder(codec_id);
     AVCodecContext *ctx;
 
-    if (!codec) {
-        PH_LOGE("this FFmpeg build has no H.264 decoder");
+    if (!decoder)
         return NULL;
-    }
-    ctx = avcodec_alloc_context3(codec);
+    ctx = avcodec_alloc_context3(decoder);
     if (!ctx)
         return NULL;
     ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
@@ -82,7 +81,7 @@ static AVCodecContext *open_codec(void)
     /* PTS carries local packet provenance only. Rendering remains immediate;
      * this does not schedule frames or change audio/video synchronization. */
     ctx->pkt_timebase = (AVRational){1, 1000};
-    if (avcodec_open2(ctx, codec, NULL) < 0) {
+    if (avcodec_open2(ctx, decoder, NULL) < 0) {
         avcodec_free_context(&ctx);
         return NULL;
     }
@@ -117,14 +116,19 @@ fail:
 static void *decode_thread(void *arg)
 {
     ph_decoder *d = arg;
-    AVCodecContext *ctx = open_codec();
+    AVCodecContext *ctx = open_codec(AV_CODEC_ID_H264);
     AVPacket *pkt = av_packet_alloc();
     AVFrame *frame = av_frame_alloc();
     struct SwsContext *sws = NULL;
+    ph_codec current = ctx ? PH_CODEC_H264 : PH_CODEC_UNKNOWN;
+    bool logged_h264 = ctx == NULL;
+    bool logged_h265 = false;
     int w = 0, h = 0;
 
-    if (!ctx || !pkt || !frame) {
-        PH_LOGE("couldn't start the H.264 decoder");
+    if (!ctx)
+        PH_LOGE("this FFmpeg build has no H.264 decoder");
+    if (!pkt || !frame) {
+        PH_LOGE("couldn't start the video decoder");
         goto done;
     }
 
@@ -141,7 +145,8 @@ static void *decode_thread(void *arg)
         if (d->reset) {
             d->reset = false;
             pthread_mutex_unlock(&d->lock);
-            avcodec_flush_buffers(ctx);
+            if (ctx)
+                avcodec_flush_buffers(ctx);
             continue;
         }
         p = d->head;
@@ -151,6 +156,37 @@ static void *decode_thread(void *arg)
         d->queued--;
         uint64_t generation = p->generation;
         pthread_mutex_unlock(&d->lock);
+
+        {
+            ph_codec detected = ph_codec_from_annexb(p->data, p->len);
+            if (current != PH_CODEC_UNKNOWN && detected != PH_CODEC_UNKNOWN && detected != current
+                && !ph_codec_annexb_unambiguous(p->data, p->len, detected))
+                detected = PH_CODEC_UNKNOWN;
+            if (detected != PH_CODEC_UNKNOWN && detected != current) {
+                enum AVCodecID codec_id = detected == PH_CODEC_H264 ? AV_CODEC_ID_H264
+                                                                    : AV_CODEC_ID_HEVC;
+                avcodec_free_context(&ctx);
+                ctx = open_codec(codec_id);
+                if (!ctx) {
+                    if (detected == PH_CODEC_H265) {
+                        if (!logged_h265)
+                            PH_LOGE("this FFmpeg build has no H.265 decoder");
+                        logged_h265 = true;
+                    } else if (!logged_h264) {
+                        PH_LOGE("this FFmpeg build has no H.264 decoder");
+                        logged_h264 = true;
+                    }
+                    current = PH_CODEC_UNKNOWN;
+                    free(p);
+                    continue;
+                }
+                current = detected;
+            }
+        }
+        if (!ctx) {
+            free(p);
+            continue;
+        }
 
         if (av_new_packet(pkt, (int)p->len) == 0) {
             memcpy(pkt->data, p->data, p->len);

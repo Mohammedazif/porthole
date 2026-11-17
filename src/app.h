@@ -12,7 +12,14 @@ typedef struct ph_app_options {
     bool diagnostics;       /* show measured local input/video timings */
     bool auto_setup;        /* offer guided setup until completed */
     bool setup;             /* explicitly open guided setup this run */
+    bool pin_required;      /* unknown devices must enter a PIN before mirroring */
+    bool four_k;            /* advertise 3840x2160 instead of 1920x1080 */
+    bool autostart;         /* write an XDG autostart entry on Linux */
+    int audio_delay_ms;     /* positive delays PC audio relative to the picture */
+    const char *precise_touch; /* host:port of WebDriverAgent, or NULL */
+    const char *exe_path;
     const char *ble_helper; /* path of the Bluetooth helper script */
+    bool usb;               /* open a plugged-in iPhone as a USB screen */
 } ph_app_options;
 
 /* Runs the mirror window until it is closed. Returns a process exit code. */

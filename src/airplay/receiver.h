@@ -16,7 +16,8 @@ typedef struct ph_receiver_callbacks {
      * Called on a network thread; `data` is only valid during the call. */
     void (*video)(void *user, const uint8_t *data, size_t len, uint64_t timestamp_ns);
     /* Decrypted compressed audio and its negotiated format, on network threads. */
-    void (*audio)(void *user, unsigned char compression, const uint8_t *data, size_t len);
+    void (*audio)(void *user, unsigned char compression, const uint8_t *data, size_t len,
+                  uint64_t timestamp_ns);
     void (*audio_format)(void *user, unsigned char compression, unsigned short samples);
     void (*audio_volume)(void *user, float decibels);
     void (*audio_flush)(void *user);
@@ -24,6 +25,8 @@ typedef struct ph_receiver_callbacks {
     void (*connected)(void *user, const char *name, const char *model);
     /* The mirroring session ended or was reset. Called on a network thread. */
     void (*disconnected)(void *user);
+    /* Return false to refuse this device. NULL admits every device. */
+    bool (*admit)(void *user, const char *device_id, const char *name, const char *model);
 } ph_receiver_callbacks;
 
 typedef struct ph_receiver_options {

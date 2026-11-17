@@ -1,0 +1,8 @@
+Mode: built-in image_gen edit, transparent_background=true
+Reference: approved-reference.png
+
+Use case: background-extraction.
+Asset type: transparent production master of the approved Porthole logo.
+Input image is the exact approved edit target.
+Remove the white background and all white negative-space fills, making them genuinely TRANSPARENT, including the circular opening inside the large icon, the white gap around its cursor, the counter of the capital P, the lowercase o counters, and the other white letter counters. Keep the black artwork fully opaque and keep the light-gray reflection stripes fully opaque. No white matte or painted checkerboard.
+Preserve the original design as faithfully as possible: the same circular porthole rim, cursor, rounded wordmark, exact Porthole spelling, original letter shapes, original alignment and spacing. Preserve BOTH pairs of reflection stripes at the UPPER-RIGHT of their respective circular openings, with the same relative position and upward-right diagonal angle. Do not move the stripes back to the upper-left. Do not redraw or simplify the logo. Do not change any colors except removing white to transparent. Keep the same stacked layout and the same landscape canvas proportions. Output the isolated original logo artwork on real transparency, with no added text, captions, shadows, borders, effects or watermarks.

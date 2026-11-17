@@ -99,7 +99,7 @@ static void cb_audio_process(void *cls, raop_ntp_t *ntp, audio_decode_struct *da
     ph_receiver *r = self(cls);
     (void)ntp;
     if (r->cb.audio && data->data_len > 0)
-        r->cb.audio(r->cb.user, data->ct, data->data, (size_t)data->data_len);
+        r->cb.audio(r->cb.user, data->ct, data->data, (size_t)data->data_len, data->ntp_time_remote);
 }
 
 static void cb_audio_flush(void *cls)
@@ -125,11 +125,10 @@ static void cb_video_reset(void *cls, reset_type_t type)
 static int cb_video_set_codec(void *cls, video_codec_t codec)
 {
     (void)cls;
-    if (codec != VIDEO_CODEC_H264) {
-        PH_LOGE("the iPhone offered a video codec other than H.264; not supported yet");
-        return -1;
-    }
-    return 0;
+    if (codec == VIDEO_CODEC_H264 || codec == VIDEO_CODEC_H265)
+        return 0;
+    PH_LOGE("the iPhone offered a video codec other than H.264 or H.265; not supported yet");
+    return -1;
 }
 
 static double cb_audio_set_client_volume(void *cls)
@@ -178,8 +177,9 @@ static void cb_report_client_request(void *cls, char *deviceid, char *model, cha
     ph_receiver *r = self(cls);
     PH_LOGI("connection from \"%s\" (%s)", name ? name : "?", model ? model : "?");
     PH_LOGD("client device ID %s", deviceid ? deviceid : "?");
-    *admit = true;
-    if (r->cb.connected)
+    *admit = !r->cb.admit || r->cb.admit(r->cb.user, deviceid ? deviceid : "",
+                                        name ? name : "", model ? model : "");
+    if (*admit && r->cb.connected)
         r->cb.connected(r->cb.user, name ? name : "", model ? model : "");
 }
 

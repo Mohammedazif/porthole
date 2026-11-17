@@ -9,9 +9,11 @@
 #include <libavutil/pixfmt.h>
 
 #include "core/log.h"
+#include "ui/placement.h"
 
-#define FIT_SCREEN_FRACTION 0.9 /* window: at most 90% of the usable screen */
-#define RESIZE_SETTLE_MS 400    /* a new picture size must last this long before resizing */
+#define RESIZE_SETTLE_MS 400 /* a new picture size must last this long before resizing */
+#define WAITING_W 360        /* phone-shaped window before the first frame */
+#define WAITING_H 780
 
 struct ph_window {
     SDL_Window *window;
@@ -33,8 +35,10 @@ struct ph_window {
     uint64_t discarded_packets, superseded_frames;
 };
 
+static void place_window(ph_window *w, int pic_w, int pic_h, bool center);
+
 /* Small built-in font keeps setup guidance available without an extra font package.
- * Each row contains five pixels. Lowercase is rendered using the uppercase glyph. */
+ * Each row contains five pixels. */
 static const struct {
     char c;
     uint8_t rows[7];
@@ -65,12 +69,24 @@ static const struct {
     {')', {8,4,2,2,2,4,8}}, {'?', {14,17,1,2,4,0,4}},
     {'!', {4,4,4,4,4,0,4}}, {'=', {0,31,0,31,0,0,0}},
     {'[', {14,8,8,8,8,8,14}}, {']', {14,2,2,2,2,2,14}},
+    {'\'', {4,4,8,0,0,0,0}},
+    {'a', {0,0,14,17,15,17,15}}, {'b', {16,16,30,17,17,17,30}},
+    {'c', {0,0,14,16,16,16,14}}, {'d', {1,1,15,17,17,17,15}},
+    {'e', {0,0,14,17,31,16,14}}, {'f', {6,9,8,28,8,8,8}},
+    {'g', {0,0,15,17,15,1,14}}, {'h', {16,16,30,17,17,17,17}},
+    {'i', {4,0,12,4,4,4,14}}, {'j', {2,0,6,2,2,18,12}},
+    {'k', {16,16,18,20,24,20,18}}, {'l', {12,4,4,4,4,4,14}},
+    {'m', {0,0,26,21,21,21,21}}, {'n', {0,0,30,17,17,17,17}},
+    {'o', {0,0,14,17,17,17,14}}, {'p', {0,0,30,17,30,16,16}},
+    {'q', {0,0,15,17,15,1,1}}, {'r', {0,0,22,25,16,16,16}},
+    {'s', {0,0,15,16,14,1,30}}, {'t', {4,4,14,4,4,5,2}},
+    {'u', {0,0,17,17,17,19,13}}, {'v', {0,0,17,17,17,10,4}},
+    {'w', {0,0,17,17,21,21,10}}, {'x', {0,0,17,10,4,10,17}},
+    {'y', {0,0,17,17,15,1,14}}, {'z', {0,0,31,2,4,8,31}},
 };
 
 static const uint8_t *glyph(char c)
 {
-    if (c >= 'a' && c <= 'z')
-        c = (char)(c - 'a' + 'A');
     for (size_t i = 0; i < sizeof font / sizeof font[0]; i++)
         if (font[i].c == c)
             return font[i].rows;
@@ -129,140 +145,218 @@ static int draw_text(SDL_Renderer *renderer, const char *text, int x, int y,
     return y + line;
 }
 
-static int text_scale(int width)
+static int text_scale(int width, int height)
 {
-    int scale = (width + 249) / 250;
-    return scale > 0 ? scale : 1;
+    int scale = width / 160;
+    int by_height = height / 280;
+
+    if (by_height < scale)
+        scale = by_height;
+    if (scale < 1)
+        scale = 1;
+    if (scale > 3)
+        scale = 3;
+    return scale;
+}
+
+static bool wide_layout(int width, int height)
+{
+    return width > height + height / 5;
 }
 
 static const SDL_Color color_text = {232, 239, 246, 255};
 static const SDL_Color color_muted = {166, 182, 198, 255};
 static const SDL_Color color_accent = {89, 199, 255, 255};
+static const SDL_Color color_warn = {255, 186, 140, 255};
 
 #ifdef _WIN32
-#define PH_PAIR_INSTRUCTION "Pair this PC's Bluetooth name on iPhone.\n"
+#define PH_PAIR_LINE "Pair this PC's Bluetooth name."
 #else
-#define PH_PAIR_INSTRUCTION "Pair Porthole in iPhone Bluetooth.\n"
+#define PH_PAIR_LINE "Pair Porthole in Bluetooth."
 #endif
+
+static void paint(SDL_Renderer *renderer, SDL_Rect rect, int r, int g, int b, int a)
+{
+    SDL_SetRenderDrawBlendMode(renderer, a == 255 ? SDL_BLENDMODE_NONE : SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(renderer, (Uint8)r, (Uint8)g, (Uint8)b, (Uint8)a);
+    SDL_RenderFillRect(renderer, &rect);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+}
+
+static int draw_card(SDL_Renderer *renderer, SDL_Rect card, int scale, const char *title,
+                     const char *body)
+{
+    int pad = 8 * scale;
+    int inner = card.w - 2 * pad;
+
+    if (inner < 6 * scale)
+        return card.y;
+    paint(renderer, card, 16, 36, 52, 255);
+    SDL_Rect bar = {card.x, card.y, scale < 2 ? 2 : scale, card.h};
+    paint(renderer, bar, 89, 199, 255, 255);
+    int y = draw_text(renderer, title, card.x + pad, card.y + pad, inner, scale, color_accent);
+    return draw_text(renderer, body, card.x + pad, y, inner, scale, color_text);
+}
+
+static void draw_key_hints(SDL_Renderer *renderer, int x, int y, int width, int scale)
+{
+    const char *line = "F1 help   F2 setup   F3";
+    int use = scale;
+    int chars = (int)strlen(line);
+
+    while (use > 1 && chars * 6 * use > width)
+        use--;
+    draw_text(renderer, line, x, y, width, use, color_muted);
+}
 
 static void draw_waiting(ph_window *w, int width, int height)
 {
-    int scale = text_scale(width), margin = 16 * scale;
-    int content_width = width - 2 * margin;
-    if (content_width < 6 * scale)
-        return;
-    int y = height > 600 * scale ? (height - 500 * scale) / 2 : 22 * scale;
-    y = draw_text(w->renderer, "Porthole", margin, y, content_width, scale + 1, color_accent);
-    y += 12 * scale;
-    y = draw_text(w->renderer, "Mirror your iPhone", margin, y, content_width, scale, color_text);
-    y += 5 * scale;
-    y = draw_text(w->renderer,
-                  "1. Use the same Wi-Fi network.\n"
-                  "2. On iPhone, open Control Center.\n"
-                  "3. Screen Mirroring > Porthole.",
-                  margin, y, content_width, scale, color_muted);
-    y += 14 * scale;
-    y = draw_text(w->renderer, "Mouse and keyboard setup", margin, y, content_width,
-                  scale, color_text);
-    y += 5 * scale;
-    y = draw_text(w->renderer,
-                  PH_PAIR_INSTRUCTION
-                  "Accessibility > Touch > AssistiveTouch: On.\n"
-                  "Dwell Control: Off.",
-                  margin, y, content_width, scale, color_muted);
-    y += 14 * scale;
+    int scale = text_scale(width, height);
+    int margin = 14 * scale;
+    int gap = 8 * scale;
+    bool wide = wide_layout(width, height);
+    int card_h = 7 * 10 * scale;
+    int stack_h = 2 * 10 * (scale + 1) + 10 * scale + gap + (wide ? card_h : card_h * 2 + gap) +
+                  gap + (wide ? 12 : 24) * scale;
+    int y = (height - stack_h) / 2;
     char status[160];
-    snprintf(status, sizeof status, "Controls: %s",
-             w->control_ready ? "connected" : w->control_detail[0] ? w->control_detail : "waiting");
-    y = draw_text(w->renderer, status, margin, y, content_width, scale, color_accent);
-    draw_text(w->renderer, "F1: help  F2: guided setup\nF3: diagnostics", margin, y + 8 * scale,
-               content_width, scale, color_muted);
+    SDL_Rect screen = {0, 0, width, height};
+    const char *control = PH_PAIR_LINE "\nAssistiveTouch on.\nDwell Control off.";
+    const char *mirror = "Same Wi-Fi as this PC.\nControl Center.\nScreen Mirroring > Porthole.";
+
+    paint(w->renderer, screen, 10, 18, 28, 255);
+    if (width < margin * 2 + 6 * scale)
+        return;
+    if (y < margin)
+        y = margin;
+    y = draw_text(w->renderer, "Porthole", margin, y, width - 2 * margin, scale + 1, color_accent);
+    y = draw_text(w->renderer, "iPhone on this PC", margin, y, width - 2 * margin, scale, color_text);
+    y += gap;
+    if (wide) {
+        int col = (width - 2 * margin - gap) / 2;
+        SDL_Rect left = {margin, y, col, card_h};
+        SDL_Rect right = {margin + col + gap, y, width - 2 * margin - col - gap, card_h};
+        draw_card(w->renderer, left, scale, "Screen", mirror);
+        draw_card(w->renderer, right, scale, "Controls", control);
+        y += card_h + gap;
+        snprintf(status, sizeof status, "Controls: %s",
+                 w->control_ready ? "connected" : w->control_detail[0] ? w->control_detail : "waiting");
+        draw_text(w->renderer, status, margin, y, width / 2 - margin, scale, color_accent);
+        draw_key_hints(w->renderer, width / 2, y, width / 2 - margin, scale);
+    } else {
+        if (y + card_h * 2 + gap > height - margin)
+            card_h = (height - margin - y - gap) / 2;
+        if (card_h < 20 * scale)
+            card_h = 20 * scale;
+        SDL_Rect top = {margin, y, width - 2 * margin, card_h};
+        SDL_Rect bottom = {margin, y + card_h + gap, width - 2 * margin, card_h};
+        draw_card(w->renderer, top, scale, "Screen", mirror);
+        draw_card(w->renderer, bottom, scale, "Controls", control);
+        y += card_h * 2 + gap * 2;
+        snprintf(status, sizeof status, "Controls: %s",
+                 w->control_ready ? "connected"
+                                  : w->control_detail[0] ? w->control_detail : "waiting");
+        y = draw_text(w->renderer, status, margin, y, width - 2 * margin, scale, color_accent);
+        draw_key_hints(w->renderer, margin, y, width - 2 * margin, scale);
+    }
 }
 
 static void draw_help(ph_window *w, int width, int height)
 {
-    int scale = text_scale(width), margin = 12 * scale;
+    int scale = text_scale(width, height);
+    int margin = 12 * scale;
+    int gap = 8 * scale;
+    bool wide = wide_layout(width, height);
     SDL_Rect panel = {margin / 2, margin / 2, width - margin, height - margin};
-    SDL_SetRenderDrawBlendMode(w->renderer, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(w->renderer, 12, 23, 35, 245);
-    SDL_RenderFillRect(w->renderer, &panel);
-    SDL_SetRenderDrawBlendMode(w->renderer, SDL_BLENDMODE_NONE);
-    int content_width = width - 2 * margin;
-    if (content_width < 6 * scale)
-        return;
     SDL_Rect old_clip;
+    SDL_bool clipped;
+    const char *mouse = "Move over the picture to point.\n"
+                        "Left click: tap\nRight click: secondary click\n"
+                        "Hold and drag: swipe\nWheel: scroll";
+    const char *keys = "Type directly. Ctrl is Command.\n"
+                       "Alt+H Home\nAlt+F Spotlight\nAlt+S App Switcher\n"
+                       "Alt+C Control Center\nAlt+N Notifications\n"
+                       "Alt+P Screenshot\nAlt+Left Back\nAlt+Up or Down Volume";
+    const char *setup = "AssistiveTouch on. Dwell Control off.\n" PH_PAIR_LINE "\n"
+                        "Buttons 3-6: App Switcher, Control Center, Notifications, Screenshot.";
+
+    if (panel.w < 8 * scale || panel.h < 8 * scale)
+        return;
+    paint(w->renderer, panel, 10, 18, 28, 255);
     SDL_RenderGetClipRect(w->renderer, &old_clip);
-    SDL_bool clipped = SDL_RenderIsClipEnabled(w->renderer);
+    clipped = SDL_RenderIsClipEnabled(w->renderer);
     SDL_RenderSetClipRect(w->renderer, &panel);
-    int y = margin;
-    y = draw_text(w->renderer, "Porthole help", margin, y, content_width,
-                  scale + 1, color_accent);
-    y = draw_text(w->renderer, "F1: close  F2: guided setup\nF3: diagnostics", margin, y + 6 * scale,
-                  content_width, scale, color_muted);
-    y += 8 * scale;
-    y = draw_text(w->renderer, "Mouse", margin, y, content_width, scale, color_accent);
-    y = draw_text(w->renderer,
-                  "Move over the picture to point.\n"
-                  "Left click: tap\nRight click: secondary click\n"
-                  "Hold and drag: swipe\nWheel: scroll at the pointer",
-                  margin, y, content_width, scale, color_text);
-    y += 6 * scale;
-    y = draw_text(w->renderer, "Keyboard", margin, y, content_width, scale, color_accent);
-    y = draw_text(w->renderer,
-                  "Type directly. Ctrl acts as Command.\n"
-                  "Alt+H: Home\nAlt+F: Spotlight\nAlt+S: App Switcher\n"
-                  "Alt+C: Control Center\nAlt+N: Notifications\nAlt+P: Screenshot\n"
-                  "Alt+Left: Back\nAlt+Up/Down: Volume",
-                  margin, y, content_width, scale, color_text);
-    y += 6 * scale;
-    y = draw_text(w->renderer, "Setup", margin, y, content_width, scale, color_accent);
-    draw_text(w->renderer,
-               "AssistiveTouch: On. Dwell Control: Off.\n"
-               PH_PAIR_INSTRUCTION
-               "Assign buttons 3-6 to App Switcher, Control Center, Notifications, Screenshot.",
-               margin, y, content_width, scale, color_muted);
+    int y = draw_text(w->renderer, "Help", margin, margin, panel.w - 2 * margin, scale + 1,
+                      color_accent);
+    y = draw_text(w->renderer, "F1 closes", margin, y, panel.w - 2 * margin, scale, color_muted);
+    y += gap;
+    {
+        int key_h = 12 * 10 * scale;
+        if (wide && panel.w > 80 * scale) {
+            int col = (panel.w - 2 * margin - gap) / 2;
+            int card_h = key_h;
+            SDL_Rect left = {margin, y, col, card_h};
+            SDL_Rect right = {margin + col + gap, y, panel.w - 2 * margin - col - gap, card_h};
+            if (left.y + card_h > panel.y + panel.h - margin)
+                left.h = right.h = panel.y + panel.h - margin - left.y;
+            draw_card(w->renderer, left, scale, "Mouse", mouse);
+            draw_card(w->renderer, right, scale, "Keyboard", keys);
+            y += left.h + gap;
+        } else {
+            SDL_Rect card = {margin, y, panel.w - 2 * margin, 8 * 10 * scale};
+            draw_card(w->renderer, card, scale, "Mouse", mouse);
+            y = card.y + card.h + gap;
+            card.y = y;
+            card.h = key_h;
+            draw_card(w->renderer, card, scale, "Keyboard", keys);
+            y = card.y + card.h + gap;
+        }
+        draw_text(w->renderer, setup, margin, y, panel.w - 2 * margin, scale, color_muted);
+    }
     SDL_RenderSetClipRect(w->renderer, clipped ? &old_clip : NULL);
 }
 
 static void draw_control_status(ph_window *w, int width)
 {
-    int scale = text_scale(width), margin = 6 * scale;
-    SDL_SetRenderDrawBlendMode(w->renderer, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(w->renderer, 12, 23, 35, 235);
-    SDL_Rect panel = {0, 0, width, 28 * scale};
-    SDL_RenderFillRect(w->renderer, &panel);
-    SDL_SetRenderDrawBlendMode(w->renderer, SDL_BLENDMODE_NONE);
-    char line[160];
-    snprintf(line, sizeof line, "Viewing only: %s\nF2: guided setup",
-             w->control_detail[0] ? w->control_detail : "controls disconnected");
-    draw_text(w->renderer, line, margin, margin, width - 2 * margin, scale, color_text);
+    int scale = text_scale(width, width);
+    int margin = 8 * scale;
+    SDL_Rect panel = {0, 0, width, 22 * scale};
+    char line[180];
+
+    paint(w->renderer, panel, 12, 23, 35, 235);
+    snprintf(line, sizeof line, "Viewing only. %s  F2 setup",
+             w->control_detail[0] ? w->control_detail : "Controls disconnected.");
+    draw_text(w->renderer, line, margin, 6 * scale, width - 2 * margin, scale, color_text);
 }
 
 static void setup_buttons(int width, int height, SDL_Rect buttons[3])
 {
-    int scale = text_scale(width), margin = 12 * scale, gap = 4 * scale;
+    int scale = text_scale(width, height);
+    int margin = 12 * scale;
+    int gap = 6 * scale;
+    int button_h = 28 * scale;
     int button_width = (width - 2 * margin - 2 * gap) / 3;
+
+    if (button_width < scale)
+        button_width = scale;
     for (int i = 0; i < 3; i++)
-        buttons[i] = (SDL_Rect){margin + i * (button_width + gap),
-                                height - margin - 24 * scale, button_width, 24 * scale};
+        buttons[i] = (SDL_Rect){margin + i * (button_width + gap), height - margin - button_h,
+                                button_width, button_h};
 }
 
 static void draw_setup(ph_window *w, int width, int height)
 {
     const ph_setup *s = &w->setup;
-    int scale = text_scale(width), margin = 12 * scale, content_width = width - 2 * margin;
-    SDL_SetRenderDrawBlendMode(w->renderer, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(w->renderer, 12, 23, 35, 245);
+    int scale = text_scale(width, height), margin = 12 * scale, content_width = width - 2 * margin;
     SDL_Rect panel = {0, 0, width, height};
-    SDL_RenderFillRect(w->renderer, &panel);
-    SDL_SetRenderDrawBlendMode(w->renderer, SDL_BLENDMODE_NONE);
+    paint(w->renderer, panel, 10, 18, 28, 255);
     SDL_Rect buttons[3];
     setup_buttons(width, height, buttons);
     SDL_Rect clip = {margin, margin, content_width, buttons[0].y - 2 * margin};
     SDL_RenderSetClipRect(w->renderer, &clip);
     char heading[80];
-    snprintf(heading, sizeof heading, "Setup %d/%d", s->controls ? (int)s->step + 1
-                                                                : s->step == PH_SETUP_MIRROR ? 1 : 2,
+    snprintf(heading, sizeof heading, "Step %d of %d", s->controls ? (int)s->step + 1
+                                                                   : s->step == PH_SETUP_MIRROR ? 1 : 2,
              s->controls ? 5 : 2);
     int y = draw_text(w->renderer, heading, margin, margin, content_width, scale + 1, color_accent);
     y += 8 * scale;
@@ -270,38 +364,43 @@ static void draw_setup(ph_window *w, int width, int height)
     switch (s->step) {
     case PH_SETUP_PREPARE:
         title = "Prepare your iPhone";
-        body = "On your iPhone:\nSettings > Accessibility > Touch > AssistiveTouch.\n"
-               "Turn AssistiveTouch On.\nTurn Dwell Control Off.\n\n"
-               "Keep Tracking Sensitivity fixed.\nPress Next once you have checked these settings.";
+        body = "Settings > Accessibility > Touch > AssistiveTouch.\n"
+               "Turn AssistiveTouch on.\nTurn Dwell Control off.\n\n"
+               "Leave Tracking Sensitivity as it is.\nPress Next when that is done.";
         break;
     case PH_SETUP_BLUETOOTH:
         title = "Connect Bluetooth";
 #ifdef _WIN32
-        body = "On iPhone, open Settings > Bluetooth.\nSelect this PC's Bluetooth name under Other Devices.\n\n"
-               "Accept any Windows pairing prompt. Wait for all controls to connect. "
-               "If pairing fails, remove the stale pairing on both devices and pair again.";
+        body = "On iPhone: Settings > Bluetooth.\n"
+               "Select this PC's Bluetooth name under Other Devices.\n\n"
+               "Accept the Windows pairing prompt.\n"
+               "If pairing fails, remove the old entry on both devices and pair again.";
 #else
-        body = "On iPhone, open Settings > Bluetooth.\nSelect Porthole under Other Devices.\n\n"
-               "Wait for all controls to connect. If pairing fails, forget the old Porthole entry and pair again.";
+        body = "On iPhone: Settings > Bluetooth.\n"
+               "Select Porthole under Other Devices.\n\n"
+               "Wait until the controls connect.\n"
+               "If pairing fails, forget the old Porthole entry and pair again.";
 #endif
         break;
     case PH_SETUP_MIRROR:
         title = "Mirror your screen";
-        body = "Use the same Wi-Fi network.\nOn iPhone, open Control Center > Screen Mirroring.\n"
-               "Select Porthole.\n\nClose the iPhone's mirroring panel once connected.";
+        body = "Use the same Wi-Fi network.\n"
+               "Control Center > Screen Mirroring > Porthole.\n\n"
+               "Close the iPhone's mirroring panel once the picture appears.";
         break;
     case PH_SETUP_CALIBRATE:
         title = "Check pointer alignment";
-        body = "Leave your iPhone on a still page, such as Calculator.\n"
-               "The pointer will move to three targets. No taps are sent.\n\n"
-               "Leave the phone untouched during the check. Calibration is saved only after all three targets are confirmed.";
+        body = "Leave the iPhone on a still page, such as Calculator.\n"
+               "The pointer moves to three targets. No taps are sent.\n\n"
+               "Do not touch the phone during the check. The result is saved only after all three targets match.";
         break;
     case PH_SETUP_FINISH:
         title = "Ready to use";
         body = s->controls
-                   ? "Point, click, drag and type through the mirror.\nF2 opens this guide again.\n\n"
-                     "Optional shortcuts: assign AssistiveTouch buttons 3-6 to App Switcher, Control Center, Notifications and Screenshot. F1 lists the keys."
-                   : "Your iPhone screen is connected.\nThis build is viewing only.\nF2 opens this guide again.";
+                   ? "Point, click, drag, and type through the mirror.\n"
+                     "F1 lists keys. F2 opens this guide again.\n\n"
+                     "Optional: assign AssistiveTouch buttons 3 to 6 to App Switcher, Control Center, Notifications, and Screenshot."
+                   : "The iPhone screen is connected.\nThis window is viewing only.\nF2 opens this guide again.";
         break;
     }
     y = draw_text(w->renderer, title, margin, y, content_width, scale, color_accent);
@@ -322,7 +421,7 @@ static void draw_setup(ph_window *w, int width, int height)
                             : s->error == PH_SETUP_CANCELED ? "Check paused. Press Start to retry."
                             : s->error == PH_SETUP_SAVE_FAILED ? "Could not save calibration. Check the configuration folder, then retry."
                             : "Pointer not confirmed. Check AssistiveTouch and Tracking Sensitivity, then retry.";
-        draw_text(w->renderer, error, margin, y + 6 * scale, content_width, scale, color_muted);
+        draw_text(w->renderer, error, margin, y + 6 * scale, content_width, scale, color_warn);
     }
     SDL_RenderSetClipRect(w->renderer, NULL);
     const char *next = s->step == PH_SETUP_FINISH ? "Finish"
@@ -331,11 +430,16 @@ static void draw_setup(ph_window *w, int width, int height)
                              ? s->error != PH_SETUP_OK ? "Retry" : "Start" : "Next";
     const char *labels[] = {"Close", "Back", next};
     for (int i = 0; i < 3; i++) {
-        SDL_SetRenderDrawColor(w->renderer, 31, 59, 78, 255);
-        SDL_RenderFillRect(w->renderer, &buttons[i]);
+        if (i == 2)
+            paint(w->renderer, buttons[i], 32, 110, 158, 255);
+        else
+            paint(w->renderer, buttons[i], 28, 48, 66, 255);
         int text_width = (int)strlen(labels[i]) * 6 * scale;
-        draw_text(w->renderer, labels[i], buttons[i].x + (buttons[i].w - text_width) / 2,
-                   buttons[i].y + 8 * scale, buttons[i].w, scale, color_text);
+        int text_x = buttons[i].x + (buttons[i].w - text_width) / 2;
+        int text_y = buttons[i].y + (buttons[i].h - 7 * scale) / 2;
+        if (text_x < buttons[i].x)
+            text_x = buttons[i].x;
+        draw_text(w->renderer, labels[i], text_x, text_y, buttons[i].w, scale, color_text);
     }
 }
 
@@ -349,40 +453,53 @@ static void diagnostic_line(char out[160], const char *name, const ph_metric_sum
 
 static void draw_diagnostics(ph_window *w, int width, int height)
 {
-    int scale = text_scale(width), margin = 8 * scale;
-    SDL_Rect panel = {0, 0, width, height < 260 * scale ? height : 260 * scale};
-    SDL_SetRenderDrawBlendMode(w->renderer, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(w->renderer, 12, 23, 35, 240);
-    SDL_RenderFillRect(w->renderer, &panel);
-    SDL_SetRenderDrawBlendMode(w->renderer, SDL_BLENDMODE_NONE);
-    int y = draw_text(w->renderer, "F3: close diagnostics", margin, margin,
-                       width - 2 * margin, scale, color_accent);
-    char line[160];
+    int scale = text_scale(width, height);
+    int margin = 10 * scale;
+    bool wide = wide_layout(width, height);
+    int rows = wide ? 6 : 10;
+    int panel_h = margin + rows * 10 * scale + margin;
+    char lines[8][160];
+    char note[] = "Local timings. The helper ACK excludes the radio and the phone.";
+    SDL_Rect panel;
+    int y, i;
+
+    if (panel_h > height)
+        panel_h = height;
+    panel = (SDL_Rect){0, 0, width, panel_h};
+    paint(w->renderer, panel, 10, 18, 28, 255);
     if (w->metrics.fps_known)
-        snprintf(line, sizeof line, "Displayed video FPS: %.1f", w->metrics.fps);
+        snprintf(lines[0], sizeof lines[0], "Video %.1f fps", w->metrics.fps);
     else
-        snprintf(line, sizeof line, "Displayed video FPS: --");
-    y = draw_text(w->renderer, line, margin, y, width - 2 * margin, scale, color_text);
-    const char *names[] = {"Receive to decode", "Receive to present", "Input handoff", "Helper queue ACK"};
-    const ph_metric_summary *values[] = {&w->metrics.receive_to_decode, &w->metrics.receive_to_present,
-                                         &w->metrics.input_handoff, &w->metrics.helper_ack};
-    for (int i = 0; i < 4; i++) {
-        diagnostic_line(line, names[i], values[i]);
-        y = draw_text(w->renderer, line, margin, y, width - 2 * margin, scale, color_text);
-    }
+        snprintf(lines[0], sizeof lines[0], "Video fps --");
+    diagnostic_line(lines[1], "Decode", &w->metrics.receive_to_decode);
+    diagnostic_line(lines[2], "Present", &w->metrics.receive_to_present);
+    diagnostic_line(lines[3], "Input", &w->metrics.input_handoff);
+    diagnostic_line(lines[4], "Helper ACK", &w->metrics.helper_ack);
     if (w->metrics.bluetooth_interval_known)
-        snprintf(line, sizeof line, "Bluetooth interval: %.2f ms", w->metrics.bluetooth_interval_ms);
+        snprintf(lines[5], sizeof lines[5], "Bluetooth %.2f ms", w->metrics.bluetooth_interval_ms);
     else
-        snprintf(line, sizeof line, "Bluetooth interval: not measured");
-    y = draw_text(w->renderer, line, margin, y, width - 2 * margin, scale, color_text);
-    snprintf(line, sizeof line, "HID pending: %zu  expired: %llu", w->metrics.pending_acks,
+        snprintf(lines[5], sizeof lines[5], "Bluetooth not measured");
+    snprintf(lines[6], sizeof lines[6], "HID pending %zu, expired %llu", w->metrics.pending_acks,
              (unsigned long long)w->metrics.acks_expired);
-    y = draw_text(w->renderer, line, margin, y, width - 2 * margin, scale, color_text);
-    snprintf(line, sizeof line, "Video queue: %u  discarded: %llu  superseded: %llu", w->queued_packets,
+    snprintf(lines[7], sizeof lines[7], "Queue %u, discarded %llu, replaced %llu", w->queued_packets,
              (unsigned long long)w->discarded_packets, (unsigned long long)w->superseded_frames);
-    y = draw_text(w->renderer, line, margin, y, width - 2 * margin, scale, color_text);
-    draw_text(w->renderer, "Local timings only. Helper ACK excludes radio and phone response. Phone capture latency is not measured.",
-               margin, y + 6 * scale, width - 2 * margin, scale, color_muted);
+    y = draw_text(w->renderer, "Timings    F3 closes", margin, margin, width - 2 * margin, scale,
+                  color_accent);
+    if (wide && width > 80 * scale) {
+        int col = (width - 2 * margin) / 2;
+        int left = y;
+        int right = y;
+        for (i = 0; i < 4; i++)
+            left = draw_text(w->renderer, lines[i], margin, left, col - margin, scale, color_text);
+        for (i = 4; i < 8; i++)
+            right = draw_text(w->renderer, lines[i], margin + col, right, col - margin, scale,
+                              color_text);
+        y = left > right ? left : right;
+    } else {
+        for (i = 0; i < 8; i++)
+            y = draw_text(w->renderer, lines[i], margin, y, width - 2 * margin, scale, color_text);
+    }
+    draw_text(w->renderer, note, margin, y, width - 2 * margin, scale, color_muted);
 }
 
 ph_window *ph_window_create(const char *title)
@@ -391,10 +508,11 @@ ph_window *ph_window_create(const char *title)
 
     if (!w)
         return NULL;
-    w->window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 360, 720,
-                                 SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    w->window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WAITING_W,
+                                 WAITING_H, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!w->window)
         goto fail;
+    place_window(w, WAITING_W, WAITING_H, true);
     /* No vsync: presenting a frame must not block this thread, which also forwards
      * mouse and keyboard input, for up to a whole display refresh. */
     w->renderer = SDL_CreateRenderer(w->window, -1, SDL_RENDERER_ACCELERATED);
@@ -508,22 +626,70 @@ static SDL_Rect fit_rect(int area_w, int area_h, int pic_w, int pic_h)
     return r;
 }
 
-static void fit_window_to_picture(ph_window *w, int pic_w, int pic_h)
+static ph_window_insets frame_insets(SDL_Window *window)
+{
+    ph_window_insets insets = {0, 0, 0, 0};
+    int top = 0, left = 0, bottom = 0, right = 0;
+
+    if (SDL_GetWindowBordersSize(window, &top, &left, &bottom, &right) == 0 && top >= 0 &&
+        left >= 0 && bottom >= 0 && right >= 0 && (top | left | bottom | right) != 0) {
+        insets.top = top;
+        insets.left = left;
+        insets.bottom = bottom;
+        insets.right = right;
+        return insets;
+    }
+    /* Borders are often unknown until the window manager maps the window. */
+#ifdef _WIN32
+    insets.top = 32;
+    insets.left = insets.right = insets.bottom = 8;
+#else
+    insets.top = 32;
+#endif
+    return insets;
+}
+
+static void usable_bounds(SDL_Window *window, SDL_Rect *usable)
+{
+    int display = SDL_GetWindowDisplayIndex(window);
+
+    usable->x = usable->y = 0;
+    if (display < 0 || SDL_GetDisplayUsableBounds(display, usable) != 0) {
+        usable->x = usable->y = 0;
+        usable->w = 1280;
+        usable->h = 800;
+    }
+}
+
+static void place_window(ph_window *w, int pic_w, int pic_h, bool center)
 {
     SDL_Rect usable;
-    int display = SDL_GetWindowDisplayIndex(w->window);
-    double scale;
+    ph_window_insets insets;
+    int client_w, client_h, x, y, cur_x, cur_y, cur_w, cur_h;
 
-    if (display < 0 || SDL_GetDisplayUsableBounds(display, &usable) != 0) {
-        usable.w = 1280;
-        usable.h = 800;
-    }
-    scale = SDL_min(FIT_SCREEN_FRACTION * usable.w / pic_w, FIT_SCREEN_FRACTION * usable.h / pic_h);
-    scale = SDL_min(scale, 1.0); /* don't upscale beyond the stream's own size by default */
-    SDL_SetWindowSize(w->window, (int)(pic_w * scale), (int)(pic_h * scale));
+    if (SDL_GetWindowFlags(w->window) &
+        (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_MAXIMIZED))
+        return;
+    usable_bounds(w->window, &usable);
+    insets = frame_insets(w->window);
+    ph_chrome_fit_client(pic_w, pic_h, usable.w, usable.h, &insets, &client_w, &client_h);
+    SDL_GetWindowPosition(w->window, &cur_x, &cur_y);
+    SDL_GetWindowSize(w->window, &cur_w, &cur_h);
+    ph_chrome_place_client(client_w, client_h, usable.x, usable.y, usable.w, usable.h, &insets,
+                           cur_x, cur_y, cur_w, cur_h, center, &x, &y);
+    SDL_SetWindowSize(w->window, client_w, client_h);
+    SDL_SetWindowPosition(w->window, x, y);
+}
+
+static void fit_window_to_picture(ph_window *w, int pic_w, int pic_h)
+{
+    bool first = w->fit_w == 0;
+    bool turned = !first && ((pic_w > pic_h) != (w->fit_w > w->fit_h));
+
     w->fit_w = pic_w;
     w->fit_h = pic_h;
     w->pending_w = w->pending_h = 0;
+    place_window(w, pic_w, pic_h, first || turned);
 }
 
 static SDL_YUV_CONVERSION_MODE yuv_mode_for(const AVFrame *f)

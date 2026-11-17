@@ -1,0 +1,52 @@
+/* Porthole assets are resolved relative to this stylesheet. */
+:root {
+  --porthole-brand-ink: #111111;
+  --porthole-brand-reflection: #b8b8b8;
+  --porthole-brand-paper: #ffffff;
+  --porthole-brand-dark-display: none;
+  --porthole-brand-light-display: block;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --porthole-brand-ink: #ffffff;
+    --porthole-brand-reflection: #a3a3a3;
+    --porthole-brand-paper: #111111;
+    --porthole-brand-dark-display: block;
+    --porthole-brand-light-display: none;
+  }
+}
+[data-theme="light"] {
+  --porthole-brand-ink: #111111;
+  --porthole-brand-reflection: #b8b8b8;
+  --porthole-brand-paper: #ffffff;
+  --porthole-brand-dark-display: none;
+  --porthole-brand-light-display: block;
+}
+[data-theme="dark"] {
+  --porthole-brand-ink: #ffffff;
+  --porthole-brand-reflection: #a3a3a3;
+  --porthole-brand-paper: #111111;
+  --porthole-brand-dark-display: block;
+  --porthole-brand-light-display: none;
+}
+.porthole-mark {
+  display: inline-block;
+  width: 2rem;
+  aspect-ratio: 1;
+  color: var(--porthole-brand-ink);
+  background-color: currentColor;
+  -webkit-mask: url("../svg/mono-black/porthole-icon-small.svg") center / contain no-repeat;
+  mask: url("../svg/mono-black/porthole-icon-small.svg") center / contain no-repeat;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.porthole-logo-light { display: var(--porthole-brand-light-display); }
+.porthole-logo-dark { display: var(--porthole-brand-dark-display); }
+.porthole-logo-light, .porthole-logo-dark { max-width: 100%; height: auto; }
+@media (forced-colors: active) {
+  .porthole-mark {
+    forced-color-adjust: none;
+    color: CanvasText;
+    background-color: CanvasText;
+  }
+}

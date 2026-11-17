@@ -1,6 +1,5 @@
 #include "audio/player.h"
 
-#include <limits.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,11 +10,22 @@
 #include <libavutil/mem.h>
 #include <libswresample/swresample.h>
 
+#include "audio/sync.h"
 #include "core/log.h"
 
 #define RATE 44100
 #define CHANNELS 2
 #define QUEUE_BYTES (RATE * CHANNELS * sizeof(float) / 5) /* at most 200 ms */
+
+struct ph_held_pcm {
+    struct ph_held_pcm *next;
+    uint8_t *pcm;
+    int samples;
+    uint32_t hold_ms;
+    uint32_t bytes;
+    uint64_t release_ms;
+    bool anchored;
+};
 
 struct ph_audio {
     SDL_mutex *lock;
@@ -28,7 +38,15 @@ struct ph_audio {
     unsigned char compression;
     unsigned short samples;
     float gain;
+    float volume_db;
+    bool muted;
+    int sync_offset_ms;
     bool warned, playing;
+    ph_sync *sync;
+    struct ph_held_pcm *hold_head, *hold_tail;
+    size_t hold_bytes;
+    bool clock_valid;
+    uint64_t clock_ms;
 };
 
 static const char *format_name(unsigned char compression)
@@ -41,6 +59,29 @@ static const char *format_name(unsigned char compression)
     }
 }
 
+static void drop_oldest_hold(ph_audio *a)
+{
+    struct ph_held_pcm *node = a->hold_head;
+
+    if (!node)
+        return;
+    a->hold_head = node->next;
+    if (!a->hold_head)
+        a->hold_tail = NULL;
+    if (a->hold_bytes >= node->bytes)
+        a->hold_bytes -= node->bytes;
+    else
+        a->hold_bytes = 0;
+    av_free(node->pcm);
+    free(node);
+}
+
+static void free_holds(ph_audio *a)
+{
+    while (a->hold_head)
+        drop_oldest_hold(a);
+}
+
 static void flush_locked(ph_audio *a)
 {
     if (a->device)
@@ -49,6 +90,9 @@ static void flush_locked(ph_audio *a)
         avcodec_flush_buffers(a->codec);
     swr_free(&a->resample);
     a->playing = false;
+    free_holds(a);
+    ph_sync_reset(a->sync);
+    a->clock_valid = false;
 }
 
 static bool configure_locked(ph_audio *a, unsigned char compression, unsigned short samples)
@@ -114,6 +158,126 @@ fail:
     return false;
 }
 
+static uint32_t device_queued_ms_locked(const ph_audio *a)
+{
+    if (!a->device)
+        return 0;
+    return SDL_GetQueuedAudioSize(a->device) * 1000U / (RATE * CHANNELS * sizeof(float));
+}
+
+static int convert_frame(ph_audio *a, uint8_t **out, int *count_out)
+{
+    AVFrame *f = a->frame;
+    int capacity;
+    uint8_t *pcm = NULL;
+    int count;
+
+    *out = NULL;
+    *count_out = 0;
+    if (!a->resample || a->input_format != f->format || a->input_rate != f->sample_rate
+        || a->input_channels != f->ch_layout.nb_channels) {
+        swr_free(&a->resample);
+        AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
+        if (swr_alloc_set_opts2(&a->resample, &stereo, AV_SAMPLE_FMT_FLT, RATE,
+                               &f->ch_layout, f->format, f->sample_rate, 0, NULL) < 0
+            || !a->resample || swr_init(a->resample) < 0) {
+            swr_free(&a->resample);
+            return -1;
+        }
+        a->input_format = f->format;
+        a->input_rate = f->sample_rate;
+        a->input_channels = f->ch_layout.nb_channels;
+    }
+    capacity = swr_get_out_samples(a->resample, f->nb_samples);
+    if (capacity <= 0 || capacity > 16384
+        || av_samples_alloc(&pcm, NULL, CHANNELS, capacity, AV_SAMPLE_FMT_FLT, 0) < 0)
+        return -1;
+    count = swr_convert(a->resample, &pcm, capacity,
+                        (const uint8_t **)f->extended_data, f->nb_samples);
+    if (count <= 0) {
+        av_free(pcm);
+        *count_out = count;
+        return count < 0 ? -1 : 0;
+    }
+    *out = pcm;
+    *count_out = count;
+    return 0;
+}
+
+static int queue_pcm(ph_audio *a, uint8_t *pcm, int count)
+{
+    float *values;
+    Uint32 bytes;
+
+    if (count <= 0) {
+        av_free(pcm);
+        return count;
+    }
+    if (!a->device) {
+        av_free(pcm);
+        return -1;
+    }
+    values = (float *)pcm;
+    for (int i = 0; i < count * CHANNELS; i++)
+        values[i] *= a->gain;
+    bytes = (Uint32)(count * CHANNELS * sizeof(float));
+    if (SDL_GetQueuedAudioSize(a->device) + bytes > QUEUE_BYTES)
+        SDL_ClearQueuedAudio(a->device); /* recover instead of accumulating audible lag */
+    if (SDL_QueueAudio(a->device, pcm, bytes) != 0)
+        count = -1;
+    else if (!a->playing) {
+        PH_LOGI("audio playing: %s, %d Hz stereo", format_name(a->compression), RATE);
+        a->playing = true;
+    }
+    av_free(pcm);
+    return count;
+}
+
+static int hold_pcm(ph_audio *a, uint8_t *pcm, int count, int hold_ms)
+{
+    size_t bytes;
+    struct ph_held_pcm *node;
+
+    if (count <= 0) {
+        av_free(pcm);
+        return 0;
+    }
+    if (hold_ms < 0)
+        hold_ms = 0;
+    if (hold_ms > 200)
+        hold_ms = 200;
+    bytes = (size_t)count * CHANNELS * sizeof(float);
+    if (bytes > UINT32_MAX) {
+        av_free(pcm);
+        return -1;
+    }
+    while (a->hold_head && a->hold_bytes + bytes > (size_t)QUEUE_BYTES)
+        drop_oldest_hold(a);
+    node = calloc(1, sizeof *node);
+    if (!node) {
+        av_free(pcm);
+        return -1;
+    }
+    node->pcm = pcm;
+    node->samples = count;
+    node->bytes = (uint32_t)bytes;
+    node->hold_ms = (uint32_t)hold_ms;
+    if (a->clock_valid) {
+        uint64_t release = a->clock_ms + (uint64_t)hold_ms;
+        if (a->hold_tail && a->hold_tail->anchored && a->hold_tail->release_ms > release)
+            release = a->hold_tail->release_ms;
+        node->anchored = true;
+        node->release_ms = release;
+    }
+    if (!a->hold_head)
+        a->hold_head = node;
+    else
+        a->hold_tail->next = node;
+    a->hold_tail = node;
+    a->hold_bytes += bytes;
+    return 0;
+}
+
 ph_audio *ph_audio_create(void)
 {
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
@@ -129,7 +293,8 @@ ph_audio *ph_audio_create(void)
     a->lock = SDL_CreateMutex();
     a->packet = av_packet_alloc();
     a->frame = av_frame_alloc();
-    if (!a->lock || !a->packet || !a->frame) {
+    a->sync = ph_sync_create();
+    if (!a->lock || !a->packet || !a->frame || !a->sync) {
         ph_audio_destroy(a);
         return NULL;
     }
@@ -146,67 +311,51 @@ bool ph_audio_configure(ph_audio *a, unsigned char compression, unsigned short s
     return ok;
 }
 
-static int queue_frame(ph_audio *a)
+static int push_locked(ph_audio *a, unsigned char compression, const uint8_t *data, size_t len,
+                       bool timed, uint64_t pts_ns)
 {
-    AVFrame *f = a->frame;
-    if (!a->resample || a->input_format != f->format || a->input_rate != f->sample_rate
-        || a->input_channels != f->ch_layout.nb_channels) {
-        swr_free(&a->resample);
-        AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
-        if (swr_alloc_set_opts2(&a->resample, &stereo, AV_SAMPLE_FMT_FLT, RATE,
-                               &f->ch_layout, f->format, f->sample_rate, 0, NULL) < 0
-            || swr_init(a->resample) < 0)
-            return -1;
-        a->input_format = f->format;
-        a->input_rate = f->sample_rate;
-        a->input_channels = f->ch_layout.nb_channels;
-    }
-    int capacity = swr_get_out_samples(a->resample, f->nb_samples);
-    uint8_t *pcm = NULL;
-    if (capacity <= 0 || capacity > 16384
-        || av_samples_alloc(&pcm, NULL, CHANNELS, capacity, AV_SAMPLE_FMT_FLT, 0) < 0)
-        return -1;
-    int count = swr_convert(a->resample, &pcm, capacity,
-                            (const uint8_t **)f->extended_data, f->nb_samples);
-    if (count > 0) {
-        float *values = (float *)pcm;
-        for (int i = 0; i < count * CHANNELS; i++)
-            values[i] *= a->gain;
-        Uint32 bytes = (Uint32)(count * CHANNELS * sizeof(float));
-        if (SDL_GetQueuedAudioSize(a->device) + bytes > QUEUE_BYTES)
-            SDL_ClearQueuedAudio(a->device); /* recover instead of accumulating audible lag */
-        if (SDL_QueueAudio(a->device, pcm, bytes) != 0)
-            count = -1;
-        else if (!a->playing) {
-            PH_LOGI("audio playing: %s, %d Hz stereo", format_name(a->compression), RATE);
-            a->playing = true;
-        }
-    }
-    av_free(pcm);
-    return count;
-}
-
-int ph_audio_push(ph_audio *a, unsigned char compression, const uint8_t *data, size_t len)
-{
-    if (!a || !data || !len || len > 1024 * 1024)
-        return -1;
-    SDL_LockMutex(a->lock);
     int result = -1;
+    ph_sync_action action = {PH_SYNC_PLAY, 0};
+    int error;
+
     if ((!a->codec || compression != a->compression)
         && !configure_locked(a, compression, compression == 2 ? 352 : compression == 8 ? 480 : 1024))
         goto done;
+    if (timed) {
+        action = ph_sync_audio(a->sync, pts_ns, 0);
+        if (action.kind == PH_SYNC_DROP) {
+            result = 0;
+            goto done;
+        }
+    }
     if (av_new_packet(a->packet, (int)len) < 0)
         goto done;
     memcpy(a->packet->data, data, len);
-    int error = avcodec_send_packet(a->codec, a->packet);
+    error = avcodec_send_packet(a->codec, a->packet);
     av_packet_unref(a->packet);
     if (error < 0)
         goto done;
     result = 0;
     while ((error = avcodec_receive_frame(a->codec, a->frame)) == 0) {
-        int samples = queue_frame(a);
+        uint8_t *pcm = NULL;
+        int samples = 0;
+        int conv = convert_frame(a, &pcm, &samples);
         av_frame_unref(a->frame);
-        if (samples < 0) {
+        if (conv < 0) {
+            result = -1;
+            goto done;
+        }
+        if (samples <= 0)
+            continue;
+        if (a->muted) {
+            av_free(pcm);
+        } else if (a->hold_head || (timed && action.kind == PH_SYNC_HOLD)) {
+            int delay = timed && action.kind == PH_SYNC_HOLD ? action.hold_or_drop_ms : 0;
+            if (hold_pcm(a, pcm, samples, delay) < 0) {
+                result = -1;
+                goto done;
+            }
+        } else if (queue_pcm(a, pcm, samples) < 0) {
             result = -1;
             goto done;
         }
@@ -219,8 +368,79 @@ done:
         PH_LOGW("audio packet could not be played (%s)", format_name(compression));
         a->warned = true;
     }
+    return result;
+}
+
+static int push_outer(ph_audio *a, unsigned char compression, const uint8_t *data, size_t len,
+                      bool timed, uint64_t pts_ns)
+{
+    int result;
+
+    if (!a || !data || !len || len > 1024 * 1024)
+        return -1;
+    SDL_LockMutex(a->lock);
+    result = push_locked(a, compression, data, len, timed, pts_ns);
     SDL_UnlockMutex(a->lock);
     return result;
+}
+
+int ph_audio_push(ph_audio *a, unsigned char compression, const uint8_t *data, size_t len)
+{
+    return push_outer(a, compression, data, len, false, 0);
+}
+
+int ph_audio_push_timed(ph_audio *a, unsigned char compression, const uint8_t *data, size_t len,
+                        uint64_t pts_ns)
+{
+    return push_outer(a, compression, data, len, true, pts_ns);
+}
+
+void ph_audio_note_video_pts(ph_audio *a, uint64_t pts_ns)
+{
+    if (!a)
+        return;
+    SDL_LockMutex(a->lock);
+    ph_sync_note_video(a->sync, pts_ns);
+    SDL_UnlockMutex(a->lock);
+}
+
+void ph_audio_pump(ph_audio *a, uint64_t now_ms)
+{
+    uint64_t prev = 0;
+    bool have_prev = false;
+
+    if (!a)
+        return;
+    SDL_LockMutex(a->lock);
+    a->clock_ms = now_ms;
+    a->clock_valid = true;
+    for (struct ph_held_pcm *node = a->hold_head; node; node = node->next) {
+        if (!node->anchored) {
+            uint64_t release = now_ms + node->hold_ms;
+            if (have_prev && release < prev)
+                release = prev;
+            node->release_ms = release;
+            node->anchored = true;
+        }
+        prev = node->release_ms;
+        have_prev = true;
+    }
+    while (a->hold_head && a->hold_head->release_ms <= now_ms) {
+        struct ph_held_pcm *node = a->hold_head;
+        a->hold_head = node->next;
+        if (!a->hold_head)
+            a->hold_tail = NULL;
+        if (a->hold_bytes >= node->bytes)
+            a->hold_bytes -= node->bytes;
+        else
+            a->hold_bytes = 0;
+        if (a->muted)
+            av_free(node->pcm);
+        else
+            queue_pcm(a, node->pcm, node->samples);
+        free(node);
+    }
+    SDL_UnlockMutex(a->lock);
 }
 
 void ph_audio_set_volume(ph_audio *a, float decibels)
@@ -228,8 +448,75 @@ void ph_audio_set_volume(ph_audio *a, float decibels)
     if (!a || !isfinite(decibels))
         return;
     SDL_LockMutex(a->lock);
-    a->gain = decibels <= -144 ? 0 : powf(10, fminf(0, decibels) / 20);
+    if (decibels <= -144.f) {
+        a->volume_db = decibels;
+        a->gain = 0.f;
+    } else {
+        a->volume_db = fminf(0.f, decibels);
+        a->gain = powf(10.f, a->volume_db / 20.f);
+    }
     SDL_UnlockMutex(a->lock);
+}
+
+void ph_audio_adjust_volume_db(ph_audio *a, float delta)
+{
+    float next;
+
+    if (!a || !isfinite(delta))
+        return;
+    SDL_LockMutex(a->lock);
+    next = a->volume_db + delta;
+    if (!isfinite(next)) {
+        SDL_UnlockMutex(a->lock);
+        return;
+    }
+    if (next < -30.f)
+        next = -30.f;
+    if (next > 0.f)
+        next = 0.f;
+    a->volume_db = next;
+    a->gain = powf(10.f, next / 20.f);
+    SDL_UnlockMutex(a->lock);
+}
+
+void ph_audio_set_muted(ph_audio *a, bool muted)
+{
+    if (!a)
+        return;
+    SDL_LockMutex(a->lock);
+    a->muted = muted;
+    SDL_UnlockMutex(a->lock);
+}
+
+void ph_audio_set_sync_offset_ms(ph_audio *a, int offset_ms)
+{
+    if (!a)
+        return;
+    if (offset_ms > 500)
+        offset_ms = 500;
+    if (offset_ms < -500)
+        offset_ms = -500;
+    SDL_LockMutex(a->lock);
+    a->sync_offset_ms = offset_ms;
+    ph_sync_set_offset_ms(a->sync, offset_ms);
+    SDL_UnlockMutex(a->lock);
+}
+
+bool ph_audio_settings(const ph_audio *audio, struct ph_audio_settings *out)
+{
+    ph_audio *a = (ph_audio *)audio;
+    uint32_t held;
+
+    if (!a || !out)
+        return false;
+    SDL_LockMutex(a->lock);
+    held = (uint32_t)(a->hold_bytes * 1000U / (RATE * CHANNELS * sizeof(float)));
+    out->muted = a->muted;
+    out->volume_db = a->volume_db;
+    out->sync_offset_ms = a->sync_offset_ms;
+    out->queued_ms = device_queued_ms_locked(a) + held;
+    SDL_UnlockMutex(a->lock);
+    return true;
 }
 
 void ph_audio_flush(ph_audio *a)
@@ -243,11 +530,12 @@ void ph_audio_flush(ph_audio *a)
 
 uint32_t ph_audio_queued_ms(ph_audio *a)
 {
+    uint32_t ms;
+
     if (!a)
         return 0;
     SDL_LockMutex(a->lock);
-    uint32_t ms = a->device ? SDL_GetQueuedAudioSize(a->device) * 1000U
-                                / (RATE * CHANNELS * sizeof(float)) : 0;
+    ms = device_queued_ms_locked(a);
     SDL_UnlockMutex(a->lock);
     return ms;
 }
@@ -256,13 +544,16 @@ void ph_audio_destroy(ph_audio *a)
 {
     if (!a)
         return;
+    free_holds(a);
     if (a->device)
         SDL_CloseAudioDevice(a->device);
     swr_free(&a->resample);
     avcodec_free_context(&a->codec);
     av_frame_free(&a->frame);
     av_packet_free(&a->packet);
-    SDL_DestroyMutex(a->lock);
+    ph_sync_destroy(a->sync);
+    if (a->lock)
+        SDL_DestroyMutex(a->lock);
     free(a);
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }

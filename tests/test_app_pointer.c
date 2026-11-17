@@ -7,6 +7,7 @@
 #include <stdatomic.h>
 #include <string.h>
 #include <unistd.h>
+#include "temp_path.h"
 
 #include <SDL.h>
 #include <libavutil/frame.h>
@@ -780,11 +781,15 @@ int main(int argc, char **argv)
     after_ack = reentry_mode || (argc == 2 && (!strcmp(argv[1], "--paced-after-ack")
         || !strcmp(argv[1], "--paced-drag")));
     frame_delay_ms = reentry_mode ? 120 : 80;
-    char config[] = "/tmp/porthole-pointer-XXXXXX";
-    if (!mkdtemp(config))
+    char config[1024];
+    if (!ph_test_temp_dir(config, sizeof config))
         return 1;
-    setenv("XDG_CONFIG_HOME", config, 1);
-    setenv("SDL_VIDEODRIVER", "dummy", 1);
+#ifdef _WIN32
+    SDL_setenv("APPDATA", config, 1);
+#else
+    SDL_setenv("XDG_CONFIG_HOME", config, 1);
+#endif
+    SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
     ph_app_options options = {.name = "Idle-frame test", .bluetooth = true,
                               .ble_helper = "unused fake helper"};
     int result = ph_app_run(&options);

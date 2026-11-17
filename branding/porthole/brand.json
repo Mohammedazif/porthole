@@ -1,0 +1,37 @@
+{
+  "name": "Porthole",
+  "version": "1.0.0",
+  "colors": {
+    "ink": "#111111",
+    "paper": "#FFFFFF",
+    "reflectionOnLight": "#B8B8B8",
+    "reflectionOnDark": "#A3A3A3",
+    "monoBlack": "#000000",
+    "monoWhite": "#FFFFFF"
+  },
+  "themes": {
+    "light": "svg/on-light/",
+    "dark": "svg/on-dark/",
+    "highContrastLight": "svg/mono-black/",
+    "highContrastDark": "svg/mono-white/",
+    "inheritColorInline": "svg/current-color/",
+    "systemAppearance": "svg/auto/"
+  },
+  "layouts": ["icon", "icon-small", "wordmark", "horizontal", "stacked"],
+  "minimumSizesPx": {
+    "icon": 48,
+    "icon-small": 16,
+    "wordmarkWidth": 140,
+    "horizontalWidth": 240,
+    "stackedWidth": 180
+  },
+  "clearSpace": "At least one main stroke width around the visible artwork",
+  "reflectionPlacement": "Upper-right of the icon opening and capital P opening; parallel upward-right strokes",
+  "logoTypography": "Custom outlined lettering; no external font required",
+  "formats": ["SVG", "PNG", "PDF", "ICO", "ICNS"],
+  "defaultHeader": "svg/on-light/porthole-horizontal.svg",
+  "defaultDarkHeader": "svg/on-dark/porthole-horizontal.svg",
+  "preview": "preview.html",
+  "guide": "Porthole-brand-guide.pdf",
+  "vectorMaster": "source/paths.json"
+}

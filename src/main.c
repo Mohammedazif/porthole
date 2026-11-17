@@ -1,5 +1,6 @@
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "core/log.h"
@@ -29,6 +30,12 @@ static void print_usage(FILE *out, const char *argv0)
             "      --setup        Open guided pairing and calibration setup\n"
             "      --no-setup     Skip automatic first-run setup (F2 still opens it)\n"
             "      --diagnostics  Show local timing diagnostics and log summaries\n"
+            "      --pin          Require a 4-digit PIN the first time a device connects\n"
+            "      --four-k       Advertise a 3840x2160 H.264 or H.265 picture\n"
+            "      --audio-delay MS  Shift PC audio relative to the picture (-500..500)\n"
+            "      --precise-touch HOST:PORT  Optional WebDriverAgent taps (off by default)\n"
+            "      --autostart    Write a Linux autostart entry for this executable\n"
+            "      --no-usb       Leave a plugged-in iPhone on its normal USB driver\n"
             "      --ble-helper PATH  Bluetooth helper (Windows executable or Linux Python script)\n"
             "      --debug       Log AirPlay protocol details\n"
             "  -v, --verbose     Show debug messages\n"
@@ -37,8 +44,13 @@ static void print_usage(FILE *out, const char *argv0)
             "\n"
             "Hotkeys (Left Alt + key): H Home, S App Switcher, C Control Center,\n"
             "  N Notification Center, F Spotlight, P Screenshot, Left Back, Up/Down Volume.\n"
+            "  Enter fullscreen, T always on top, 1 one-to-one, V paste clipboard,\n"
+            "  M mute PC audio, =/- PC volume, ,/. audio sync.\n"
             "Ctrl on the PC acts as Command on the iPhone (Ctrl+C, Ctrl+V, ...).\n"
-            "F1 help; F2 guided setup; F3 local timing diagnostics.\n",
+            "F1 help; F2 guided setup; F3 local timing diagnostics; F6 next device;\n"
+            "F8 save a PNG; F9 start or stop an H.264 recording.\n"
+            "A plugged-in iPhone becomes the picture after its first USB keyframe.\n"
+            "Unplugging returns to Wi-Fi when a Wi-Fi frame arrived within 500 ms.\n",
             argv0, PORTHOLE_NAME);
 }
 
@@ -60,6 +72,9 @@ int main(int argc, char **argv)
 #endif
     bool audio = true;
     bool diagnostics = false, setup = false, auto_setup = true;
+    bool pin_required = false, four_k = false, autostart = false, usb = true;
+    int audio_delay_ms = 0;
+    const char *precise_touch = NULL;
 #ifdef PORTHOLE_BLE_HELPER
     const char *ble_helper = PORTHOLE_BLE_HELPER;
 #else
@@ -93,6 +108,33 @@ int main(int argc, char **argv)
             setup = false;
         } else if (!strcmp(arg, "--diagnostics")) {
             diagnostics = true;
+        } else if (!strcmp(arg, "--pin")) {
+            pin_required = true;
+        } else if (!strcmp(arg, "--four-k")) {
+            four_k = true;
+        } else if (!strcmp(arg, "--autostart")) {
+            autostart = true;
+        } else if (!strcmp(arg, "--no-usb")) {
+            usb = false;
+        } else if (!strcmp(arg, "--audio-delay")) {
+            char *end = NULL;
+            long delay;
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: %s needs a value\n", argv[0], arg);
+                return 2;
+            }
+            delay = strtol(argv[++i], &end, 10);
+            if (!end || *end || delay < -500 || delay > 500) {
+                fprintf(stderr, "%s: --audio-delay needs an integer from -500 to 500\n", argv[0]);
+                return 2;
+            }
+            audio_delay_ms = (int)delay;
+        } else if (!strcmp(arg, "--precise-touch")) {
+            if (i + 1 >= argc || !argv[i + 1][0]) {
+                fprintf(stderr, "%s: %s needs HOST:PORT\n", argv[0], arg);
+                return 2;
+            }
+            precise_touch = argv[++i];
         } else if (!strcmp(arg, "--ble-helper")) {
             if (i + 1 >= argc || !argv[i + 1][0]) {
                 fprintf(stderr, "%s: %s needs a value\n", argv[0], arg);
@@ -143,7 +185,14 @@ int main(int argc, char **argv)
                               .diagnostics = diagnostics,
                               .auto_setup = auto_setup,
                               .setup = setup,
-                              .ble_helper = ble_helper};
+                              .pin_required = pin_required,
+                              .four_k = four_k,
+                              .autostart = autostart,
+                              .audio_delay_ms = audio_delay_ms,
+                              .precise_touch = precise_touch,
+                              .exe_path = argv[0],
+                              .ble_helper = ble_helper,
+                              .usb = usb};
         int result = ph_app_run(&opt);
 #ifdef _WIN32
         free(windows_helper);
@@ -158,7 +207,13 @@ int main(int argc, char **argv)
     (void)diagnostics;
     (void)setup;
     (void)auto_setup;
+    (void)pin_required;
+    (void)four_k;
+    (void)autostart;
+    (void)audio_delay_ms;
+    (void)precise_touch;
     (void)ble_helper;
+    (void)usb;
     PH_LOGW("this build has no Wi-Fi receiver (configured with PORTHOLE_WITH_AIRPLAY=OFF)");
     return 0;
 #endif

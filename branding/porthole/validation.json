@@ -1,0 +1,16 @@
+{
+  "svg_files": 30,
+  "transparent_png_files": 84,
+  "app_png_files": 26,
+  "pdf_files": 5,
+  "ico_files": 3,
+  "icns_files": 2,
+  "checks": [
+    "True vector paths; no embedded raster in logo SVGs",
+    "Real PNG alpha; transparent counters",
+    "White reversed ink",
+    "Windows multi-resolution icon frames",
+    "macOS icon decoding",
+    "Two upper-right reflection stripes in both marks"
+  ]
+}

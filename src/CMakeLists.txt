@@ -14,6 +14,19 @@ add_library(porthole_core STATIC
     video/crop.c
     video/scrollbar.c
     video/cursor.c
+    video/codecs.c
+    audio/sync.c
+    control/paste.c
+    security/gate.c
+    session/devices.c
+    touch/wda.c
+    ui/placement.c
+    ui/tray.c
+    usb/packet.c
+    usb/switch.c
+    usb/winusb.c
+    usb/capture.c
+    usb/sample.c
 )
 target_include_directories(porthole_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -24,6 +37,15 @@ if(UNIX)
 endif()
 porthole_set_warnings(porthole_core)
 
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+    pkg_check_modules(LIBUSB QUIET IMPORTED_TARGET libusb-1.0)
+endif()
+if(TARGET PkgConfig::LIBUSB)
+    target_compile_definitions(porthole_core PUBLIC PH_USB_HAVE_LIBUSB=1)
+    target_link_libraries(porthole_core PUBLIC PkgConfig::LIBUSB)
+endif()
+
 add_executable(porthole main.c)
 target_link_libraries(porthole PRIVATE porthole_core)
 porthole_set_warnings(porthole)
@@ -32,7 +54,7 @@ if(PORTHOLE_WITH_AIRPLAY)
     # The full app: AirPlay receiver -> FFmpeg decoder -> SDL2 window.
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
-    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale libswresample)
+    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale libswresample libavformat)
     find_package(OpenSSL REQUIRED)
     find_package(Threads REQUIRED)
 
@@ -42,7 +64,13 @@ if(PORTHOLE_WITH_AIRPLAY)
         audio/player.c
         hid/link.c
         ui/window.c
+        ui/chrome.c
         video/decoder.c
+        media/shot.c
+        media/record.c
+        control/paste_sdl.c
+        touch/wda_net.c
+        polish/runtime.c
     )
     target_link_libraries(porthole_app PUBLIC
         porthole_core
@@ -52,6 +80,9 @@ if(PORTHOLE_WITH_AIRPLAY)
         OpenSSL::Crypto
         Threads::Threads
     )
+    if(WIN32)
+        target_link_libraries(porthole_app PUBLIC ws2_32)
+    endif()
     porthole_set_warnings(porthole_app)
 
     target_link_libraries(porthole PRIVATE porthole_app)
