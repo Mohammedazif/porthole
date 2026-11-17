@@ -370,6 +370,16 @@ Linux receiver as the same version. The current portable WinRT core suite passes
 locally; it does not verify Windows radio delivery. No additional Windows preview has
 been sent during these live Linux checks. Grok's items 5–7 remain outside this work.
 
+After those checks, one consolidated portable file was prepared from committed source
+5e85aba: `build/Porthole-Windows-Portable-5e85aba.exe` (89,473,536 bytes). Its final source
+archive, pinned vendor, embedded .NET runtime, DLL imports and payload corruption checks
+pass verification. The final native pointer fixture and process/pipe fixture pass under
+Wine, and the unchanged managed helper suite passes 23/23. The helper was built at
+4314ae0 from sources byte-identical to 5e85aba; both revisions are recorded in build
+metadata. This is ready for a real Windows host check, not a Windows Bluetooth latency
+or reliability pass. The last Linux receiver received SIGTERM before the remaining live
+device-settings check could finish; the source of that external termination is unknown.
+
 ---
 
 ## 1. Why this project
