@@ -251,6 +251,85 @@ int main(void)
     ph_pointer_tick(&f.pointer, 3000);
     CHECK(f.count == initial); /* repeated failed wheel polling cannot sweep again */
 
+    /* A one-unit correction may not produce a detectable changed-video dot.
+     * Keep an unpressed click across one neutral reveal, but never send its
+     * press until the NEW probe fence and a fresh aligned observation arrive. */
+    init(&f);
+    f.true_linear = 1.2;
+    f.true_quadratic = .04;
+    CHECK(ph_pointer_set_scale(&f.pointer, 20, 20));
+    confirmed_position(&f, 243, 810, .46);
+    const double tiny_target = 247.1 / 500;
+    const double tiny_y = 810 * .46 / 500;
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true,
+                             tiny_target, tiny_y, .46, ++f.now));
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, false,
+                             tiny_target, tiny_y, .46, ++f.now));
+    CHECK(f.count == 1 && f.events[0].mouse.dx == 1 && !f.events[0].mouse.dy);
+    uint32_t tiny_id = f.pointer.sync_id;
+    ph_pointer_ack(&f.pointer, tiny_id, f.now += 20);
+    ph_pointer_observe(&f.pointer, false, 0, 0, f.now += 40);
+    CHECK(f.pointer.phase == PH_POINTER_WAIT_VIDEO && f.pointer.count == 2);
+    ph_pointer_tick(&f.pointer, f.now += 661);
+    CHECK(!f.pointer.failed && f.pointer.recoveries == 1 && f.pointer.count == 2);
+    CHECK(f.count == 2 && f.events[1].mouse.dx == 2 && !f.events[1].mouse.dy);
+    CHECK(!f.events[1].mouse.buttons && !f.pointer.buttons);
+    CHECK(f.pointer.phase == PH_POINTER_MOVING && f.pointer.sync_id != tiny_id);
+    CHECK(!ph_pointer_transport_stalled(&f.pointer) && f.anchors == 0);
+    uint32_t probe_id = f.pointer.sync_id;
+    ph_pointer_ack(&f.pointer, tiny_id, ++f.now); /* obsolete ACK cannot unlock press */
+    ph_pointer_observe(&f.pointer, true, f.x / 500, f.y * .46 / 500, ++f.now);
+    CHECK(f.pointer.phase == PH_POINTER_MOVING && first_button(&f, PH_HID_BTN_LEFT) == f.count);
+    ph_pointer_ack(&f.pointer, probe_id, f.now += 20);
+    ph_pointer_observe(&f.pointer, false, 0, 0, f.now += 40);
+    CHECK(first_button(&f, PH_HID_BTN_LEFT) == f.count && f.pointer.count == 2);
+    ph_pointer_observe(&f.pointer, true, f.x / 500, f.y * .46 / 500, ++f.now);
+    pressed = first_button(&f, PH_HID_BTN_LEFT);
+    CHECK(pressed < f.count && hypot(f.events[pressed].x - 247.1,
+                                     f.events[pressed].y - 810) <= 4);
+    settle(&f);
+    CHECK(!f.pointer.buttons && !f.pointer.count && !f.pointer.failed);
+    CHECK(f.events[f.count - 1].at - f.events[pressed].at >= 80);
+
+    /* A frozen image gets exactly one neutral attempt. Hover target updates
+     * cannot replenish that pending click's allowance; no press is guessed and
+     * video failure must not be confused with failure of its healthy ACK pipe. */
+    init(&f);
+    CHECK(ph_pointer_set_scale(&f.pointer, 20, 20));
+    confirmed_position(&f, 243, 810, .46);
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true,
+                             tiny_target, tiny_y, .46, ++f.now));
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, false,
+                             tiny_target, tiny_y, .46, ++f.now));
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, ++f.now);
+    ph_pointer_tick(&f.pointer, f.now += 701);
+    CHECK(f.pointer.recoveries == 1 && f.pointer.phase == PH_POINTER_MOVING);
+    initial = f.count;
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, ++f.now);
+    for (int i = 0; i < 10; i++) {
+        CHECK(ph_pointer_target(&f.pointer, i % 2 ? .2 : .8, .5, .46, ++f.now));
+        CHECK(f.pointer.recoveries == 1 && f.count == initial);
+    }
+    ph_pointer_tick(&f.pointer, f.now += 701);
+    CHECK(f.pointer.failed && !f.pointer.count && !f.pointer.buttons);
+    CHECK(f.count == initial && first_button(&f, PH_HID_BTN_LEFT) == f.count);
+    CHECK(!ph_pointer_transport_stalled(&f.pointer));
+
+    /* Failure to ACK a reveal is a real transport timeout. It never emits a
+     * second reveal or a queued click while waiting on that missing fence. */
+    init(&f);
+    CHECK(ph_pointer_set_scale(&f.pointer, 20, 20));
+    confirmed_position(&f, 243, 810, .46);
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true,
+                             tiny_target, tiny_y, .46, ++f.now));
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, ++f.now);
+    ph_pointer_tick(&f.pointer, f.now += 701);
+    initial = f.count;
+    ph_pointer_tick(&f.pointer, f.now += 3000);
+    CHECK(f.pointer.failed && !f.pointer.count && !f.pointer.buttons);
+    CHECK(f.count == initial && first_button(&f, PH_HID_BTN_LEFT) == f.count);
+    CHECK(ph_pointer_transport_stalled(&f.pointer));
+
     /* A full event queue fails by releasing everything, not by losing one up. */
     init(&f);
     for (unsigned int i = 0; i < PH_POINTER_QUEUE; i++)

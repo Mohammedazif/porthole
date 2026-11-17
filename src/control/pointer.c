@@ -318,7 +318,9 @@ static bool target(ph_pointer *p, double x, double y, double aspect, uint64_t no
         ph_pointer_reset(p, now_ms);
     if (!p->active || changed) {
         p->attempts = 0;
-        p->recoveries = 0;
+        /* Hover changes cannot renew recovery while the original click waits. */
+        if (!p->count)
+            p->recoveries = 0;
         p->failed = false;
     }
     p->now_ms = now_ms;
@@ -460,12 +462,15 @@ void ph_pointer_tick(ph_pointer *p, uint64_t now_ms)
         return;
     }
     if (p->phase == PH_POINTER_WAIT_VIDEO && now_ms - p->wait_since >= FRAME_TIMEOUT_MS) {
-        if (p->count || p->buttons || p->recoveries) {
+        bool pending_press = p->count && p->actions[p->head].down && p->known
+                             && !p->anchoring && !p->ack_timed_out;
+        if ((p->count && !pending_press) || p->buttons || p->recoveries) {
             fail(p);
             return;
         }
-        /* One neutral probe can reveal a hidden dot. If that also fails, wait
-         * for a new user movement instead of continuously sweeping the phone. */
+        /* A tiny correction can disappear in the rendered video. One neutral
+         * probe may reveal it, including before an unpressed queued click. The
+         * new fence and fresh position feedback still precede every press. */
         p->recoveries++;
         emit_mouse(p, 2, 0);
         p->learn_move = false;
