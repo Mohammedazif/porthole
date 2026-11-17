@@ -131,9 +131,71 @@ static void timed_ack_sequences(void)
     CHECK(f.scroll.sent_at == 3140);
 }
 
+static void dynamic_content_sequences(void)
+{
+    for (int direction = -1; direction <= 1; direction += 2) {
+        fixture f;
+        init(&f);
+        f.scroll.feedback = true;
+        double old_top = direction < 0 ? .62 : .10;
+        double old_bottom = direction < 0 ? .90 : .38;
+        double grown_top = direction < 0 ? .68 : .12;
+        double grown_bottom = direction < 0 ? .88 : .32;
+        double next_top = direction < 0 ? .70 : .10;
+        double next_bottom = direction < 0 ? .90 : .30;
+        double end_top = direction < 0 ? .74 : .06;
+        double end_bottom = direction < 0 ? .94 : .26;
+        ph_scroll_observe(&f.scroll, true, old_top, old_bottom, 100);
+        CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, direction * 4));
+        ph_scroll_ack_at(&f.scroll, f.last_sync, 140);
+        /* Content extension shortens the thumb by moving BOTH ends inward.
+         * It is advancing toward the requested end while moving away from the
+         * previously visible end, rather than stretching against that end. */
+        ph_scroll_observe(&f.scroll, true, grown_top, grown_bottom, 180);
+        CHECK(!f.scroll.blocked_y && f.scroll.in_flight && f.scroll.pending_y == direction * 2);
+        CHECK(fabs(f.scroll.max_bar_length - .20) < .001 && f.syncs == 2);
+        ph_scroll_ack_at(&f.scroll, f.last_sync, 220);
+        ph_scroll_observe(&f.scroll, true, next_top, next_bottom, 260);
+        CHECK(!f.scroll.blocked_y && f.scroll.in_flight && f.scroll.pending_y == direction);
+        CHECK(fabs(f.scroll.max_bar_length - .20) < .001 && f.syncs == 3);
+
+        /* The same uninterrupted gesture must still stop when the new, full
+         * thumb actually remains pinned at its requested end for two batches. */
+        CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, direction * 4));
+        ph_scroll_ack_at(&f.scroll, f.last_sync, 300);
+        ph_scroll_observe(&f.scroll, true, end_top, end_bottom, 340);
+        ph_scroll_ack_at(&f.scroll, f.last_sync, 380);
+        ph_scroll_observe(&f.scroll, true, end_top, end_bottom, 420);
+        CHECK(!f.scroll.blocked_y && f.scroll.in_flight);
+        ph_scroll_ack_at(&f.scroll, f.last_sync, 460);
+        size_t before_stop = f.count;
+        ph_scroll_observe(&f.scroll, true, end_top, end_bottom, 500);
+        CHECK(f.scroll.blocked_y == direction && !f.scroll.pending_y && f.count == before_stop);
+
+        /* An elastic animation can initially look like the same inward
+         * contraction. If it then compresses against its fixed new end, the
+         * next small probe must stop it rather than rebasing indefinitely. */
+        init(&f);
+        f.scroll.feedback = true;
+        ph_scroll_observe(&f.scroll, true, old_top, old_bottom, 100);
+        CHECK(ph_scroll_request(&f.scroll, .5, .5, .46, 0, direction * 4));
+        ph_scroll_ack_at(&f.scroll, f.last_sync, 140);
+        ph_scroll_observe(&f.scroll, true, grown_top, grown_bottom, 180);
+        CHECK(!f.scroll.blocked_y && abs(wheel_total(&f)) == 2);
+        ph_scroll_ack_at(&f.scroll, f.last_sync, 220);
+        before_stop = f.count;
+        ph_scroll_observe(&f.scroll, true,
+                          direction < 0 ? grown_top + .02 : grown_top,
+                          direction < 0 ? grown_bottom : grown_bottom - .02, 260);
+        CHECK(f.scroll.blocked_y == direction && !f.scroll.pending_y
+              && f.count == before_stop && abs(wheel_total(&f)) == 2);
+    }
+}
+
 int main(void)
 {
     timed_ack_sequences();
+    dynamic_content_sequences();
     fixture f;
     init(&f);
     CHECK(ph_scroll_request(&f.scroll, 0.5, 0.65, 0.46, 0, -1));

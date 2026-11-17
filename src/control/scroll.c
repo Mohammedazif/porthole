@@ -242,13 +242,24 @@ void ph_scroll_observe(ph_scroll *scroll, bool visible, double top, double botto
         && bottom <= 1) {
         const double tolerance = 0.005;
         double length = bottom - top;
+        bool fresh = scroll->waiting_frame && now_ms >= scroll->wait_since
+                     && now_ms - scroll->wait_since >= FRAME_SETTLE_MS;
         if (!scroll->have_bar) {
             scroll->track_top = top;
             scroll->track_bottom = bottom;
         }
         scroll->track_top = fmin(scroll->track_top, top);
         scroll->track_bottom = fmax(scroll->track_bottom, bottom);
-        scroll->max_bar_length = fmax(scroll->max_bar_length, length);
+        /* Inward ends with the centre still advancing can mean more content
+         * or a changed track. A backward centre can instead be a shifted edge.
+         * Rebase only that possible growth, retaining probes and pinned checks. */
+        double progress = ((scroll->sent_bar_top + scroll->sent_bar_bottom)
+                           - (top + bottom)) * scroll->sent_y / 2;
+        bool resized = fresh && scroll->sent_had_bar
+                       && top > scroll->sent_bar_top + tolerance
+                       && bottom < scroll->sent_bar_bottom - tolerance
+                       && progress > tolerance;
+        scroll->max_bar_length = resized ? length : fmax(scroll->max_bar_length, length);
         bool compressed = length < scroll->max_bar_length - tolerance;
         /* Large titles and bottom bars can resize the track during a gesture.
          * A compressed thumb at either end still means overscroll when its
@@ -256,7 +267,6 @@ void ph_scroll_observe(ph_scroll *scroll, bool visible, double top, double botto
         bool at_top = top < 0.2 && (top <= scroll->track_top + tolerance || compressed);
         bool at_bottom = bottom > 0.8
                          && (bottom >= scroll->track_bottom - tolerance || compressed);
-        bool fresh = scroll->waiting_frame && now_ms - scroll->wait_since >= FRAME_SETTLE_MS;
         bool pinned = fresh && scroll->sent_had_bar
                       && fabs(top - scroll->sent_bar_top) < 0.0005
                       && fabs(bottom - scroll->sent_bar_bottom) < 0.0005;
