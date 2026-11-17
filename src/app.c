@@ -69,14 +69,17 @@ typedef struct app {
 
 /* ------------------------------------------------------------ cross-thread notifications */
 
-static void push_event(app *a, int which, void *data)
+static bool push_event(app *a, int which, void *data)
 {
     SDL_Event e;
     SDL_zero(e);
     e.type = a->ev_base + (Uint32)which;
     e.user.data1 = data;
-    if (SDL_PushEvent(&e) != 1)
+    if (SDL_PushEvent(&e) != 1) {
         free(data);
+        return false;
+    }
+    return true;
 }
 
 static void discard_pending_events(app *a)
@@ -92,8 +95,8 @@ static void discard_pending_events(app *a)
 static void on_frame(void *user)
 {
     app *a = user;
-    if (!atomic_exchange(&a->frame_pending, true))
-        push_event(a, EV_FRAME, NULL);
+    if (!atomic_exchange(&a->frame_pending, true) && !push_event(a, EV_FRAME, NULL))
+        atomic_store(&a->frame_pending, false); /* a rejected frame may be retried */
 }
 
 static void on_video(void *user, const uint8_t *data, size_t len, uint64_t timestamp_ns)
@@ -595,7 +598,7 @@ static void observe_pointer(app *a)
     Uint64 now = SDL_GetTicks64();
     double hx, hy, radius;
     if (!f || !f->data[0] || a->pointer.phase != PH_POINTER_WAIT_VIDEO
-        || now - a->pointer.wait_since < 32
+        || atomic_load(&a->frame_pending) /* inspect already-arrived video first */
         || (!a->pointer.anchoring && a->view_seen_at < a->pointer.sent_at)
         || !ph_pointer_hint(&a->pointer, &hx, &hy, &radius))
         return;
@@ -631,6 +634,9 @@ static void observe_pointer(app *a)
     }
     a->candidate_x = a->checked_x;
     a->candidate_y = a->checked_y;
+    /* Start tracking only after the fence ACK (WAIT_VIDEO), but overlap its
+     * settling interval with candidate stability. ph_pointer_observe retains
+     * the independent ACK-age check; neither 32 ms safety condition is removed. */
     if (now - a->candidate_since < 32)
         return;
     PH_LOGD("phone pointer observed at (%.1f,%.1f)", a->candidate_x, a->candidate_y);

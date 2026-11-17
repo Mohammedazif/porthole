@@ -131,12 +131,18 @@ if(UNIX AND PORTHOLE_WITH_AIRPLAY)
     add_test(NAME app_calibration_escape COMMAND test_app_pointer --calibration-escape)
     add_test(NAME app_paced_drag COMMAND test_app_pointer --paced-drag)
     add_test(NAME app_render_stall COMMAND test_app_pointer --render-stall)
+    add_test(NAME app_confirmation_changes COMMAND test_app_pointer --changing-confirmation)
+    add_test(NAME app_confirmation_stale COMMAND test_app_pointer --stale-confirmation)
+    add_test(NAME app_confirmation_stream COMMAND test_app_pointer --stream-confirmation)
+    add_test(NAME app_frame_filter_recovery COMMAND test_app_pointer --filtered-frame)
     set_tests_properties(app_pointer PROPERTIES TIMEOUT 10)
     set_tests_properties(app_drag PROPERTIES TIMEOUT 10)
     set_tests_properties(app_setup_modal PROPERTIES TIMEOUT 10)
     set_tests_properties(app_pointer_paced app_pointer_after_ack app_frozen_drag
         app_disconnect_drag app_focus_drag app_close_drag app_modal_drag app_filtered_events
         app_calibration_focus app_calibration_escape app_paced_drag app_render_stall PROPERTIES TIMEOUT 15)
+    set_tests_properties(app_confirmation_changes app_confirmation_stale
+        app_confirmation_stream app_frame_filter_recovery PROPERTIES TIMEOUT 10)
 endif()
 
 add_test(NAME cli_version COMMAND porthole --version)

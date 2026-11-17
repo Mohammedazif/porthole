@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -38,7 +39,7 @@ static void *frame_user;
 static ph_hid_link_status_fn link_status;
 static void *link_user;
 static AVFrame *latest;
-static uint64_t frame_serial;
+static atomic_uint_fast64_t frame_serial;
 static double phone_x = 400, phone_y = 800;
 static double pressed_x, pressed_y, released_x, released_y;
 static uint8_t held_buttons;
@@ -70,6 +71,14 @@ static bool fault_queued, fault_delivered, queue_overflow, draining_stop;
 static bool delivery_applying;
 static bool filtered_mode, calibration_mode, calibration_seen, calibration_running;
 static bool render_stall_mode, render_stalled;
+static bool confirmation_mode, changing_mode, stale_mode, feedback_waiting, feedback_bad;
+static bool probe_pending;
+static bool stream_mode, filter_one_frame;
+static atomic_bool stream_stop;
+static SDL_Thread *stream_thread;
+static unsigned int filtered_frames;
+static unsigned int probe_stage, confirmation_count;
+static Uint64 confirmation_ack_at, probe_fresh_at, confirmation_waits[64];
 static unsigned int filtered_events;
 static unsigned int fault_stage, link_starts, stop_requests, delivered_after_cancel;
 static unsigned int frame_delay_ms;
@@ -82,6 +91,27 @@ static uint8_t delayed_buttons;
 
 static void apply_delivery(const paced_report *report);
 static void pump_delivery(void);
+
+static int stream_frames(void *unused)
+{
+    (void)unused;
+    while (!atomic_load(&stream_stop)) {
+        SDL_Delay(16);
+        atomic_fetch_add(&frame_serial, 1); /* a repeated decoded image at 60 fps */
+        frame_ready(frame_user);
+    }
+    return 0;
+}
+
+static int filter_first_frame(void *user, SDL_Event *event)
+{
+    (void)user;
+    if (event->type >= SDL_USEREVENT && event->user.data1 == NULL && !filtered_frames) {
+        filtered_frames++;
+        return 0;
+    }
+    return 1;
+}
 
 static int filter_app_events(void *user, SDL_Event *event)
 {
@@ -193,6 +223,7 @@ unsigned int ph_window_id(const ph_window *w) { (void)w; return 1; }
 void ph_window_present(ph_window *w, const AVFrame *frame, const ph_rect *screen)
 {
     (void)w, (void)frame, (void)screen;
+    if (stream_mode) SDL_Delay(10); /* render work under a continuing 60 fps stream */
     if (render_stall_mode && movement_frames && !render_stalled) {
         render_stalled = true;
         /* The matching ACK is already queued behind this frame. A long UI
@@ -228,6 +259,21 @@ void ph_window_tick(ph_window *w)
     if (SDL_GetTicks64() - first_tick > (paced_mode ? 11000U : 4000U)) {
         timed_out = true;
         quit();
+    }
+    if (probe_pending) {
+        Uint64 elapsed = SDL_GetTicks64() - confirmation_ack_at;
+        if (changing_mode && probe_stage == 0 && elapsed >= 20) {
+            double saved_x = phone_x;
+            phone_x += 6; /* a plausible but still moving cursor */
+            publish_frame();
+            phone_x = saved_x;
+            probe_stage = 1;
+        } else if ((changing_mode && elapsed >= 40) || (stale_mode && elapsed >= 180)) {
+            publish_frame();
+            probe_stage = 2;
+            probe_fresh_at = SDL_GetTicks64();
+            probe_pending = false;
+        }
     }
     if (filtered_mode && SDL_GetTicks64() - first_tick > 60) { quit(); return; }
     if (calibration_mode && mirroring && control_ready && initial_frame && !injected) {
@@ -388,6 +434,7 @@ ph_decoder *ph_decoder_start(void (*on_frame)(void *user), void *user)
 {
     frame_ready = on_frame;
     frame_user = user;
+    if (stream_mode) stream_thread = SDL_CreateThread(stream_frames, "test-video-60fps", NULL);
     return &decoder;
 }
 void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len)
@@ -417,13 +464,20 @@ void ph_decoder_get_stats(ph_decoder *d, ph_decoder_stats *stats)
     memset(stats, 0, sizeof *stats);
 }
 
-void ph_decoder_stop(ph_decoder *d) { (void)d; av_frame_free(&latest); }
+void ph_decoder_stop(ph_decoder *d)
+{
+    (void)d;
+    atomic_store(&stream_stop, true);
+    if (stream_thread) SDL_WaitThread(stream_thread, NULL);
+    av_frame_free(&latest);
+}
 
 ph_receiver *ph_receiver_start(const ph_receiver_options *opt, const ph_receiver_callbacks *cb)
 {
     (void)opt;
     receiver_cb = *cb;
     if (filtered_mode) SDL_SetEventFilter(filter_app_events, NULL);
+    if (filter_one_frame) SDL_SetEventFilter(filter_first_frame, NULL);
     cb->connected(cb->user, "Idle-frame phone", "test");
     publish_frame();
     return &receiver;
@@ -502,6 +556,15 @@ bool ph_hid_link_mouse(ph_hid_link *l, const ph_hid_mouse *m)
 {
     (void)l;
     if (paced_mode) return enqueue((paced_report){.kind = PACED_MOUSE, .mouse = *m});
+    if (feedback_waiting && (m->dx || m->dy || m->buttons)) {
+        Uint64 now = SDL_GetTicks64(), elapsed = now - confirmation_ack_at;
+        if (confirmation_count < sizeof confirmation_waits / sizeof confirmation_waits[0])
+            confirmation_waits[confirmation_count++] = elapsed;
+        else feedback_bad = true;
+        if (elapsed < 32 || probe_stage != 2 || now - probe_fresh_at < 32)
+            feedback_bad = true;
+        feedback_waiting = false;
+    }
     if (setup_visible && (m->buttons || m->dx || m->dy || m->wheel || m->pan))
         modal_leaks++;
     if (m->dx || m->dy) {
@@ -537,10 +600,18 @@ bool ph_hid_link_sync(ph_hid_link *l, uint32_t id)
         /* Deliver this decoded image before the app receives the ACK event.
          * Deliberately never publish a frame after that ACK for this movement. */
         ack_emitted = false;
-        publish_frame();
+        bool retain_stale = stale_mode && movement_frames != 0;
+        if (!retain_stale) publish_frame();
         movement_frames++;
         moved_since_frame = false;
         movement_acks++;
+        if (confirmation_mode || changing_mode || stale_mode) {
+            feedback_waiting = true;
+            confirmation_ack_at = SDL_GetTicks64();
+            probe_fresh_at = confirmation_ack_at;
+            probe_pending = changing_mode || retain_stale;
+            probe_stage = probe_pending ? 0 : 2;
+        }
     }
     char status[32];
     snprintf(status, sizeof status, "sync %u", id);
@@ -621,10 +692,16 @@ int main(int argc, char **argv)
         || !strcmp(argv[1], "--modal-drag") || !strcmp(argv[1], "--calibration-focus")
         || !strcmp(argv[1], "--calibration-escape"));
     filtered_mode = argc == 2 && !strcmp(argv[1], "--filtered-events");
+    confirmation_mode = argc == 2 && !strcmp(argv[1], "--confirmation-latency");
+    changing_mode = argc == 2 && !strcmp(argv[1], "--changing-confirmation");
+    stale_mode = argc == 2 && !strcmp(argv[1], "--stale-confirmation");
+    stream_mode = argc == 2 && (!strcmp(argv[1], "--stream-confirmation") || !strcmp(argv[1], "--filtered-frame"));
+    filter_one_frame = argc == 2 && !strcmp(argv[1], "--filtered-frame");
     render_stall_mode = argc == 2 && !strcmp(argv[1], "--render-stall");
     calibration_mode = argc == 2 && (!strcmp(argv[1], "--calibration-focus")
         || !strcmp(argv[1], "--calibration-escape"));
-    if (argc == 2 && !drag_mode && !modal_mode && !paced_mode && !filtered_mode) return 1;
+    if (argc == 2 && !drag_mode && !modal_mode && !paced_mode && !filtered_mode
+        && !confirmation_mode && !changing_mode && !stale_mode && !stream_mode) return 1;
     freeze_mode = argc == 2 && !strcmp(argv[1], "--freeze-drag");
     cancel_mode = argc == 2 && (!strcmp(argv[1], "--disconnect-drag")
         || !strcmp(argv[1], "--focus-drag") || !strcmp(argv[1], "--close-drag")
@@ -693,15 +770,35 @@ int main(int argc, char **argv)
                 delivered_after_cancel, fault_stage, start_error, end_error);
         return passed ? 0 : 1;
     }
+    if (confirmation_mode || changing_mode || stale_mode) {
+        Uint64 minimum = UINT64_MAX, maximum = 0, sum = 0;
+        for (unsigned int i = 0; i < confirmation_count; i++) {
+            Uint64 wait = confirmation_waits[i];
+            if (wait < minimum) minimum = wait;
+            if (wait > maximum) maximum = wait;
+            sum += wait;
+        }
+        double mean = confirmation_count ? (double)sum / confirmation_count : 0;
+        bool passed = confirmation_count >= 2 && !feedback_bad && minimum >= 32;
+        /* The corner detector is cheap; a later full changed-frame search can
+         * cost more under ASAN. Isolate the minimum ACK/stability interval. */
+        if (confirmation_mode) passed &= minimum <= 56;
+        fprintf(passed ? stdout : stderr,
+                "confirmation %s: pass=%d samples=%u ACK_to_progress_ms=%llu..%llu mean=%.1f safety_violation=%d\n",
+                argv[1], passed, confirmation_count, (unsigned long long)minimum,
+                (unsigned long long)maximum, mean, feedback_bad);
+        if (!passed) return 1;
+    }
     double error = hypot(pressed_x - (TARGET_X + .5), pressed_y - (TARGET_Y + .5));
     double end_x = drag_mode ? DRAG_END_X + .5 : TARGET_X + .5;
     double end_y = drag_mode ? DRAG_END_Y + .5 : TARGET_Y + .5;
     double release_error = hypot(released_x - end_x, released_y - end_y);
+    if (stream_mode && (!stream_thread || (filter_one_frame && filtered_frames != 1))) return 1;
     if (result || timed_out || frame_failure || !injected || presses != 1 || releases != 1
         || held_buttons || anchored_with_button || error > 5 || release_error > 5
         || !release_synced || (drag_mode && !dragged_reports)
         || movement_frames < (drag_mode ? 3U : 2U)
-        || movement_frames != movement_acks || frames_after_last_ack
+        || movement_frames != movement_acks || ((!changing_mode && !stale_mode) && frames_after_last_ack)
         || (modal_mode && (!modal_checked || modal_leaks || !resumed_keys || modal_stage != 3))) {
         fprintf(stderr, "idle-frame pointer failed: rc=%d timeout=%d frame_error=%d injected=%d "
                         "presses=%u releases=%u held=%u error=%.2f release_error=%.2f "
