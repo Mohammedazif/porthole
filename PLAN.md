@@ -15,7 +15,9 @@ confirmed Windows host mirroring with the versioned preview. The item 4 WinRT Bl
 helper and native process connection are implemented. A follow-up platform check established
 that the first reported Bluetooth/pointer checks used the Linux VM. Actual Windows logs
 then confirmed video and full HID creation, but advertising aborted during startup.
-The startup fix is ready; Windows advertising, iPhone pairing and input need a retest.
+The one-file preview now launches on the Windows host, but controls remain waiting after
+pairing. A subscription-order fix now observes inactive raw sessions and refreshes on
+activation; Windows advertising, report subscriptions and input still need validation.
 Windows CI is configured to build/test the full mirror and retain a minimal
 smoke build; this workstream did not trigger a remote CI run.
 The detailed M5 measurements later in this file include an archived experimental controller.
@@ -54,7 +56,7 @@ with Grok.
 | 1 | Cancellation retains helper ACK fences; pointer batches are capped at 24 reports; missing ACKs restart the helper without blocking rendering. F2 guides preparation, pairing, mirroring and transactional three-target calibration. Rapid-cancel, modal-input and reconnect tests pass; all three live calibration targets confirmed and saved on the final build. |
 | 2 | F3 and `--diagnostics` report local FPS, receive/decode/present, accepted input handoff, helper dispatch ACK and queue counters. Decoder generations prevent stale frames after reconnect. The actual Bluetooth radio interval remains unknown without a privileged trace. |
 | 3 | Native Windows DNS-SD replaces Bonjour, preserves protocol identity/TXT records, and builds the complete SDL/FFmpeg mirror. All 85 UCRT cross-build targets compile with warnings as errors. Portable runtime/source packaging and full MSYS2 CI are in place; the user confirmed host mirroring with preview c18f7ac. |
-| 4 | Native WinRT HID-over-GATT helper, Windows process/pipe transport, single-peer subscription gates, existing input protocol and guided setup integration. Actual host logs confirm HID creation; initial advertising aborted. The startup-sequence fix passes 11 portable checks and awaits a Windows retest, pairing and input validation. |
+| 4 | Native WinRT HID-over-GATT helper, Windows process/pipe transport, single-peer subscription gates, existing input protocol and guided setup integration. Actual host logs confirm HID creation; the portable app launches but controls remain waiting. Advertising-startup and delayed-session fixes pass 12 portable checks; actual Windows subscriptions and input remain pending. |
 
 1. **Linux controls — baseline delivered:** bounded pointer recovery, long-list edge checks,
    drag/release regressions and guided AssistiveTouch, pairing and calibration setup.
@@ -145,7 +147,25 @@ closure, safe paths, bundled assembly/configuration contents and the final execu
 RCDATA ZIP. Seven negative cases reject partial or damaged helpers and missing native
 dependencies. Native Wine tests cover extraction/app startup success, extractor failure,
 missing helper and app startup failure, with actual execution markers and both log streams.
-Real system PowerShell extraction and iPhone Bluetooth still require the Windows retry.
+The user subsequently ran the portable file on Windows and reached guided setup, confirming
+real system PowerShell extraction and app launch. Pairing the PC name still left controls
+waiting; that alone does not establish active HID report subscriptions.
+
+The follow-up subscription fix observes every raw GATT session before filtering for
+`Active`. Previously, a CCCD arriving before its session activated lost its only status
+observer, and later activation could not update readiness. Observers now survive logical
+peer resets, refresh subscriptions on activation, reject stale registration callbacks and
+inspect restored CCCDs when advertising starts. The same-peer, all-three-report and fresh
+pipe requirements remain. Diagnostics record raw/active counts and session transitions
+without peer addresses. Windows setup now distinguishes service creation from established
+advertising instead of showing both as waiting for the iPhone.
+
+Validation: 12/12 portable HID checks pass, including delayed activation without a second
+CCCD event, observer teardown and stale callbacks. All 91 native Windows cross-build targets
+pass with warnings as errors. The four native launcher execution cases pass again, including
+the adjacent-log assertion. The updated `Porthole-Windows-Portable-2.exe` writes its connection
+log beside itself (with a private TEMP fallback for read-only folders). Windows HID
+subscriptions, typing, pointer/calibration, wheel edges and reconnect remain unvalidated.
 
 ---
 

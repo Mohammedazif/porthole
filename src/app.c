@@ -159,7 +159,13 @@ static void handle_ble_status(app *a, const char *line)
 {
     const char *state = NULL;
 
-    if (!strcmp(line, "ready") || !strcmp(line, "advertising"))
+    if (!strcmp(line, "ready"))
+#ifdef _WIN32
+        state = "starting Bluetooth advertising";
+#else
+        state = "waiting for iPhone";
+#endif
+    else if (!strcmp(line, "advertising"))
         state = "waiting for iPhone";
     else if (!strcmp(line, "connected"))
         state = "connecting";

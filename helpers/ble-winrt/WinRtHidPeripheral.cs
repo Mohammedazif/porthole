@@ -22,7 +22,11 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
     private readonly Dictionary<ReportKind, GattLocalCharacteristic> reports = new();
     private readonly Dictionary<ReportKind, byte[]> lastReports = new();
     private readonly Dictionary<ReportKind, GattSubscribedClient> targets = new();
-    private readonly Dictionary<GattSession, PeerSession> observedSessions = new();
+    // Raw subscriptions can arrive before SessionStatus becomes Active. Keep
+    // their observations for the provider lifetime, independently of input readiness.
+    private readonly RawSessionRegistry<GattSession> rawSessions;
+    private readonly Dictionary<GattSession, PeerSession> sessionPeers = new();
+    private readonly Dictionary<GattSession, Windows.Foundation.TypedEventHandler<GattSession, GattSessionStatusChangedEventArgs>> sessionCallbacks = new();
     private readonly List<GattLocalCharacteristic> readable = new();
     private readonly List<GattLocalCharacteristic> writable = new();
     private readonly TaskCompletionSource<Exception> failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -39,6 +43,7 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         this.gate = gate;
         this.status = status;
         this.log = log;
+        rawSessions = new RawSessionRegistry<GattSession>(ObserveSession, ForgetSession);
         foreach (ReportKind kind in Enum.GetValues<ReportKind>())
             lastReports[kind] = new byte[HidDescriptor.GetReportLength(kind)];
     }
@@ -222,6 +227,15 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
                     advertisingReported = true;
                     status("advertising");
                 }
+                // A bonded client may already have restored CCCDs by the time
+                // advertising starts, without another explicit CCCD write.
+                try { ReconcileLocked("advertising started"); }
+                catch (Exception e)
+                {
+                    log("Cannot inspect initial HID subscriptions: " + e.Message);
+                    DropPeerLocked();
+                    failure.TrySetResult(new InvalidOperationException("Cannot inspect HID subscriptions after advertising started.", e));
+                }
                 started.TrySetResult();
             }
             else if (action == AdvertisingAction.Failed)
@@ -257,25 +271,62 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         {
             lock (stateLock)
             {
-                if (!disposed) ReconcileLocked();
+                if (!disposed)
+                {
+                    ReportKind kind = reports.FirstOrDefault(p => p.Value == sender).Key;
+                    ReconcileLocked($"CCCD {kind}");
+                }
             }
         }
         catch (Exception e) { log("Cannot inspect HID subscriptions: " + e.Message); FailConnection(); }
     }
 
-    private void ReconcileLocked()
+    private void ObserveSession(GattSession session, long ordinal)
+    {
+        Windows.Foundation.TypedEventHandler<GattSession, GattSessionStatusChangedEventArgs> callback =
+            (sender, args) => SessionChanged(sender, args, ordinal);
+        sessionCallbacks.Add(session, callback);
+        session.SessionStatusChanged += callback;
+        log($"Observing HID session s{ordinal}: state={session.SessionStatus}, ATT MTU={session.MaxPduSize}.");
+    }
+
+    private void ForgetSession(GattSession session, long ordinal)
+    {
+        if (sessionCallbacks.Remove(session, out var callback)) session.SessionStatusChanged -= callback;
+        sessionPeers.Remove(session);
+        log($"Stopped observing HID session s{ordinal}.");
+    }
+
+    private void ReconcileLocked(string reason = "refresh")
     {
         if (pipeLifetime.RestartRequired) return;
         long previousEpoch = gate.Epoch;
+        var rawClients = new Dictionary<ReportKind, List<GattSubscribedClient>>();
+        foreach (ReportKind kind in Enum.GetValues<ReportKind>())
+            rawClients[kind] = reports.TryGetValue(kind, out GattLocalCharacteristic? characteristic)
+                ? characteristic.SubscribedClients.ToList() : [];
+
+        // Register the raw sessions FIRST. Filtering here used to discard the
+        // only event source that could tell us when an initial session activates.
+        rawSessions.Synchronize(rawClients.Values.SelectMany(c => c).Select(c => c.Session));
+
         var clients = new Dictionary<ReportKind, List<GattSubscribedClient>>();
         var ids = new HashSet<string>(StringComparer.Ordinal);
-        foreach ((ReportKind kind, GattLocalCharacteristic characteristic) in reports)
+        var summaries = new List<string>();
+        var missing = new List<string>();
+        foreach ((ReportKind kind, List<GattSubscribedClient> raw) in rawClients)
         {
-            var current = characteristic.SubscribedClients
-                .Where(c => c.Session.SessionStatus == GattSessionStatus.Active).ToList();
+            var current = raw.Where(c => c.Session.SessionStatus == GattSessionStatus.Active).ToList();
             clients[kind] = current;
             foreach (GattSubscribedClient client in current) ids.Add(client.Session.DeviceId.Id);
+            if (current.Count != 1 || suspended) missing.Add(kind.ToString().ToLowerInvariant());
+            string sessions = string.Join(",", raw.Select(c =>
+                rawSessions.TryGetOrdinal(c.Session, out long ordinal)
+                    ? $"s{ordinal}:{c.Session.SessionStatus}"
+                    : "unobserved"));
+            summaries.Add($"{kind.ToString().ToLowerInvariant()} raw={raw.Count} active={current.Count} sessions=[{sessions}]");
         }
+        log($"HID subscription snapshot ({reason}): {string.Join("; ", summaries)}; active_peers={ids.Count}; missing={(missing.Count == 0 ? "none" : string.Join(",", missing))}; suspended={suspended}.");
         if (ids.Count != 1)
         {
             if (ids.Count > 1) log("Multiple Bluetooth peers subscribed; input paused until exactly one phone remains.");
@@ -292,6 +343,7 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         }
         if (activePeer is not PeerSession peer) return;
         targets.Clear();
+        sessionPeers.Clear();
         foreach ((ReportKind kind, List<GattSubscribedClient> subscribed) in clients)
         {
             // Duplicate or partial subscription snapshots must never broadcast reports.
@@ -300,13 +352,7 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
             {
                 GattSubscribedClient client = subscribed[0];
                 targets[kind] = client;
-                GattSession session = client.Session;
-                if (!observedSessions.ContainsKey(session))
-                {
-                    observedSessions.Add(session, peer);
-                    session.SessionStatusChanged += SessionChanged;
-                    log($"{kind} subscription active; maximum notification {client.MaxNotificationSize} bytes, ATT MTU {session.MaxPduSize}.");
-                }
+                sessionPeers[client.Session] = peer;
             }
             gate.SetSubscribed(peer, kind, enabled);
         }
@@ -325,21 +371,39 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         }
     }
 
-    private void SessionChanged(GattSession sender, GattSessionStatusChangedEventArgs args)
+    private void SessionChanged(GattSession sender, GattSessionStatusChangedEventArgs args, long ordinal)
     {
         try
         {
             lock (stateLock)
             {
-                if (disposed || args.Status != GattSessionStatus.Closed || sender.SessionStatus != GattSessionStatus.Closed) return;
-                if (observedSessions.TryGetValue(sender, out PeerSession peer) && peer == activePeer)
+                // An already-queued callback from a removed registration must not
+                // affect the same COM session if it is observed again later.
+                if (disposed || !rawSessions.IsCurrent(sender, ordinal)) return;
+                bool present = reports.Values.Any(report => report.SubscribedClients.Any(c => c.Session == sender));
+                if (!present)
+                {
+                    ReconcileLocked($"stale session s{ordinal}");
+                    return;
+                }
+                GattSessionStatus current = sender.SessionStatus;
+                log($"HID session s{ordinal} transition: reported={args.Status}, current={current}.");
+                if (args.Status == GattSessionStatus.Closed && current == GattSessionStatus.Closed &&
+                    sessionPeers.TryGetValue(sender, out PeerSession peer) && peer == activePeer)
                 {
                     DropPeerLocked();
-                    log("Bluetooth session closed; queued input and cached reports cleared.");
+                    log($"HID session s{ordinal} closed; queued input and cached reports cleared.");
                 }
+                // In particular, Active must refresh the CCCDs that may have been
+                // received before the session reached its active state.
+                ReconcileLocked($"session s{ordinal} {args.Status}");
             }
         }
-        catch (Exception e) { log("HID session callback: " + e.Message); }
+        catch (Exception e)
+        {
+            log("HID session callback: " + e.Message);
+            FailConnection();
+        }
     }
 
     private void ClearValuesLocked()
@@ -354,8 +418,7 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         activePeer = null;
         targets.Clear();
         ClearValuesLocked();
-        foreach (GattSession session in observedSessions.Keys) session.SessionStatusChanged -= SessionChanged;
-        observedSessions.Clear();
+        sessionPeers.Clear();
         suspended = false;
         CheckPipeLifetimeLocked();
     }
@@ -520,6 +583,7 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
             disposed = true;
             advertising.RequestStop();
             DropPeerLocked();
+            rawSessions.Dispose();
             if (provider is not null)
             {
                 provider.AdvertisementStatusChanged -= AdvertisementChanged;

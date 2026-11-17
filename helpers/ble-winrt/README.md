@@ -17,7 +17,12 @@ bonding; Device Information, GAP and GATT services are left to Windows.
 The HID service supplies keyboard/mouse/consumer input Reports, matching Report
 References, Report Map, HID Information, keyboard LED output, Report Protocol
 Mode, and HID Control Point. Windows creates each notification CCCD. Input
-starts only when one phone has subscribed to all three input Reports. Missing
+starts only when one phone has subscribed to all three input Reports and the
+corresponding Windows sessions are active. Raw subscriptions are observed before
+filtering for activity, so a session that activates after its CCCD event still
+refreshes readiness. A snapshot after advertising starts also picks up restored
+subscriptions. Diagnostics show per-report raw/active counts, session ordinals,
+missing subscriptions and suspend state without logging Bluetooth addresses. Missing
 subscriptions, mixed peers and closed sessions invalidate dispatch tokens;
 reports cannot be redirected to a newly connected phone. After the first fully
 ready connection loses readiness, the helper exits and Porthole starts a fresh

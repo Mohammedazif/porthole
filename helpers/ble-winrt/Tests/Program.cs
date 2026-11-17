@@ -270,6 +270,7 @@ internal static class Program
             ("descriptor matches C", Descriptor), ("split/complete/malformed framing", Framing),
             ("readiness, stale sessions and pipe lifetime", ReadinessAndPipeLifetime),
             ("advertising startup transitions", AdvertisingStartup),
+            ("raw session observation and late activation", RawSessionTests.Run),
             ("empty fence, priming and EOF releases", EmptyFenceAndEof), ("motion order and pacing", PacingAndOrder),
             ("independent keyboard lane", IndependentLanes), ("dispatch ACK and failure", AwaitDispatchAndFailure),
             ("queued epoch/client isolation", EpochIsolation), ("invalid input and bounded queues", BadInputAndOverflow),

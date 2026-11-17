@@ -57,6 +57,24 @@ static BOOL regular_file(const wchar_t *path)
     return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+/* Keep the connection log easy to find. Read-only launch locations retain the
+ * private TEMP log selected by create_base instead. Existing logs are appended. */
+static void prefer_adjacent_log(portable *p)
+{
+    wchar_t path[PATH_CAP];
+    DWORD length = GetModuleFileNameW(p->instance, path, PATH_CAP);
+    if (!length || length >= PATH_CAP - 5) return;
+    wchar_t *slash = wcsrchr(path, L'\\'), *dot = wcsrchr(path, L'.');
+    if (dot && (!slash || dot > slash)) *dot = L'\0';
+    wcscat(path, L".log");
+    HANDLE file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return;
+    CloseHandle(file);
+    wchar_t *copy = _wcsdup(path);
+    if (copy) { free(p->log); p->log = copy; }
+}
+
 static BOOL create_base(portable *p)
 {
     wchar_t tmp[PATH_CAP], suffix[96], guidstr[40];
@@ -81,6 +99,7 @@ static BOOL create_base(portable *p)
     p->extractlog = join(p->base, L"extractor.log");
     p->cache = join(p->base, L"dotnet-cache");
     if (!p->archive || !p->appdir || !p->log || !p->extractlog || !p->cache) return FALSE;
+    prefer_adjacent_log(p);
     return CreateDirectoryW(p->appdir, NULL) && CreateDirectoryW(p->cache, NULL);
 }
 

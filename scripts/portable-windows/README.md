@@ -28,7 +28,9 @@ inventory. Verification checks the embedded .NET manifest and decompressed assem
 the statically linked runtime, native dependency closure and safe Windows paths. It also
 inspects the final executable's embedded ZIP independently.
 
-On Windows, run the resulting portable executable directly. Temporary extraction files
-and `portable.log`, `extractor.log` and `dotnet-host.log` remain in the launch directory
-under TEMP for diagnosis. The file does not install Porthole or change Bluetooth pairing.
+On Windows, run the resulting portable executable directly. The connection log is written
+beside the portable executable with the same name and `.log` extension. A read-only launch
+folder falls back to `portable.log` under the private TEMP directory. Extraction files,
+`extractor.log` and `dotnet-host.log` remain under TEMP for diagnosis. The file does not
+install Porthole or change Bluetooth pairing.
 Actual HID advertising and iPhone input still need a live host check.

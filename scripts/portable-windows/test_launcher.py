@@ -67,6 +67,7 @@ def main():
             assert text.startswith("OK\n"), text
             assert marker.read_text() == "NATIVE_APP_RAN\n"
             winlog = text.splitlines()[1]
+            assert localpath(winlog, env) == launcher.with_suffix(".log"), winlog
             logged = localpath(winlog, env).read_text()
             assert "FAKE APP STDOUT" in logged and "FAKE APP STDERR" in logged
         else:
