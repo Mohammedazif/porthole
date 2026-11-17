@@ -22,6 +22,7 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
     private readonly Dictionary<ReportKind, GattLocalCharacteristic> reports = new();
     private readonly Dictionary<ReportKind, byte[]> lastReports = new();
     private readonly Dictionary<ReportKind, GattSubscribedClient> targets = new();
+    private readonly Dictionary<ReportKind, CapturedTarget> selectedTargets = new();
     // Raw subscriptions can arrive before SessionStatus becomes Active. Keep
     // their observations for the provider lifetime, independently of input readiness.
     private readonly RawSessionRegistry<GattSession> rawSessions;
@@ -31,6 +32,12 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
     private readonly List<GattLocalCharacteristic> writable = new();
     private readonly TaskCompletionSource<Exception> failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private sealed record CapturedTarget(PeerSession Peer, GattLocalCharacteristic Characteristic,
+        GattSubscribedClient Client, GattSession Session, long Ordinal);
+    private bool closing, retiring, everReady;
+    private readonly HashSet<(GattSession Session, long Ordinal)> closedObservations = new();
+    private Task? retirement;
+    private Task? disposal;
     private GattServiceProvider? provider;
     private PeerSession? activePeer;
     private byte[] keyboardLeds = [0];
@@ -293,12 +300,12 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
     {
         if (sessionCallbacks.Remove(session, out var callback)) session.SessionStatusChanged -= callback;
         sessionPeers.Remove(session);
+        closedObservations.Remove((session, ordinal));
         log($"Stopped observing HID session s{ordinal}.");
     }
 
     private void ReconcileLocked(string reason = "refresh")
     {
-        if (pipeLifetime.RestartRequired) return;
         long previousEpoch = gate.Epoch;
         var rawClients = new Dictionary<ReportKind, List<GattSubscribedClient>>();
         foreach (ReportKind kind in Enum.GetValues<ReportKind>())
@@ -308,6 +315,12 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         // Register the raw sessions FIRST. Filtering here used to discard the
         // only event source that could tell us when an initial session activates.
         rawSessions.Synchronize(rawClients.Values.SelectMany(c => c).Select(c => c.Session));
+        if (closing || retiring || pipeLifetime.RestartRequired) return;
+        if (everReady && activePeer is PeerSession ended && gate.CurrentPeer != ended)
+        {
+            DropPeerLocked(); // The runner ended; do not bind replacement targets during disposal.
+            return;
+        }
 
         var clients = new Dictionary<ReportKind, List<GattSubscribedClient>>();
         var ids = new HashSet<string>(StringComparer.Ordinal);
@@ -326,6 +339,16 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
             summaries.Add($"{kind.ToString().ToLowerInvariant()} raw={raw.Count} active={current.Count} sessions=[{sessions}]");
         }
         log($"HID subscription snapshot ({reason}): {string.Join("; ", summaries)}; active_peers={ids.Count}; missing={(missing.Count == 0 ? "none" : string.Join(",", missing))}; suspended={gate.HostSuspended}.");
+        if (gate.IsReady && selectedTargets.Any(entry =>
+            !rawSessions.IsCurrent(entry.Value.Session, entry.Value.Ordinal)
+            || closedObservations.Contains((entry.Value.Session, entry.Value.Ordinal))
+            || (clients[entry.Key].Count == 1 && clients[entry.Key][0].Session != entry.Value.Session)))
+        {
+            log("Ready HID target registration changed; retiring the original input generation.");
+            DropPeerLocked();
+            failure.TrySetResult(new InvalidOperationException("Bluetooth input registration changed; restarting with a fresh input pipe."));
+            return;
+        }
         if (ids.Count != 1)
         {
             if (ids.Count > 1) log("Multiple Bluetooth peers subscribed; input paused until exactly one phone remains.");
@@ -341,7 +364,10 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
             ClearValuesLocked();
         }
         if (activePeer is not PeerSession peer) return;
+        if (gate.IsReady && clients.Values.Any(subscribed => subscribed.Count != 1))
+            BeginRetirementLocked();
         targets.Clear();
+        selectedTargets.Clear();
         sessionPeers.Clear();
         foreach ((ReportKind kind, List<GattSubscribedClient> subscribed) in clients)
         {
@@ -350,8 +376,11 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
             if (enabled)
             {
                 GattSubscribedClient client = subscribed[0];
+                GattSession session = client.Session;
+                if (!rawSessions.TryGetOrdinal(session, out long ordinal)) continue;
                 targets[kind] = client;
-                sessionPeers[client.Session] = peer;
+                selectedTargets[kind] = new CapturedTarget(peer, reports[kind], client, session, ordinal);
+                sessionPeers[session] = peer;
             }
         }
         // Publish readiness only after every target is validated. Updating one
@@ -367,6 +396,7 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
 
     private void CheckPipeLifetimeLocked()
     {
+        everReady |= gate.IsReady;
         if (!disposed && pipeLifetime.Observe(gate.IsReady))
         {
             targets.Clear();
@@ -393,11 +423,14 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
                 }
                 GattSessionStatus current = sender.SessionStatus;
                 log($"HID session s{ordinal} transition: reported={args.Status}, current={current}.");
-                if (args.Status == GattSessionStatus.Closed && current == GattSessionStatus.Closed &&
-                    sessionPeers.TryGetValue(sender, out PeerSession peer) && peer == activePeer)
+                if (args.Status == GattSessionStatus.Closed && current == GattSessionStatus.Closed)
                 {
-                    DropPeerLocked();
-                    log($"HID session s{ordinal} closed; queued input and cached reports cleared.");
+                    closedObservations.Add((sender, ordinal));
+                    if (sessionPeers.TryGetValue(sender, out PeerSession peer) && peer == activePeer)
+                    {
+                        DropPeerLocked();
+                        log($"HID session s{ordinal} closed; queued input and cached reports cleared.");
+                    }
                 }
                 // In particular, Active must refresh the CCCDs that may have been
                 // received before the session reached its active state.
@@ -419,9 +452,11 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
 
     private void DropPeerLocked()
     {
+        BeginRetirementLocked();
         if (activePeer is PeerSession peer) gate.Disconnect(peer);
         activePeer = null;
         targets.Clear();
+        selectedTargets.Clear();
         ClearValuesLocked();
         sessionPeers.Clear();
         CheckPipeLifetimeLocked();
@@ -434,14 +469,12 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
 
     public async ValueTask<bool> NotifyAsync(DispatchToken token, ReportKind kind, ReadOnlyMemory<byte> payload, CancellationToken ct)
     {
-        GattLocalCharacteristic characteristic;
-        GattSubscribedClient client;
+        CapturedTarget target;
         lock (stateLock)
         {
-            if (disposed || pipeLifetime.RestartRequired || !gate.IsCurrent(token) || activePeer != token.Peer ||
-                !reports.TryGetValue(kind, out characteristic!) || !targets.TryGetValue(kind, out client!) ||
-                client.Session.SessionStatus != GattSessionStatus.Active ||
-                client.MaxNotificationSize < payload.Length)
+            if (disposed || closing || retiring || pipeLifetime.RestartRequired || !gate.IsCurrent(token) || activePeer != token.Peer ||
+                !selectedTargets.TryGetValue(kind, out target!) || target.Peer != token.Peer ||
+                !IsCapturedTargetRegisteredLocked(target) || target.Client.MaxNotificationSize < payload.Length)
                 return false;
         }
         ct.ThrowIfCancellationRequested();
@@ -453,12 +486,13 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
             Task<GattClientNotificationResult> notification;
             lock (stateLock)
             {
-                if (disposed || pipeLifetime.RestartRequired || !gate.IsCurrent(token) || activePeer != token.Peer)
+                if (disposed || closing || retiring || pipeLifetime.RestartRequired || !gate.IsCurrent(token)
+                    || activePeer != token.Peer || !IsCapturedTargetRegisteredLocked(target))
                     return false;
                 ct.ThrowIfCancellationRequested();
                 // Serialize the native operation's start with session invalidation,
                 // but release the lock before awaiting the OS completion.
-                notification = characteristic.NotifyValueAsync(Buffer(payload.ToArray()), client).AsTask(ct);
+                notification = target.Characteristic.NotifyValueAsync(Buffer(payload.ToArray()), target.Client).AsTask(ct);
             }
             result = await notification;
         }
@@ -474,7 +508,8 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         }
         lock (stateLock)
         {
-            if (pipeLifetime.RestartRequired || !gate.IsCurrent(token) || activePeer != token.Peer) return false;
+            if (closing || retiring || pipeLifetime.RestartRequired || !gate.IsCurrent(token)
+                || activePeer != token.Peer || !IsCapturedTargetRegisteredLocked(target)) return false;
             if (result.Status != GattCommunicationStatus.Success)
             {
                 log($"{kind} notification failed: {result.Status}; input session reset.");
@@ -581,14 +616,92 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         return writer.DetachBuffer();
     }
 
+    private void BeginRetirementLocked()
+    {
+        if (retiring || !everReady || activePeer is not PeerSession peer || targets.Count == 0) return;
+        var captured = new List<RetiringReport<CapturedTarget>>();
+        foreach ((ReportKind kind, CapturedTarget target) in selectedTargets)
+            captured.Add(new RetiringReport<CapturedTarget>(kind, target));
+        // Serialize this stop with normal NotifyValueAsync starts, then enqueue
+        // zeros after all earlier operations. Microsoft's sample relies on
+        // per-client FIFO; the API reference does not formally guarantee delivery
+        // ordering, so portable tests cannot prove the remote phone's final state.
+        retiring = true;
+        retirement = RetireAsync(captured);
+    }
+
+    private bool IsCapturedTargetRegisteredLocked(CapturedTarget target)
+        => rawSessions.IsCurrent(target.Session, target.Ordinal)
+            && !closedObservations.Contains((target.Session, target.Ordinal))
+            && target.Session.SessionStatus == GattSessionStatus.Active
+            && target.Client.Session == target.Session
+            && target.Client.Session.DeviceId.Id == target.Peer.ClientId
+            && RetiringPeerCleanup.IsStillRegistered(
+                new RetiringPeerRegistration<GattSession>(target.Session, target.Ordinal, target.Peer.ClientId, true),
+                target.Characteristic.SubscribedClients.Select(client =>
+                {
+                    GattSession session = client.Session;
+                    rawSessions.TryGetOrdinal(session, out long ordinal);
+                    return new RetiringPeerRegistration<GattSession>(session, ordinal,
+                        session.DeviceId.Id, session.SessionStatus == GattSessionStatus.Active);
+                }));
+
+    private Task<bool>? QueueRetiringNeutral(ReportKind kind, CapturedTarget target,
+        ReadOnlyMemory<byte> value, CancellationToken _)
+    {
+        lock (stateLock)
+        {
+            if (disposed || !retiring || value.Length != HidDescriptor.GetReportLength(kind)
+                || value.Span.IndexOfAnyExcept((byte)0) >= 0 || !IsCapturedTargetRegisteredLocked(target))
+                return null;
+            // This is exclusively a neutral payload for the captured client.
+            // It deliberately cannot obtain another peer from the current map.
+            // The coordinator bounds waiting. Do not retract an already queued
+            // release or synchronously cancel a WinRT operation on that deadline.
+            return CompleteRetiringNeutralAsync(target.Characteristic.NotifyValueAsync(
+                Buffer(value.ToArray()), target.Client).AsTask());
+        }
+    }
+
+    private static async Task<bool> CompleteRetiringNeutralAsync(Task<GattClientNotificationResult> notification)
+    {
+        GattClientNotificationResult result = await notification.ConfigureAwait(false);
+        return result.Status == GattCommunicationStatus.Success;
+    }
+
+    private async Task RetireAsync(IReadOnlyList<RetiringReport<CapturedTarget>> captured)
+    {
+        NeutralCleanupResult result = await RetiringPeerCleanup.RunAsync(captured,
+            QueueRetiringNeutral, TimeSpan.FromMilliseconds(200)).ConfigureAwait(false);
+        log($"Retiring peer neutral cleanup: queued={result.Queued}, succeeded={result.Succeeded}, skipped={result.Skipped}, timed_out={result.TimedOut}.");
+    }
+
     public ValueTask DisposeAsync()
     {
         lock (stateLock)
         {
-            if (disposed) return ValueTask.CompletedTask;
-            disposed = true;
+            closing = true; // Block readiness/normal sends before any asynchronous cleanup.
+            disposal ??= DisposeCoreAsync();
+            return new ValueTask(disposal);
+        }
+    }
+
+    private async Task DisposeCoreAsync()
+    {
+        Task cleanup;
+        lock (stateLock)
+        {
+            if (disposed) return;
             advertising.RequestStop();
             DropPeerLocked();
+            cleanup = retirement ?? Task.CompletedTask;
+        }
+        // The cleanup deadline is independent of stdin/app cancellation. Keep
+        // raw session observers alive until then so stale generations stay stale.
+        await cleanup.ConfigureAwait(false);
+        lock (stateLock)
+        {
+            disposed = true;
             rawSessions.Dispose();
             if (provider is not null)
             {
@@ -617,6 +730,5 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
             writable.Clear();
             provider = null;
         }
-        return ValueTask.CompletedTask;
     }
 }

@@ -28,6 +28,12 @@ reports cannot be redirected to a newly connected phone. After the first fully
 ready connection loses readiness, the helper exits and Porthole starts a fresh
 process and input pipe. This prevents unread old pipe bytes being assigned to a
 reconnected phone; the existing wire format does not carry generation IDs.
+Before retiring a ready connection, the helper captures the original report targets
+and their session-registration generations. It stops normal input, queues only neutral
+reports to those same still-active registrations, and waits up to 200 ms before
+unregistering. This cleanup remains available after logical readiness is revoked; it
+cannot retarget releases to a replacement phone. Actual radio delivery still needs a
+Windows/iPhone test. The helper never removes the Windows bond.
 HID Control Point Suspend/Exit Suspend records the host's power mode separately.
 It preserves active subscriptions, the current dispatch epoch, cached held reports
 and the input pipe. This powered desktop continues reporting input to the same active

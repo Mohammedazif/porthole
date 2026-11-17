@@ -11,5 +11,6 @@
     <Compile Include="../PipeSessionLifetime.cs" Link="PipeSessionLifetime.cs" />
     <Compile Include="../AdvertisingStartupState.cs" Link="AdvertisingStartupState.cs" />
     <Compile Include="../RawSessionRegistry.cs" Link="RawSessionRegistry.cs" />
+    <Compile Include="../RetiringPeerCleanup.cs" Link="RetiringPeerCleanup.cs" />
   </ItemGroup>
 </Project>

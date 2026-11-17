@@ -267,6 +267,14 @@ internal static class Program
     {
         (string Name, Func<Task> Run)[] tests =
         [
+            ("concurrent snapshot and power callbacks", ConcurrencyTests.AtomicCallbackStorm),
+            ("physical held-state cleanup on EOF/cancellation", ConcurrencyTests.StatefulEofAndCancellation),
+            ("physical held-state cleanup on backpressure and real-time drain", ConcurrencyTests.StatefulBackpressureAndDrain),
+            ("serialized native callback and advertising races", ConcurrencyTests.SerializedCallbackRaces),
+            ("native loss releases the captured physical peer", ConcurrencyTests.NativeFailureMustReleasePhysicalPeer),
+            ("retiring peer cleanup generations and bounded completion", RetiringCleanupTests.Run),
+            ("cached target generation survives raw COM object replacement", ConcurrencyTests.CachedGenerationCannotBleed),
+            ("same-bond idle and restored helper lifetimes", ConcurrencyTests.SameBondIdleAndRestoredLifetimes),
             ("descriptor matches C", Descriptor), ("split/complete/malformed framing", Framing),
             ("readiness, stale sessions and pipe lifetime", ReadinessAndPipeLifetime),
             ("atomic subscription snapshots", SessionSnapshotTests.Run),

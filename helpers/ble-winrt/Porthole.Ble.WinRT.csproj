@@ -25,6 +25,7 @@
     <Compile Include="PipeSessionLifetime.cs" />
     <Compile Include="AdvertisingStartupState.cs" />
     <Compile Include="RawSessionRegistry.cs" />
+    <Compile Include="RetiringPeerCleanup.cs" />
     <Compile Include="WinRtHidPeripheral.cs" />
     <ProjectReference Include="Core/Porthole.Ble.Core.csproj" AdditionalProperties="DebugType=embedded" />
   </ItemGroup>
