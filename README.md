@@ -13,8 +13,11 @@ Free and open source (GPL-3.0). Nothing to install on the iPhone: it uses built-
 > Audio playback through the PC is implemented and verified on the live iPhone.
 > A full Windows Wi-Fi mirror now builds with native discovery and portable dependencies.
 > The user confirmed mirroring with the Windows preview on the host. Windows Bluetooth
-> control now has a native WinRT helper; its iPhone pairing/input check is pending on
-> the Windows host. USB capture remains a separate roadmap item.
+> control now pairs, subscribes and acknowledges reports through a native WinRT helper.
+> Pointer alignment, delayed clicks/drags and release after failure remain under investigation;
+> those reports are not a complete Windows usability pass. Local validation includes paced
+> input, stale/delayed ACKs, frozen video, held-input teardown and sanitizer checks.
+> USB capture remains a separate roadmap item.
 > See [PLAN.md](PLAN.md) for the full plan, feature list and roadmap.
 >
 > | Spike | Question | Result |
@@ -176,7 +179,8 @@ For a one-file preview, [build the portable launcher](scripts/portable-windows/R
 from that bundle. Users run one executable, which prepares its complete files under
 Windows TEMP and launches Porthole. The Bluetooth helper also embeds its own .NET runtime;
 copying it cannot omit separate runtime DLLs. This portable file installs no drivers or
-system services. Live Windows advertising/input validation remains pending.
+system services. Windows advertising and report subscriptions have been confirmed;
+live input accuracy, responsiveness and failure recovery still need validation.
 
 If the Windows firewall blocks discovery or mirroring, the bundle includes a reviewed
 `windows-firewall.ps1` helper for the mirror executable and fixed ports on Private networks.

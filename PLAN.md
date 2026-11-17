@@ -231,6 +231,83 @@ CTest cases, including real app/helper recovery when ACKs are genuinely absent. 
 Windows cross-build targets pass with warnings treated as errors. Transcripts are
 `build/live/ack-fix-{linux-build,linux-tests,windows-build}.log`.
 
+### Local validation consolidation — 2026-11-17
+
+After the user reported alignment error, lag, interrupted pointer motion, delayed
+clicks/drags and a phone that still felt stuck after disconnecting, work moved to local
+failure testing. No new Windows preview is produced in this pass. Grok's items 5–7
+remain outside the workstream.
+
+The app fixture now physically applies queued reports at 17 ms intervals, with delayed
+video, stale ACKs and queued cancellation. Real subprocess tests distinguish a healthy
+ACK-producing helper without fresh video from a genuinely missing ACK. Additional
+cases cover held drags during mirroring disconnect, focus loss, close, F2, frozen video,
+calibration cancellation and a 3.2-second renderer stall. Negative controls reproduce the
+old false restart and filtered-event leaks. The full expanded Linux suite passes 37/37
+with address/undefined sanitizers and leak detection; the added stale-scale microcase
+also passes in the sanitized pointer suite.
+
+This exposed two SDL event-payload leaks: filtered events returned zero from
+`SDL_PushEvent`, and late helper exit events were left queued after the app loop stopped.
+The app now frees rejected payloads and discards its remaining owned events after all
+producers stop. Sanitizer failures in the original reconnect tests disappear with this
+cleanup.
+
+Seeded controller stress includes 320 actual held presses, 645 rejected false cursor
+circles and 254 missing-ACK recoveries. Dynamic-content tests reproduce a premature
+wheel stop when the scroll thumb shrinks while its centre continues in the requested
+direction. A narrow fresh-frame heuristic rebases that possible growth/track resize;
+existing toolbar compression, elastic-edge stops, one-unit probes and pinned-position
+confirmation remain covered.
+
+Cursor profiling measures 53.643 ms median for a 300-pixel search radius before the
+change and 9.263 ms after precomputing sampling offsets once per search. All 320
+before/after comparisons across 160 seeded scenes are identical, and existing cursor
+recognition checks pass sanitizers. These are local CPU measurements, not phone latency.
+
+Paced tests expose remaining controller latency: roughly 1.08 seconds for a simulated
+cold click, 1.39 seconds for a cold drag and up to 2.87 seconds for a tracked release
+across 11 confirmation plans with a perturbed acceleration curve. Faster fixed correction
+fractions improve those examples but regress 96/163 previously successful cases in an
+864-case small-residual/stale-scale matrix. Both changes were rejected; a representative
+4.1-pixel residual is now a durable regression. The current matrix still has 40 extreme
+stale-scale convergence failures, so passing safety checks is not a latency/accuracy pass.
+
+The adapter was attached to the VM and mirroring connected, but Bluetooth repeatedly
+connected without input-report subscriptions after switching hosts. No live input was
+sent. The receiver subsequently closed and advertising was confirmed inactive. Fresh
+phone/VM pairing is being repaired before controlled Calculator alignment/drag checks.
+Evidence, reproduction scripts, timings and sanitizer logs are under
+`build/live/local-validation/`.
+
+Stateful helper tests also reproduce a held-input defect: native logical peer loss
+invalidated the ordinary EOF release path while the physical phone could remain
+connected with held keyboard/mouse state. The helper now captures immutable original
+targets and registration generations, blocks normal sends, queues only neutral reports
+to those same still-active registrations and waits independently for up to 200 ms before
+unregistering. It does not remove bonds or deliver queued old input to a replacement
+generation. Equivalent client wrappers remain usable; closed/reused registrations and
+ready-target generation changes are rejected. Local tests cover the physical-state
+model and typed Windows API usage; they do not establish actual Windows radio delivery.
+The final helper suite passes 23/23 in five fresh processes, including same-bond idle,
+restored-subscription and long-uptime models. Neutral enqueue ordering follows an
+assumption used by Microsoft's [VirtualKeyboard sample](https://github.com/microsoft/BluetoothLEExplorer/blob/f0067f40ca3f2a0cd1475b1bd7b36b636d691ee1/BluetoothLEExplorer/BluetoothLEExplorer/Models/VirtualKeyboard.cs#L360-L365);
+the API reference does not formally guarantee phone delivery order.
+
+Live VM pairing exposed another Linux helper defect: a two-second startup cleanup
+disconnected fresh, untrusted private-address devices and could affect unrelated
+devices. BlueZ's [Device API](https://bluez.readthedocs.io/en/latest/device-api/) specifies
+that Disconnect on an untrusted LE device disables incoming connections until Connect.
+The blanket cleanup is removed. Device listeners and snapshots precede service
+publication, GATT reads/writes associate previously unidentified clients, and actual
+connection state is checked before late callbacks can rebind a peer. Recovery is scoped
+to the selected adapter/current phone and requires a live bonded-and-trusted connection
+after its discovery grace. Same-peer subscription ownership survives ordinary link loss;
+unrelated device changes do not disable the active phone. All 28 Linux helper tests pass,
+including 100 same-bond reconnect cycles, early CCCDs, late association and stale callbacks.
+No code removes a bond during routine recovery. The earlier blocked attempt required one
+adapter power cycle; the patched receiver is waiting for its first controlled live pairing.
+
 ---
 
 ## 1. Why this project
