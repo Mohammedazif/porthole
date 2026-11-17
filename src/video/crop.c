@@ -49,15 +49,28 @@ static ph_rect make_rect(int left, int right, int height)
     return r;
 }
 
-ph_rect ph_video_content_rect(const ph_yuv_planes *p, double portrait_aspect)
+static ph_rect content_rect(const ph_yuv_planes *p, double portrait_aspect, bool *ambiguous)
 {
     ph_rect full = {0, 0, p->width, p->height};
     int W = p->width, H = p->height;
+    *ambiguous = false;
 
     if (W <= H || H <= 0)
         return full; /* portrait-shaped frames are sent without bars */
 
-    if (portrait_aspect > 0.2 && portrait_aspect < 1.0) {
+    bool known_aspect = portrait_aspect > 0.2 && portrait_aspect < 1.0;
+    /* A native rotated phone frame already has the reciprocal portrait shape.
+     * Black video or a centred subtitle cannot turn it into a pillarboxed TV
+     * canvas. Allow two short-edge pixels for codec/chroma size rounding. */
+    if (known_aspect && fabs(W * portrait_aspect - H) <= 2.0)
+        return full;
+
+    if (columns_black(p, 0, W)) {
+        *ambiguous = true;
+        return full; /* black alone is no evidence of portrait side bars */
+    }
+
+    if (known_aspect) {
         int content_w = (int)lround(H * portrait_aspect);
         int bar = (W - content_w) / 2;
         if (bar < 8)
@@ -81,4 +94,31 @@ ph_rect ph_video_content_rect(const ph_yuv_planes *p, double portrait_aspect)
             return full; /* not phone-shaped */
         return make_rect(left, right + 1, H);
     }
+}
+
+ph_rect ph_video_content_rect(const ph_yuv_planes *p, double portrait_aspect)
+{
+    bool ambiguous;
+    return content_rect(p, portrait_aspect, &ambiguous);
+}
+
+ph_rect ph_video_content_rect_stable(const ph_yuv_planes *p, double portrait_aspect,
+                                    ph_video_crop_state *state)
+{
+    bool ambiguous;
+    ph_rect screen = content_rect(p, portrait_aspect, &ambiguous);
+    if (!state)
+        return screen;
+    if (ambiguous && state->frame_width == p->width && state->frame_height == p->height)
+        screen = state->screen;
+    state->screen = screen;
+    state->frame_width = p->width;
+    state->frame_height = p->height;
+    return screen;
+}
+
+void ph_video_crop_reset(ph_video_crop_state *state)
+{
+    if (state)
+        *state = (ph_video_crop_state){0};
 }

@@ -43,6 +43,12 @@ static ph_rect detect(const frame *f, double aspect)
     return ph_video_content_rect(&p, aspect);
 }
 
+static ph_rect detect_stable(const frame *f, double aspect, ph_video_crop_state *state)
+{
+    ph_yuv_planes p = {f->y, f->u, f->v, f->w, f->w / 2, f->w, f->h};
+    return ph_video_content_rect_stable(&p, aspect, state);
+}
+
 static void free_frame(frame *f)
 {
     free(f->y);
@@ -103,6 +109,96 @@ int main(void)
         frame f = make_frame(1920, 1080, 16);
         paint(&f, 200, 700, 200);
         CHECK(is_full(detect(&f, 0), &f));
+        free_frame(&f);
+    }
+
+    /* Reproduce the live 1920x888 landscape stream. Its reciprocal phone shape
+     * proves orientation even when black or containing only centred text. */
+    {
+        frame f = make_frame(1920, 888, 16);
+        const double aspects[] = {0.463, 500.0 / 1080};
+        for (size_t i = 0; i < sizeof aspects / sizeof aspects[0]; i++) {
+            CHECK(is_full(detect(&f, aspects[i]), &f));
+            paint(&f, 910, 1010, 220); /* bright subtitle/overlay in the centre */
+            CHECK(is_full(detect(&f, aspects[i]), &f));
+            paint(&f, 0, f.w, 100);
+            CHECK(is_full(detect(&f, aspects[i]), &f));
+            paint(&f, 0, f.w, 16);
+        }
+        free_frame(&f);
+    }
+    /* A black TV canvas cannot establish portrait bars from a remembered
+     * aspect alone. Sparse bright pixels (including the pointer) are ambiguous. */
+    {
+        frame f = make_frame(1920, 1080, 16);
+        CHECK(is_full(detect(&f, .463), &f));
+        CHECK(is_full(detect(&f, 0), &f));
+        for (int y = 500; y < 520; y++)
+            memset(f.y + (size_t)y * f.w + 950, 220, 20);
+        CHECK(is_full(detect(&f, .463), &f));
+        CHECK(is_full(detect(&f, 0), &f));
+        free_frame(&f);
+    }
+    /* Same-size fades retain whichever orientation was established. Real
+     * pillarboxed portrait and full landscape transitions remain immediate. */
+    {
+        frame f = make_frame(1920, 1080, 90);
+        ph_video_crop_state state = {0};
+        CHECK(is_full(detect_stable(&f, .463, &state), &f));
+        for (int i = 0; i < 50; i++) {
+            paint(&f, 0, f.w, i % 2 ? 16 : 32);
+            CHECK(is_full(detect_stable(&f, .463, &state), &f));
+        }
+        paint(&f, 0, f.w, 16);
+        paint(&f, 710, 1210, 180);
+        ph_rect r = detect_stable(&f, .463, &state);
+        CHECK(r.x == 710 && r.w == 500 && r.h == 1080);
+        for (int i = 0; i < 50; i++) {
+            paint(&f, 0, f.w, i % 2 ? 16 : 32);
+            r = detect_stable(&f, .463, &state);
+            CHECK(r.x == 710 && r.w == 500 && r.h == 1080);
+        }
+        paint(&f, 1300, 1900, 200); /* visible landscape outside the old crop */
+        CHECK(is_full(detect_stable(&f, .463, &state), &f));
+        paint(&f, 0, f.w, 16);
+        CHECK(is_full(detect_stable(&f, .463, &state), &f));
+        ph_video_crop_reset(&state);
+        CHECK(!state.frame_width && !state.frame_height && !state.screen.w);
+        CHECK(is_full(detect_stable(&f, .463, &state), &f));
+        CHECK(is_full(detect_stable(&f, .463, NULL), &f));
+        free_frame(&f);
+    }
+    /* Unknown aspect still discovers real bars and retains them during a fade;
+     * stream-size changes and native portrait frames never reuse an old crop. */
+    {
+        frame f = make_frame(1920, 1080, 16);
+        ph_video_crop_state state = {0};
+        paint(&f, 710, 1210, 180);
+        ph_rect r = detect_stable(&f, 0, &state);
+        CHECK(r.x == 710 && r.w == 500);
+        paint(&f, 0, f.w, 16);
+        r = detect_stable(&f, 0, &state);
+        CHECK(r.x == 710 && r.w == 500);
+        free_frame(&f);
+        f = make_frame(1920, 888, 16);
+        CHECK(is_full(detect_stable(&f, .463, &state), &f));
+        free_frame(&f);
+        f = make_frame(500, 1080, 16);
+        CHECK(is_full(detect_stable(&f, .463, &state), &f));
+        free_frame(&f);
+        f = make_frame(1920, 1080, 16);
+        CHECK(is_full(detect_stable(&f, .463, &state), &f));
+        free_frame(&f);
+    }
+    /* Authoritative native geometry overrides a prior pixel-derived crop even
+     * if the remembered phone aspect changes while the TV canvas stays black. */
+    {
+        frame f = make_frame(1920, 1080, 16);
+        ph_video_crop_state state = {0};
+        paint(&f, 710, 1210, 180);
+        CHECK(detect_stable(&f, .463, &state).w == 500);
+        paint(&f, 0, f.w, 16);
+        CHECK(is_full(detect_stable(&f, 1080.0 / 1920, &state), &f));
         free_frame(&f);
     }
 

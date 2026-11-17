@@ -42,6 +42,7 @@ typedef struct app {
     Uint32 ev_base;
     atomic_bool frame_pending; /* coalesces "new frame" events */
     double portrait_aspect;    /* phone screen width/height when upright; 0 until seen */
+    ph_video_crop_state crop;  /* confirmed crop through ambiguous dark frames */
 
     char phone_name[128];      /* from the mirroring session; empty when not mirroring */
     char ble_status[64];       /* last state reported by the Bluetooth helper */
@@ -655,7 +656,7 @@ static void show_frame(app *a, const AVFrame *f)
             PH_LOGD("phone screen aspect %.4f", aspect);
         a->portrait_aspect = aspect;
     }
-    ph_rect screen = ph_video_content_rect(&planes, a->portrait_aspect);
+    ph_rect screen = ph_video_content_rect_stable(&planes, a->portrait_aspect, &a->crop);
     if (screen.w != a->picture_w || screen.h != a->picture_h) {
         PH_LOGD("pointer reset: picture size %dx%d -> %dx%d", a->picture_w, a->picture_h,
                  screen.w, screen.h);
@@ -689,6 +690,7 @@ static void clear_view(app *a)
     av_frame_unref(a->view_frame);
     av_frame_unref(a->pointer_baseline);
     a->picture_w = a->picture_h = 0;
+    ph_video_crop_reset(&a->crop);
     a->view_seen_at = a->candidate_since = 0;
     a->checked_sync = a->candidate_sync = 0;
     a->checked_found = false;
