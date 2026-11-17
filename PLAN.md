@@ -344,6 +344,19 @@ passes 25,600 actions with 320 actual presses and 254 missing-ACK recoveries. Th
 integrated Linux ASAN/UBSAN/leak-detection suite passes 45/45. Live verification of this
 latest cancellation change still follows; simulations do not establish its radio timing.
 
+The follow-up live log exposed a gain-learning risk: a cancelled sweep's observation
+changed vertical gain from about 4.42 to 2.01. Retained cancellation feedback now updates
+position only, never speed calibration. A replay of that exact sample fails on the prior
+source and passes with this guard; uninterrupted calibration still learns normally. The
+pointer suite, 25,600-action stress and four SDL cancellation cases pass sanitizers after
+the guard. Do not count the later failed synthetic clicks as controlled phone results:
+SDL capture can inject edge motion when synthetic coordinates disagree with the real
+desktop cursor. A stationary-cursor/window-placement driver passes an offline SDL check,
+but the receiver received an external termination signal before its live use.
+
+The last clean Linux restart restored all three input subscriptions in 2.82 seconds
+without re-pairing; this is a successful case, not a general reconnect-time guarantee.
+
 A live 1920x888 landscape stream exposed a separate crop error: dark frames repeatedly
 became 412x888 portrait crops, resetting pointer coordinates. Native rotated geometry now
 keeps the full frame, and ambiguous dark frames retain a confirmed crop only at the same
