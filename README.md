@@ -78,6 +78,48 @@ taps and saves calibration only after all targets are confirmed; cancellation or
 restores the previous calibration. First-run setup opens automatically until completed.
 Use `--setup` to reopen it on launch, or `--no-setup` to skip automatic setup.
 
+Additional Bluetooth controls:
+
+| Input | Action |
+|---|---|
+| Middle and side mouse buttons | Forward buttons 3–8; assign their actions in iPhone AssistiveTouch device settings |
+| Shift + wheel | Horizontal scrolling; fractional trackpad movement accumulates rather than disappearing |
+| Alt+D | Timed double-tap at the PC pointer's position |
+| Alt+L | Hold at the pointer for at least one second after the press acknowledgement |
+| Alt+Page Down / Page Up | Swipe upward / downward through the picture |
+| Alt+Shift+arrow | Swipe in that direction |
+| Alt+U | Swipe upward from near the bottom; panel dismissal depends on the iPhone's gesture handling |
+| F4 | Toggle feed wheel mode; wheel down/up requests an upward/downward swipe |
+| Escape | Cancel a running gesture or release held mouse input |
+| Media keys | Forward play/pause, previous/next track, stop, mute, volume and keyboard-eject actions |
+
+Feed mode is explicit and shown in the window title. It accepts one swipe per wheel burst,
+with a 500 ms idle gap before another; wheel activity during a gesture does not queue
+additional swipes. Turn it off with F4 for comments, ordinary lists and text fields.
+A swipe is not proof that an app advanced exactly one Reel/Short. These app-specific
+outcomes still need live verification. Media Next Track is separate from feed navigation.
+
+Gestures use the existing video-confirmed Bluetooth pointer. Motion feedback can extend
+their duration; they do not provide inertial flicks or multi-touch. Double-tap requests
+abandon a delayed second tap rather than replaying it much later. Escape, focus loss,
+disconnection and picture-size changes cancel pending gestures and release held buttons.
+Ordinary PC double-clicks still use the normal click path; Alt+D selects the explicitly
+timed double-tap path. Unmodified F1–F4 belong to Porthole; modified function keys are
+forwarded, with release ownership retained if modifiers are released first.
+
+**Photos and external presentations:** a full-screen photo can send a separate
+landscape presentation to AirPlay while the iPhone keeps its portrait controls.
+The Photos library grid mirrors normally on the tested phone. Porthole cannot
+reconstruct UI that the iPhone does not send. When the displayed shape differs
+from the learned phone shape in either orientation, Porthole shows viewing-only
+guidance and pauses mouse targeting; returning to a matching phone view restores
+it without re-pairing. This shape check cannot detect separate content with the
+same aspect ratio, or establish the phone shape before a portrait frame arrives.
+Photos double-tap zoom has **not** passed a live check. The timed two-press sequence
+passes transport tests, which do not prove iOS recognizes it as a native double-tap.
+Apps can choose separate content for an external display
+([Apple documentation](https://developer.apple.com/library/archive/documentation/WindowsViews/Conceptual/WindowAndScreenGuide/UsingExternalDisplay/UsingExternalDisplay.html)).
+
 **F3** shows measured local diagnostics: displayed video FPS, receive-to-decode/present
 time, accepted-input handoff time, helper dispatch ACK time, and queue/drop counters.
 Use `--diagnostics` to show it on launch and log summaries. An idle phone can report zero

@@ -26,11 +26,34 @@ static uint8_t shortcut_button(uint8_t usage)
     }
 }
 
+static uint16_t held_consumer(const ph_input *input)
+{
+    return input->consumer_count ? input->consumer_keys[input->consumer_count - 1] : 0;
+}
+
+static bool supported_consumer(uint16_t usage)
+{
+    switch (usage) {
+    case PH_HID_CONSUMER_VOLUME_UP:
+    case PH_HID_CONSUMER_VOLUME_DOWN:
+    case PH_HID_CONSUMER_MUTE:
+    case PH_HID_CONSUMER_PLAY_PAUSE:
+    case PH_HID_CONSUMER_NEXT_TRACK:
+    case PH_HID_CONSUMER_PREV_TRACK:
+    case PH_HID_CONSUMER_STOP:
+    case PH_HID_CONSUMER_EJECT:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void consumer_shortcut(ph_input *input, uint16_t usage)
 {
-    if (input->output.consumer) {
+    uint16_t held = held_consumer(input);
+    if (input->output.consumer && usage != held) {
         input->output.consumer(input->output.user, usage);
-        input->output.consumer(input->output.user, 0);
+        input->output.consumer(input->output.user, held);
     }
 }
 
@@ -115,6 +138,31 @@ void ph_input_key(ph_input *input, uint8_t usage, bool down, bool repeat, uint8_
         send_keys(input);
 }
 
+void ph_input_consumer_key(ph_input *input, uint16_t usage, bool down, bool repeat)
+{
+    if (!input->enabled || !supported_consumer(usage))
+        return;
+    uint16_t previous = held_consumer(input);
+    size_t index = 0;
+    while (index < input->consumer_count && input->consumer_keys[index] != usage)
+        index++;
+    if (down) {
+        if (repeat || index < input->consumer_count
+            || input->consumer_count == PH_INPUT_CONSUMER_KEYS)
+            return;
+        input->consumer_keys[input->consumer_count++] = usage;
+    } else {
+        if (index == input->consumer_count)
+            return;
+        memmove(input->consumer_keys + index, input->consumer_keys + index + 1,
+                (input->consumer_count - index - 1) * sizeof input->consumer_keys[0]);
+        input->consumer_keys[--input->consumer_count] = 0;
+    }
+    uint16_t current = held_consumer(input);
+    if (previous != current && input->output.consumer)
+        input->output.consumer(input->output.user, current);
+}
+
 void ph_input_release_all(ph_input *input)
 {
     if (ph_keyboard_release_all(&input->keys))
@@ -122,6 +170,12 @@ void ph_input_release_all(ph_input *input)
     if (input->buttons) {
         input->buttons = 0;
         send_buttons(input);
+    }
+    if (input->consumer_count) {
+        memset(input->consumer_keys, 0, sizeof input->consumer_keys);
+        input->consumer_count = 0;
+        if (input->output.consumer)
+            input->output.consumer(input->output.user, 0);
     }
     memset(input->down, 0, sizeof input->down);
     memset(input->local, 0, sizeof input->local);

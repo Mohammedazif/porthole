@@ -7,7 +7,42 @@
 >
 > Plan created: 2026-11-16 · Target device: iPhone on iOS 26.6.1 · Host: Windows PC with Bluetooth
 
-## Current status — 2026-11-17
+## Current status — 2026-11-18
+
+### Mouse and keyboard follow-up — 2026-11-18
+
+Implemented fractional two-axis wheel accumulation, Shift-wheel horizontal scrolling,
+mouse buttons 3–8, held media keys, and correct release ownership for modified F1–F4.
+Added a cancellable, ACK-paced gesture scheduler using the existing video-confirmed
+pointer: timed double-tap, one-second hold, directional swipes, bottom-up swipe, and
+explicit F4 feed-wheel mode with one swipe per burst. Bindings and limitations are in
+[README.md](README.md). Existing Bluetooth recovery and overscroll handling remain.
+This work does not implement or replace Grok's items 5–7.
+
+The combined source passes **69/69 CTest checks** with warnings treated as errors and
+address/undefined-behavior sanitizers (78.72 seconds); the optimized Linux build also
+passes compilation. Local validation includes real SDL event routing, simulated paced report delivery,
+delayed/missing ACKs, frozen video, interrupted holds and geometry changes under
+address/undefined-behavior sanitizers. Two integration regressions were reproduced:
+keyboard gestures used cached coordinates after moving the window underneath a still
+mouse, and small mouse jitter discarded fractional wheel movement before a whole
+notch accumulated. Both have regression tests; the cached-coordinate negative control
+and the pre-fix fractional-wheel run fail as expected.
+Disabling the display-layout guard also makes its SDL regression fail with 16 unwanted
+nonneutral mouse reports, while the corrected test passes with zero.
+
+Live Linux checks confirmed two accepted press/release pairs at the corrected Calculator
+target. Calculator displayed one digit, so this does not establish native double-tap
+recognition. The Photos zoom check failed: its full-screen image arrived as a separate
+1920×1080 photo presentation without the portrait phone UI or pointer. The user confirmed
+that returning to the library grid restores matching views. Mouse mapping now pauses
+for a displayed shape inconsistent with either orientation of the learned phone shape,
+without tearing down Bluetooth. Same-aspect external output and sessions without an
+initial portrait frame cannot be identified by that check.
+
+Still pending: native double-tap recognition in an app with matching mirrored UI;
+live hold/swipe, Notification Center dismissal and Reel/Short outcomes; and native Windows
+validation of this controls wave. A completed report sequence is not an app-level pass.
 
 The working controls run in the **Linux prototype in the VMware guest**. A full Windows
 Wi-Fi mirror now cross-builds with native discovery and portable dependencies. The user
@@ -37,7 +72,7 @@ The detailed M5 measurements later in this file include an archived experimental
 | Scroll follow-up | Continuous overscroll guard retained; new gestures discard stale bounds and probe gently; unchanged frames require confirmation instead of stopping a list early |
 | Audio follow-up | PC playback implemented for AAC-ELD/AAC-LC/ALAC with volume, flush and bounded queue; `--no-audio` mutes PC output; live validation recorded below |
 
-The final committed source passes 60 CTest executions across debug (23), release (23) and
+An earlier committed baseline passed 60 CTest executions across debug (23), release (23) and
 no-AirPlay (14) builds, all with warnings treated as errors. Pointer, scroll, metrics, decoder
 timing/reset, helper shutdown and native-discovery checks pass address/undefined sanitizers.
 Live PC audio and both ends of the Bluetooth list were verified earlier. The final isolated

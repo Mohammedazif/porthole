@@ -3,9 +3,10 @@
 
 /* Finds the phone screen inside a decoded frame.
  *
- * When the app in front can rotate (e.g. the Photos viewer) but the phone is held upright,
- * iOS sends TV-shaped frames (e.g. 1920x1080) with the portrait screen in the middle and
- * black bars on both sides. The app shows and maps only the screen part. */
+ * Some iOS transitions send TV-shaped frames (e.g. 1920x1080) with the portrait
+ * screen in the middle and black bars on both sides. The app shows and maps only
+ * the screen part. A separate media presentation is not necessarily a phone
+ * screen, even when it also has black bars. */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -39,5 +40,12 @@ typedef struct ph_video_crop_state {
 ph_rect ph_video_content_rect_stable(const ph_yuv_planes *p, double portrait_aspect,
                                     ph_video_crop_state *state);
 void ph_video_crop_reset(ph_video_crop_state *state);
+
+/* A known phone shape must match either orientation before mapping mouse
+ * coordinates onto it. Apps may send a separate TV-shaped media presentation
+ * over AirPlay instead of the phone UI. This geometry check cannot identify a
+ * presentation with the same aspect ratio as the phone. Unknown shapes are
+ * allowed until a native portrait frame establishes the phone aspect. */
+bool ph_video_matches_phone_screen(ph_rect screen, double portrait_aspect);
 
 #endif

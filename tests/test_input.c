@@ -51,8 +51,130 @@ static void init(fixture *f)
     f->input.enabled = true;
 }
 
+static void consumer_sequences(void)
+{
+    fixture f;
+    const uint16_t usages[] = {
+        PH_HID_CONSUMER_VOLUME_UP, PH_HID_CONSUMER_VOLUME_DOWN,
+        PH_HID_CONSUMER_MUTE, PH_HID_CONSUMER_PLAY_PAUSE,
+        PH_HID_CONSUMER_NEXT_TRACK, PH_HID_CONSUMER_PREV_TRACK,
+        PH_HID_CONSUMER_STOP, PH_HID_CONSUMER_EJECT
+    };
+    for (size_t i = 0; i < sizeof usages / sizeof usages[0]; i++) {
+        init(&f);
+        ph_input_consumer_key(&f.input, usages[i], false, false);
+        ph_input_consumer_key(&f.input, usages[i], true, true);
+        CHECK(f.count == 0); /* a repeat cannot invent a physical press */
+        ph_input_consumer_key(&f.input, usages[i], true, false);
+        ph_input_consumer_key(&f.input, usages[i], true, true);
+        ph_input_consumer_key(&f.input, usages[i], true, false);
+        CHECK(f.count == 1 && f.sent[0].type == CONSUMER);
+        CHECK(f.sent[0].consumer == usages[i] && f.input.consumer_count == 1);
+        ph_input_consumer_key(&f.input, usages[i], false, false);
+        ph_input_consumer_key(&f.input, usages[i], false, false);
+        CHECK(f.count == 2 && f.sent[1].consumer == 0 && f.input.consumer_count == 0);
+    }
+
+    /* Only the explicit media whitelist is reachable through this API. */
+    init(&f);
+    const uint16_t unsupported[] = {0, PH_HID_CONSUMER_POWER, PH_HID_CONSUMER_AC_HOME, 0xffff};
+    for (size_t i = 0; i < sizeof unsupported / sizeof unsupported[0]; i++) {
+        ph_input_consumer_key(&f.input, unsupported[i], true, false);
+        ph_input_consumer_key(&f.input, unsupported[i], false, false);
+    }
+    CHECK(f.count == 0 && f.input.consumer_count == 0);
+
+    /* Newest held key wins. Releasing a hidden key must not release the active
+     * one; releasing the active key restores the previous still-held usage. */
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_PLAY_PAUSE, true, false);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_VOLUME_UP, true, false);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_MUTE, true, false);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_VOLUME_UP, false, false);
+    CHECK(f.count == 3 && f.input.consumer_count == 2);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_MUTE, false, false);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_PLAY_PAUSE, false, false);
+    CHECK(f.count == 5 && f.sent[3].consumer == PH_HID_CONSUMER_PLAY_PAUSE);
+    CHECK(f.sent[4].consumer == 0 && f.input.consumer_count == 0);
+
+    /* All eight supported keys fit; duplicates cannot exhaust the held stack. */
+    init(&f);
+    for (size_t i = 0; i < sizeof usages / sizeof usages[0]; i++) {
+        ph_input_consumer_key(&f.input, usages[i], true, false);
+        ph_input_consumer_key(&f.input, usages[i], true, false);
+    }
+    CHECK(f.count == 8 && f.input.consumer_count == PH_INPUT_CONSUMER_KEYS);
+    for (size_t i = sizeof usages / sizeof usages[0]; i > 0; i--) {
+        ph_input_consumer_key(&f.input, usages[i - 1], false, false);
+        CHECK(f.sent[f.count - 1].consumer == (i > 1 ? usages[i - 2] : 0));
+    }
+    CHECK(f.count == 16 && f.input.consumer_count == 0);
+
+    /* Alt+Home/volume pulses restore held media rather than spuriously leave
+     * it released. They do not remove or reorder physically held media keys. */
+    init(&f);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_MUTE, true, false);
+    ph_input_key(&f.input, 0x0B, true, false, PH_HID_MOD_LALT);
+    ph_input_key(&f.input, 0x0B, false, false, PH_HID_MOD_LALT);
+    CHECK(f.count == 3 && f.sent[1].consumer == PH_HID_CONSUMER_AC_HOME);
+    CHECK(f.sent[2].consumer == PH_HID_CONSUMER_MUTE && f.input.consumer_count == 1);
+    ph_input_key(&f.input, 0x52, true, false, PH_HID_MOD_LALT);
+    ph_input_key(&f.input, 0x52, true, true, PH_HID_MOD_LALT);
+    ph_input_key(&f.input, 0x52, false, false, PH_HID_MOD_LALT);
+    CHECK(f.count == 5 && f.sent[3].consumer == PH_HID_CONSUMER_VOLUME_UP);
+    CHECK(f.sent[4].consumer == PH_HID_CONSUMER_MUTE && f.input.consumer_count == 1);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_MUTE, false, false);
+    CHECK(f.sent[5].consumer == 0);
+
+    /* Pulsing an already-held usage must not generate a release/repress. */
+    init(&f);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_VOLUME_UP, true, false);
+    ph_input_key(&f.input, 0x52, true, false, PH_HID_MOD_LALT);
+    ph_input_key(&f.input, 0x52, false, false, PH_HID_MOD_LALT);
+    CHECK(f.count == 1 && f.input.consumer_count == 1);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_VOLUME_UP, false, false);
+    CHECK(f.count == 2 && f.sent[1].consumer == 0);
+
+    /* Focus loss clears every held usage, not just the active one. A later
+     * release of a pre-focus-loss key must not restore any old action. */
+    init(&f);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_PLAY_PAUSE, true, false);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_VOLUME_DOWN, true, false);
+    ph_input_release_all(&f.input);
+    ph_input_release_all(&f.input);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_VOLUME_DOWN, false, false);
+    CHECK(f.count == 3 && f.sent[2].consumer == 0 && f.input.consumer_count == 0);
+
+    /* Disconnection drops media input. Reconnect is neutral, without replay. */
+    init(&f);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_NEXT_TRACK, true, false);
+    ph_input_set_enabled(&f.input, false);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_PREV_TRACK, true, false);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_NEXT_TRACK, false, false);
+    CHECK(f.count == 2 && f.sent[1].consumer == 0 && f.input.consumer_count == 0);
+    ph_input_set_enabled(&f.input, true);
+    ph_input_set_enabled(&f.input, true);
+    CHECK(f.count == 5 && f.sent[4].type == CONSUMER && f.sent[4].consumer == 0);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_NEXT_TRACK, false, false);
+    CHECK(f.count == 5);
+
+    /* Media state is independent of typed keys and shortcut mouse buttons. */
+    init(&f);
+    ph_input_consumer_key(&f.input, PH_HID_CONSUMER_MUTE, true, false);
+    ph_input_key(&f.input, 0x16, true, false, PH_HID_MOD_LALT);
+    ph_input_key(&f.input, 0xE2, false, false, 0);
+    ph_input_key(&f.input, 0x04, true, false, PH_HID_MOD_LCTRL);
+    CHECK(f.count == 3 && f.sent[1].type == MOUSE);
+    CHECK(f.sent[2].keys.modifiers == PH_HID_MOD_LGUI && f.sent[2].keys.keys[0] == 0x04);
+    ph_input_release_all(&f.input);
+    CHECK(f.count == 6 && f.sent[3].type == KEYBOARD && f.sent[3].keys.modifiers == 0);
+    CHECK(f.sent[4].type == MOUSE && f.sent[4].mouse.buttons == 0);
+    CHECK(f.sent[5].type == CONSUMER && f.sent[5].consumer == 0);
+    CHECK(!f.input.buttons && !f.input.consumer_count && !f.input.down[0x04]);
+}
+
 int main(void)
 {
+    consumer_sequences();
     fixture f;
     const uint8_t alt = PH_HID_MOD_LALT;
 

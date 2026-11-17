@@ -1,5 +1,6 @@
 /* Checks that black side bars of TV-shaped frames are cropped, and nothing else is. */
 #include <stdint.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,6 +64,23 @@ static int is_full(ph_rect r, const frame *f)
 
 int main(void)
 {
+    /* AirPlay media output can be 16:9 while the physical phone remains tall.
+     * Only the native shape, its reciprocal, or a verified pillarbox crop may
+     * drive its pointer. Chroma/codec rounding gets two short-edge pixels. */
+    {
+        double aspect = 500.0 / 1080;
+        CHECK(ph_video_matches_phone_screen((ph_rect){0, 0, 500, 1080}, aspect));
+        CHECK(ph_video_matches_phone_screen((ph_rect){0, 0, 1920, 888}, aspect));
+        CHECK(ph_video_matches_phone_screen((ph_rect){710, 0, 500, 1080}, aspect));
+        CHECK(ph_video_matches_phone_screen((ph_rect){0, 0, 502, 1080}, aspect));
+        CHECK(!ph_video_matches_phone_screen((ph_rect){0, 0, 504, 1080}, aspect));
+        CHECK(!ph_video_matches_phone_screen((ph_rect){0, 0, 1920, 1080}, aspect));
+        CHECK(!ph_video_matches_phone_screen((ph_rect){0, 0, 0, 1080}, aspect));
+        CHECK(ph_video_matches_phone_screen((ph_rect){0, 0, 1920, 1080}, 0));
+        CHECK(ph_video_matches_phone_screen((ph_rect){0, 0, 1920, 1080}, NAN));
+        /* A native 16:9 phone cannot be distinguished from 16:9 media by shape. */
+        CHECK(ph_video_matches_phone_screen((ph_rect){0, 0, 1920, 1080}, .5625));
+    }
     /* Portrait frames are never cropped, even if their edges are black (dark mode). */
     {
         frame f = make_frame(500, 1080, 16);

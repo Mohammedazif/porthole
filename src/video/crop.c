@@ -122,3 +122,14 @@ void ph_video_crop_reset(ph_video_crop_state *state)
     if (state)
         *state = (ph_video_crop_state){0};
 }
+
+bool ph_video_matches_phone_screen(ph_rect screen, double portrait_aspect)
+{
+    if (screen.w <= 0 || screen.h <= 0)
+        return false;
+    if (!isfinite(portrait_aspect) || portrait_aspect <= .2 || portrait_aspect >= 1)
+        return true; /* Native phone shape has not been established. */
+    int short_edge = screen.w < screen.h ? screen.w : screen.h;
+    int long_edge = screen.w < screen.h ? screen.h : screen.w;
+    return fabs(short_edge - long_edge * portrait_aspect) <= 2.0;
+}

@@ -64,6 +64,7 @@ extern const size_t ph_hid_report_descriptor_len;
 #define PH_HID_CONSUMER_PLAY_PAUSE 0x00CD
 #define PH_HID_CONSUMER_NEXT_TRACK 0x00B5
 #define PH_HID_CONSUMER_PREV_TRACK 0x00B6
+#define PH_HID_CONSUMER_STOP 0x00B7
 #define PH_HID_CONSUMER_EJECT 0x00B8 /* toggles the on-screen keyboard on iOS */
 #define PH_HID_CONSUMER_MUTE 0x00E2
 #define PH_HID_CONSUMER_VOLUME_UP 0x00E9

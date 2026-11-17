@@ -94,6 +94,43 @@ static uint8_t delayed_buttons;
 static bool reentry_mode, reentry_focus, cancel_after_ack;
 static unsigned int reentry_stage, interrupted_reports, anchor_reports;
 static Uint64 last_move_ack_at, interrupted_at;
+/* These modes exercise SDL -> app -> HID routing, independently of the module
+ * unit tests. Keep report observations separate from the phone's motion model. */
+enum controls_kind { CONTROLS_NONE, CONTROLS_MEDIA, CONTROLS_FUNCTIONS,
+                     CONTROLS_MOUSE, CONTROLS_WHEEL, CONTROLS_FEED, CONTROLS_POINTER_POSITION,
+                     CONTROLS_PRESENTATION };
+static enum controls_kind controls_mode;
+static unsigned int controls_stage, help_toggles, diagnostics_toggles;
+static Uint64 controls_at;
+static bool controls_bad, controls_done;
+static uint16_t consumer_reports[32];
+static unsigned int consumer_count, function_down[4], function_up[4];
+static bool function_held[4];
+static uint8_t keyboard_modifiers;
+static unsigned int middle_down, middle_up, extra_down, extra_up;
+static unsigned int wheel_reports, pan_reports;
+static int wheel_sum, pan_sum;
+static unsigned int wheel_before_shift;
+static unsigned int control_mouse_reports;
+static int presentation_width = PHONE_WIDTH, presentation_height = PHONE_HEIGHT;
+static int presented_width, presented_height;
+static bool presentation_blocked, landscape_accepted;
+static unsigned int presentation_leaks;
+#ifdef PH_TEST_WRAP_GLOBAL_MOUSE
+static SDL_Window *coordinate_window;
+static unsigned int desktop_queries;
+Uint32 __real_SDL_GetGlobalMouseState(int *x, int *y);
+Uint32 __wrap_SDL_GetGlobalMouseState(int *x, int *y);
+Uint32 __wrap_SDL_GetGlobalMouseState(int *x, int *y)
+{
+    if (controls_mode != CONTROLS_POINTER_POSITION)
+        return __real_SDL_GetGlobalMouseState(x, y);
+    desktop_queries++;
+    if (x) *x = 950;
+    if (y) *y = 1300;
+    return 0;
+}
+#endif
 
 static void apply_delivery(const paced_report *report);
 static void pump_delivery(void);
@@ -179,25 +216,29 @@ static void publish_frame(void)
         return;
     }
     frame->format = AV_PIX_FMT_YUV420P;
-    frame->width = PHONE_WIDTH;
-    frame->height = PHONE_HEIGHT;
+    frame->width = controls_mode == CONTROLS_PRESENTATION ? presentation_width : PHONE_WIDTH;
+    frame->height = controls_mode == CONTROLS_PRESENTATION ? presentation_height : PHONE_HEIGHT;
     if (av_frame_get_buffer(frame, 32) < 0) {
         av_frame_free(&frame);
         frame_failure = true;
         quit();
         return;
     }
-    for (int y = 0; y < PHONE_HEIGHT; y++) {
+    for (int y = 0; y < frame->height; y++) {
         uint8_t *row = frame->data[0] + y * frame->linesize[0];
-        for (int x = 0; x < PHONE_WIDTH; x++) {
+        for (int x = 0; x < frame->width; x++) {
             double radius = held_buttons & PH_HID_BTN_LEFT ? 9.5 : 11;
             double coverage = fmax(0, fmin(1, radius + .5 - hypot(x - phone_x, y - phone_y)));
-            row[x] = (uint8_t)lround(16 + (90 - 16) * coverage);
+            /* Full-width nonblack content distinguishes presentation from
+             * portrait content letterboxed inside a TV-shaped frame. */
+            int background = controls_mode == CONTROLS_PRESENTATION && frame->width > frame->height
+                             ? 60 : 16;
+            row[x] = (uint8_t)lround(background + (90 - background) * coverage);
         }
     }
     for (int plane = 1; plane <= 2; plane++)
-        for (int y = 0; y < PHONE_HEIGHT / 2; y++)
-            memset(frame->data[plane] + y * frame->linesize[plane], 128, PHONE_WIDTH / 2);
+        for (int y = 0; y < frame->height / 2; y++)
+            memset(frame->data[plane] + y * frame->linesize[plane], 128, (size_t)frame->width / 2);
     av_frame_free(&latest);
     latest = frame;
     frame_serial++;
@@ -207,6 +248,15 @@ static void publish_frame(void)
 ph_window *ph_window_create(const char *title)
 {
     (void)title;
+#ifdef PH_TEST_WRAP_GLOBAL_MOUSE
+    if (controls_mode == CONTROLS_POINTER_POSITION) {
+        coordinate_window = SDL_CreateWindow("coordinate regression", 100, 100,
+                                             PHONE_WIDTH, PHONE_HEIGHT, SDL_WINDOW_HIDDEN);
+        if (!coordinate_window) return NULL;
+        SDL_WarpMouseInWindow(coordinate_window, 50, 50);
+        SDL_SetWindowPosition(coordinate_window, 700, 600);
+    }
+#endif
     return &window;
 }
 
@@ -219,7 +269,7 @@ void ph_window_set_status(ph_window *w, bool mirror, bool ready, const char *det
     control_ready = ready;
 }
 
-void ph_window_toggle_help(ph_window *w) { (void)w; }
+void ph_window_toggle_help(ph_window *w) { (void)w; help_toggles++; }
 bool ph_window_help_visible(const ph_window *w) { (void)w; return false; }
 void ph_window_set_setup(ph_window *w, const ph_setup *setup)
 {
@@ -231,18 +281,28 @@ void ph_window_set_setup(ph_window *w, const ph_setup *setup)
 }
 ph_setup_action ph_window_setup_click(const ph_window *w, int x, int y)
 { (void)w; (void)x; (void)y; return PH_SETUP_ACTION_NONE; }
-void ph_window_toggle_diagnostics(ph_window *w) { (void)w; }
+void ph_window_toggle_diagnostics(ph_window *w) { (void)w; diagnostics_toggles++; }
 void ph_window_set_metrics(ph_window *w, const ph_metrics_snapshot *m, unsigned int queued,
                            uint64_t discarded, uint64_t superseded)
 { (void)w; (void)m; (void)queued; (void)discarded; (void)superseded; }
 void ph_window_redraw(ph_window *w) { (void)w; }
 void ph_window_clear(ph_window *w) { (void)w; initial_frame = false; }
-void ph_window_destroy(ph_window *w) { (void)w; }
+void ph_window_destroy(ph_window *w)
+{
+    (void)w;
+#ifdef PH_TEST_WRAP_GLOBAL_MOUSE
+    if (coordinate_window) SDL_DestroyWindow(coordinate_window);
+#endif
+}
 unsigned int ph_window_id(const ph_window *w) { (void)w; return 1; }
 
 void ph_window_present(ph_window *w, const AVFrame *frame, const ph_rect *screen)
 {
-    (void)w, (void)frame, (void)screen;
+    (void)w, (void)frame;
+    if (controls_mode == CONTROLS_PRESENTATION) {
+        presented_width = screen->w;
+        presented_height = screen->h;
+    }
     if (stream_mode) SDL_Delay(10); /* render work under a continuing 60 fps stream */
     if (render_stall_mode && movement_frames && !render_stalled) {
         render_stalled = true;
@@ -256,19 +316,241 @@ void ph_window_present(ph_window *w, const AVFrame *frame, const ph_rect *screen
 void ph_window_video_size(const ph_window *w, int *width, int *height)
 {
     (void)w;
-    *width = initial_frame ? PHONE_WIDTH : 0;
-    *height = initial_frame ? PHONE_HEIGHT : 0;
+    *width = initial_frame ? (controls_mode == CONTROLS_PRESENTATION ? presented_width : PHONE_WIDTH) : 0;
+    *height = initial_frame ? (controls_mode == CONTROLS_PRESENTATION ? presented_height : PHONE_HEIGHT) : 0;
 }
 
 bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy)
 {
     (void)w;
-    if (!initial_frame || !control_ready || x < 0 || x >= PHONE_WIDTH
-        || y < 0 || y >= PHONE_HEIGHT)
+    int width, height;
+    ph_window_video_size(w, &width, &height);
+    if (!initial_frame || (!control_ready && controls_mode != CONTROLS_PRESENTATION)
+        || x < 0 || x >= width || y < 0 || y >= height)
         return false;
-    *vx = (x + .5) / PHONE_WIDTH;
-    *vy = (y + .5) / PHONE_HEIGHT;
+    *vx = (x + .5) / width;
+    *vy = (y + .5) / height;
     return true;
+}
+
+static void push_button(Uint8 button, bool down)
+{
+    SDL_Event event = {.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP};
+    event.button.windowID = 1;
+    event.button.button = button;
+    event.button.state = down ? SDL_PRESSED : SDL_RELEASED;
+    event.button.x = TARGET_X;
+    event.button.y = TARGET_Y;
+    SDL_PushEvent(&event);
+}
+
+static void push_wheel(float y)
+{
+    SDL_Event event = {.type = SDL_MOUSEWHEEL};
+    event.wheel.windowID = 1;
+    event.wheel.direction = SDL_MOUSEWHEEL_NORMAL;
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+    event.wheel.preciseY = y;
+#endif
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+    event.wheel.mouseX = TARGET_X;
+    event.wheel.mouseY = TARGET_Y;
+#endif
+    event.wheel.y = (int)y;
+    SDL_PushEvent(&event);
+}
+
+static void push_presentation_inputs(void)
+{
+    push_motion(TARGET_X, TARGET_Y);
+    push_button(SDL_BUTTON_LEFT, true);
+    push_button(SDL_BUTTON_LEFT, false);
+    push_wheel(1);
+    push_key(SDL_SCANCODE_LALT, true, KMOD_LALT);
+    push_key(SDL_SCANCODE_PAGEDOWN, true, KMOD_LALT);
+    push_key(SDL_SCANCODE_PAGEDOWN, false, KMOD_LALT);
+    push_key(SDL_SCANCODE_LALT, false, KMOD_NONE);
+}
+
+static void tick_presentation(void)
+{
+    Uint64 now = SDL_GetTicks64();
+    if (!mirroring || !initial_frame) return;
+    if (!controls_stage && control_ready && presented_width == PHONE_WIDTH
+        && presented_height == PHONE_HEIGHT) {
+        injected = true;
+        presentation_blocked = true;
+        presentation_width = 1920;
+        presentation_height = 1080;
+        controls_stage = 1;
+        publish_frame();
+    } else if (controls_stage == 1 && presented_width == 1920 && presented_height == 1080) {
+        push_presentation_inputs();
+        controls_stage = 2;
+        controls_at = now;
+    } else if (controls_stage == 2 && now - controls_at >= 200) {
+        controls_bad |= presentation_leaks != 0 || presses || releases || held_buttons;
+        link_status(link_user, "subscribed"); /* status refresh must retain the geometry pause */
+        controls_stage = 3;
+        controls_at = now;
+    } else if (controls_stage == 3 && now - controls_at >= 40) {
+        push_presentation_inputs();
+        controls_stage = 4;
+        controls_at = now;
+    } else if (controls_stage == 4 && now - controls_at >= 250) {
+        controls_bad |= presentation_leaks != 0 || presses || releases || held_buttons;
+        presentation_width = 1920;
+        presentation_height = 888; /* native rotated shape, including sub-2px rounding */
+        controls_stage = 5;
+        publish_frame();
+    } else if (controls_stage == 5 && presented_width == 1920 && presented_height == 888) {
+        presentation_blocked = false;
+        control_mouse_reports = 0;
+        push_motion(TARGET_X, TARGET_Y);
+        controls_stage = 6;
+    } else if (controls_stage == 6 && control_mouse_reports) {
+        landscape_accepted = true;
+        push_window(SDL_WINDOWEVENT_FOCUS_LOST);
+        controls_stage = 7;
+        controls_at = now;
+    } else if (controls_stage == 7 && now - controls_at >= 200 && !delivery_count && !delayed_frame) {
+        presentation_width = PHONE_WIDTH;
+        presentation_height = PHONE_HEIGHT;
+        publish_frame();
+        controls_stage = 8;
+    } else if (controls_stage == 8 && control_ready && presented_width == PHONE_WIDTH
+               && presented_height == PHONE_HEIGHT) {
+        push_window(SDL_WINDOWEVENT_FOCUS_GAINED);
+        push_window(SDL_WINDOWEVENT_ENTER);
+        push_motion(TARGET_X, TARGET_Y);
+        push_button(SDL_BUTTON_LEFT, true);
+        push_button(SDL_BUTTON_LEFT, false);
+        controls_stage = 9;
+    } else if (controls_stage == 9 && releases == 1 && !delivery_count) {
+        controls_at = now;
+        controls_stage = 10;
+    } else if (controls_stage == 10 && now - controls_at >= 300) {
+        controls_bad |= presses != 1 || releases != 1 || held_buttons || keyboard_held;
+        controls_done = true;
+        quit();
+    }
+}
+
+static void tick_controls(void)
+{
+    Uint64 now = SDL_GetTicks64();
+    if (controls_mode == CONTROLS_PRESENTATION) { tick_presentation(); return; }
+    if (!mirroring || !control_ready || !initial_frame) return;
+    if (!controls_stage) {
+        injected = true;
+        consumer_count = 0; /* exclude the initial neutral subscription report */
+        control_mouse_reports = 0;
+        controls_stage = 1;
+        controls_at = now;
+        if (controls_mode == CONTROLS_MEDIA) {
+            /* AUDIOPLAY is outside the 256-entry keyboard usage table. */
+            push_key(SDL_SCANCODE_AUDIOPLAY, true, KMOD_NONE);
+            push_key(SDL_SCANCODE_AUDIOPLAY, false, KMOD_NONE);
+            push_key(SDL_SCANCODE_VOLUMEUP, true, KMOD_NONE);
+        } else if (controls_mode == CONTROLS_FUNCTIONS) {
+            for (int i = 0; i < 4; i++) {
+                push_key(SDL_SCANCODE_LCTRL, true, KMOD_LCTRL);
+                push_key((SDL_Scancode)(SDL_SCANCODE_F1 + i), true, KMOD_LCTRL);
+                /* Key ownership must survive releasing Ctrl first. */
+                push_key(SDL_SCANCODE_LCTRL, false, KMOD_NONE);
+                push_key((SDL_Scancode)(SDL_SCANCODE_F1 + i), false, KMOD_NONE);
+            }
+        } else if (controls_mode == CONTROLS_MOUSE) {
+            push_button(SDL_BUTTON_MIDDLE, true);
+        } else if (controls_mode == CONTROLS_WHEEL) {
+            SDL_SetModState(KMOD_NONE);
+            push_wheel(.25f);
+        } else if (controls_mode == CONTROLS_POINTER_POSITION) {
+#ifdef PH_TEST_WRAP_GLOBAL_MOUSE
+            int x, y;
+            SDL_GetMouseState(&x, &y);
+            controls_bad |= x != 50 || y != 50;
+#endif
+            push_key(SDL_SCANCODE_LALT, true, KMOD_LALT);
+            push_key(SDL_SCANCODE_D, true, KMOD_LALT);
+            push_key(SDL_SCANCODE_D, false, KMOD_LALT);
+            push_key(SDL_SCANCODE_LALT, false, KMOD_NONE);
+        } else if (controls_mode == CONTROLS_FEED) {
+            push_key(SDL_SCANCODE_F4, true, KMOD_NONE);
+            push_key(SDL_SCANCODE_F4, false, KMOD_NONE);
+            for (int i = 0; i < 12; i++) push_wheel(-1);
+        }
+        return;
+    }
+    if (controls_mode == CONTROLS_MEDIA) {
+        if (controls_stage == 1) {
+            controls_bad |= consumer_count != 3
+                || consumer_reports[0] != PH_HID_CONSUMER_PLAY_PAUSE
+                || consumer_reports[1] != 0
+                || consumer_reports[2] != PH_HID_CONSUMER_VOLUME_UP;
+            push_window(SDL_WINDOWEVENT_FOCUS_LOST);
+            controls_stage = 2;
+        } else {
+            controls_bad |= consumer_count != 4 || consumer_reports[3] != 0;
+            controls_done = true;
+        }
+    } else if (controls_mode == CONTROLS_FUNCTIONS) {
+        /* Observe release before shutdown's release-all can repair a stuck key. */
+        for (int i = 0; i < 4; i++)
+            controls_bad |= function_down[i] != 1 || function_up[i] != 1 || function_held[i];
+        controls_bad |= keyboard_held || keyboard_modifiers || help_toggles
+                        || diagnostics_toggles || setup_seen;
+        controls_done = true;
+    } else if (controls_mode == CONTROLS_MOUSE) {
+        if (controls_stage == 1 && held_buttons == PH_HID_BTN_MIDDLE) {
+            push_button(SDL_BUTTON_X1, true);
+            controls_stage = 2;
+        } else if (controls_stage == 2 && held_buttons == (PH_HID_BTN_MIDDLE | PH_HID_BTN_4)) {
+            push_button(SDL_BUTTON_MIDDLE, false);
+            controls_stage = 3;
+        } else if (controls_stage == 3 && held_buttons == PH_HID_BTN_4) {
+            push_button(SDL_BUTTON_X1, false);
+            controls_stage = 4;
+        } else if (controls_stage == 4 && !held_buttons && !delivery_count) {
+            controls_done = true;
+        }
+    } else if (controls_mode == CONTROLS_WHEEL) {
+        if (controls_stage < 4 && now - controls_at >= 40) {
+            controls_bad |= wheel_reports != 0 || pan_reports != 0;
+            push_motion(TARGET_X + 1, TARGET_Y); /* sub-slop pointer jitter */
+            push_wheel(.25f);
+            controls_stage++;
+            controls_at = now;
+        } else if (controls_stage == 4 && wheel_reports && now - controls_at >= 350
+                   && !delivery_count && !delayed_frame) {
+            controls_bad |= pan_reports != 0 || wheel_sum >= 0;
+            wheel_before_shift = wheel_reports;
+            SDL_SetModState(KMOD_LSHIFT);
+            push_wheel(1);
+            controls_stage = 5;
+            controls_at = now;
+        } else if (controls_stage == 5 && pan_reports && now - controls_at >= 350
+                   && !delivery_count && !delayed_frame) {
+            controls_bad |= wheel_reports != wheel_before_shift || pan_sum <= 0;
+            controls_done = true;
+        }
+    } else if (controls_mode == CONTROLS_POINTER_POSITION) {
+        if (controls_stage == 1 && releases == 2 && !delivery_count) {
+            controls_stage = 2;
+            controls_at = now;
+        } else if (controls_stage == 2 && now - controls_at >= 300) {
+            controls_bad |= presses != 2 || releases != 2 || held_buttons || keyboard_held;
+            controls_done = true;
+        }
+    } else if (controls_mode == CONTROLS_FEED) {
+        if (controls_stage == 1 && releases && !delivery_count) {
+            controls_stage = 2;
+            controls_at = now;
+        } else if (controls_stage == 2 && now - controls_at >= 800) {
+            controls_done = true; /* a burst must not leave a second queued swipe */
+        }
+    }
+    if (controls_done) quit();
 }
 
 void ph_window_tick(ph_window *w)
@@ -280,6 +562,7 @@ void ph_window_tick(ph_window *w)
         timed_out = true;
         quit();
     }
+    if (controls_mode) { tick_controls(); return; }
     if (probe_pending) {
         Uint64 elapsed = SDL_GetTicks64() - confirmation_ack_at;
         if (changing_mode && probe_stage == 0 && elapsed >= 20) {
@@ -572,6 +855,17 @@ bool ph_hid_link_keyboard(ph_hid_link *l, const ph_hid_keyboard *k)
 {
     (void)l;
     if (paced_mode) return enqueue((paced_report){.kind = PACED_KEY, .key = *k});
+    if (controls_mode == CONTROLS_FUNCTIONS) {
+        keyboard_modifiers = k->modifiers;
+        for (int i = 0; i < 4; i++) {
+            bool held = false;
+            for (size_t j = 0; j < sizeof k->keys; j++)
+                held |= k->keys[j] == (uint8_t)(0x3a + i);
+            if (held && !function_held[i]) function_down[i]++;
+            if (!held && function_held[i]) function_up[i]++;
+            function_held[i] = held;
+        }
+    }
     bool nonzero = k->modifiers != 0;
     for (size_t i = 0; i < sizeof k->keys; i++)
         nonzero |= k->keys[i] != 0;
@@ -589,6 +883,11 @@ bool ph_hid_link_keyboard(ph_hid_link *l, const ph_hid_keyboard *k)
 bool ph_hid_link_consumer(ph_hid_link *l, uint16_t usage)
 {
     (void)l;
+    if (controls_mode == CONTROLS_MEDIA) {
+        if (consumer_count < sizeof consumer_reports / sizeof consumer_reports[0])
+            consumer_reports[consumer_count++] = usage;
+        else controls_bad = true;
+    }
     if (setup_visible && usage)
         modal_leaks++;
     return true;
@@ -610,7 +909,20 @@ static double travel(int value)
 bool ph_hid_link_mouse(ph_hid_link *l, const ph_hid_mouse *m)
 {
     (void)l;
+    if (controls_mode == CONTROLS_PRESENTATION && presentation_blocked
+        && (m->buttons || m->dx || m->dy || m->wheel || m->pan))
+        presentation_leaks++; /* observe transport acceptance, before paced delivery */
     if (paced_mode) return enqueue((paced_report){.kind = PACED_MOUSE, .mouse = *m});
+    if (controls_mode) {
+        if (m->buttons || m->dx || m->dy || m->wheel || m->pan)
+            control_mouse_reports++;
+        if (!(held_buttons & PH_HID_BTN_MIDDLE) && (m->buttons & PH_HID_BTN_MIDDLE)) middle_down++;
+        if ((held_buttons & PH_HID_BTN_MIDDLE) && !(m->buttons & PH_HID_BTN_MIDDLE)) middle_up++;
+        if (!(held_buttons & PH_HID_BTN_4) && (m->buttons & PH_HID_BTN_4)) extra_down++;
+        if ((held_buttons & PH_HID_BTN_4) && !(m->buttons & PH_HID_BTN_4)) extra_up++;
+        if (m->wheel) { wheel_reports++; wheel_sum += m->wheel; }
+        if (m->pan) { pan_reports++; pan_sum += m->pan; }
+    }
     if (feedback_waiting && (m->dx || m->dy || m->buttons)) {
         Uint64 now = SDL_GetTicks64(), elapsed = now - confirmation_ack_at;
         if (confirmation_count < sizeof confirmation_waits / sizeof confirmation_waits[0])
@@ -636,6 +948,8 @@ bool ph_hid_link_mouse(ph_hid_link *l, const ph_hid_mouse *m)
     if (m->dx == -127 && m->dy == -127) anchor_reports++;
     if (!(held_buttons & PH_HID_BTN_LEFT) && (m->buttons & PH_HID_BTN_LEFT)) {
         presses++;
+        if (controls_mode == CONTROLS_POINTER_POSITION)
+            controls_bad |= hypot(phone_x - (TARGET_X + .5), phone_y - (TARGET_Y + .5)) > 5;
         pressed_x = phone_x;
         pressed_y = phone_y;
     }
@@ -644,7 +958,7 @@ bool ph_hid_link_mouse(ph_hid_link *l, const ph_hid_mouse *m)
         released_x = phone_x;
         released_y = phone_y;
         release_waiting_sync = true;
-        if (!delivery_applying) quit();
+        if (!delivery_applying && !controls_mode) quit();
     }
     held_buttons = m->buttons;
     return true;
@@ -741,6 +1055,17 @@ int main(int argc, char **argv)
 {
     if (argc > 2)
         return 1;
+    if (argc == 2) {
+        if (!strcmp(argv[1], "--controls-media")) controls_mode = CONTROLS_MEDIA;
+        else if (!strcmp(argv[1], "--controls-functions")) controls_mode = CONTROLS_FUNCTIONS;
+        else if (!strcmp(argv[1], "--controls-mouse")) controls_mode = CONTROLS_MOUSE;
+        else if (!strcmp(argv[1], "--controls-wheel")) controls_mode = CONTROLS_WHEEL;
+        else if (!strcmp(argv[1], "--controls-feed")) controls_mode = CONTROLS_FEED;
+        else if (!strcmp(argv[1], "--controls-presentation")) controls_mode = CONTROLS_PRESENTATION;
+#ifdef PH_TEST_WRAP_GLOBAL_MOUSE
+        else if (!strcmp(argv[1], "--controls-pointer-position")) controls_mode = CONTROLS_POINTER_POSITION;
+#endif
+    }
     drag_mode = argc == 2 && (!strcmp(argv[1], "--drag") || !strcmp(argv[1], "--paced-drag"));
     modal_mode = argc == 2 && !strcmp(argv[1], "--modal");
     paced_mode = argc == 2 && (!strcmp(argv[1], "--paced") || !strcmp(argv[1], "--paced-after-ack")
@@ -752,6 +1077,9 @@ int main(int argc, char **argv)
         || !strcmp(argv[1], "--calibration-escape")
         || !strcmp(argv[1], "--cancel-move-leave") || !strcmp(argv[1], "--cancel-move-focus")
         || !strcmp(argv[1], "--cancel-video-leave") || !strcmp(argv[1], "--cancel-video-focus"));
+    if (controls_mode == CONTROLS_MOUSE || controls_mode == CONTROLS_WHEEL
+        || controls_mode == CONTROLS_FEED || controls_mode == CONTROLS_POINTER_POSITION
+        || controls_mode == CONTROLS_PRESENTATION) paced_mode = true;
     reentry_mode = argc == 2 && (!strcmp(argv[1], "--cancel-move-leave")
         || !strcmp(argv[1], "--cancel-move-focus") || !strcmp(argv[1], "--cancel-video-leave")
         || !strcmp(argv[1], "--cancel-video-focus"));
@@ -769,7 +1097,7 @@ int main(int argc, char **argv)
     calibration_mode = argc == 2 && (!strcmp(argv[1], "--calibration-focus")
         || !strcmp(argv[1], "--calibration-escape"));
     if (argc == 2 && !drag_mode && !modal_mode && !paced_mode && !filtered_mode
-        && !confirmation_mode && !changing_mode && !stale_mode && !stream_mode) return 1;
+        && !confirmation_mode && !changing_mode && !stale_mode && !stream_mode && !controls_mode) return 1;
     freeze_mode = argc == 2 && !strcmp(argv[1], "--freeze-drag");
     cancel_mode = argc == 2 && (!strcmp(argv[1], "--disconnect-drag")
         || !strcmp(argv[1], "--focus-drag") || !strcmp(argv[1], "--close-drag")
@@ -801,6 +1129,50 @@ int main(int argc, char **argv)
     snprintf(app_config, sizeof app_config, "%s/porthole", config);
     rmdir(app_config);
     rmdir(config);
+    if (controls_mode) {
+        SDL_SetModState(KMOD_NONE);
+        bool passed = !result && !timed_out && !frame_failure && !queue_overflow
+            && injected && controls_done && !controls_bad && !held_buttons
+            && !keyboard_held && !delivery_count && link_starts == 1 && !stop_requests;
+        if (controls_mode == CONTROLS_FUNCTIONS) {
+            for (int i = 0; i < 4; i++)
+                passed &= function_down[i] == 1 && function_up[i] == 1 && !function_held[i];
+            passed &= !keyboard_modifiers && !help_toggles && !diagnostics_toggles && !setup_seen;
+        } else if (controls_mode == CONTROLS_MOUSE) {
+            passed &= middle_down == 1 && middle_up == 1 && extra_down == 1 && extra_up == 1
+                && !presses && !releases;
+        } else if (controls_mode == CONTROLS_WHEEL) {
+            passed &= wheel_reports > 0 && pan_reports > 0 && !presses && !releases;
+        } else if (controls_mode == CONTROLS_PRESENTATION) {
+            passed &= landscape_accepted && !presentation_leaks && presses == 1 && releases == 1
+                && release_synced && !wheel_reports && !pan_reports
+                && hypot(pressed_x - (TARGET_X + .5), pressed_y - (TARGET_Y + .5)) <= 5;
+            fprintf(passed ? stdout : stderr,
+                    "presentation geometry: pass=%d external_leaks=%u native_landscape=%d "
+                    "final_crop=%dx%d click=(%.1f,%.1f)\n",
+                    passed, presentation_leaks, landscape_accepted,
+                    presented_width, presented_height, pressed_x, pressed_y);
+        } else if (controls_mode == CONTROLS_POINTER_POSITION) {
+            passed &= presses == 2 && releases == 2 && release_synced && !wheel_reports && !pan_reports;
+#ifdef PH_TEST_WRAP_GLOBAL_MOUSE
+            passed &= desktop_queries > 0;
+#endif
+        } else if (controls_mode == CONTROLS_FEED) {
+            passed &= presses == 1 && releases == 1 && dragged_reports && release_synced
+                && !wheel_reports && !pan_reports && pressed_y - released_y > PHONE_HEIGHT * .5
+                && fabs(pressed_x - released_x) <= 5;
+        }
+        fprintf(passed ? stdout : stderr,
+                "SDL controls %s: pass=%d stage=%u timeout=%d bad=%d consumer=%u "
+                "F1..4_down=%u/%u/%u/%u up=%u/%u/%u/%u middle=%u/%u extra=%u/%u "
+                "wheel=%u(%d) pan=%u(%d) presses=%u releases=%u drag_dy=%.1f queued=%zu\n",
+                argv[1], passed, controls_stage, timed_out, controls_bad, consumer_count,
+                function_down[0], function_down[1], function_down[2], function_down[3],
+                function_up[0], function_up[1], function_up[2], function_up[3],
+                middle_down, middle_up, extra_down, extra_up, wheel_reports, wheel_sum,
+                pan_reports, pan_sum, presses, releases, pressed_y - released_y, delivery_count);
+        return passed ? 0 : 1;
+    }
     if (reentry_mode) {
         double error = hypot(pressed_x - (REENTER_X + .5), pressed_y - (REENTER_Y + .5));
         bool passed = !result && !timed_out && !frame_failure && !queue_overflow

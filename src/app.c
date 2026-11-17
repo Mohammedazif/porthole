@@ -14,6 +14,8 @@
 #include "airplay/receiver.h"
 #include "audio/player.h"
 #include "control/input.h"
+#include "control/gesture.h"
+#include "control/mouse_input.h"
 #include "control/pointer.h"
 #include "control/scroll.h"
 #include "control/setup.h"
@@ -51,12 +53,20 @@ typedef struct app {
     atomic_bool frame_pending; /* coalesces "new frame" events */
     double portrait_aspect;    /* phone screen width/height when upright; 0 until seen */
     ph_video_crop_state crop;  /* confirmed crop through ambiguous dark frames */
+    bool presentation_mode;   /* displayed shape differs from the known phone UI */
 
     char phone_name[128];      /* from the mirroring session; empty when not mirroring */
     char ble_status[64];       /* last state reported by the Bluetooth helper */
     ph_input input;
     ph_pointer pointer;
     ph_scroll wheel;
+    ph_mouse_input mouse_input;
+    bool wheel_point_valid;
+    double wheel_point_x, wheel_point_y, wheel_point_aspect;
+    ph_gesture gesture;
+    bool feed_mode, feed_have_wheel;
+    bool gesture_keys[256];
+    Uint64 feed_wheel_at;
     AVFrame *view_frame, *pointer_baseline;
     ph_rect view_screen, baseline_screen;
     int picture_w, picture_h;
@@ -192,8 +202,9 @@ static void update_title(app *a)
     const char *control = a->opt->bluetooth && a->opt->ble_helper ? a->ble_status : "off";
 
     if (a->phone_name[0])
-        snprintf(title, sizeof title, "%s - %s  [Bluetooth control: %s]", PORTHOLE_NAME,
-                 a->phone_name, control);
+        snprintf(title, sizeof title, "%s - %s  [Bluetooth control: %s]%s", PORTHOLE_NAME,
+                 a->phone_name, control, a->presentation_mode ? " [Different display layout]"
+                                       : a->feed_mode ? " [Feed wheel]" : "");
     else
         snprintf(title, sizeof title,
                  "%s - on your iPhone: Control Center > Screen Mirroring > %s", PORTHOLE_NAME,
@@ -205,10 +216,46 @@ static void update_title(app *a)
             snprintf(title + used, sizeof title - used, "  PIN %s", pin);
     }
     ph_window_set_title(a->win, title);
-    ph_window_set_status(a->win, a->phone_name[0] != 0, !strcmp(control, "on"), control);
+    ph_window_set_status(a->win, a->phone_name[0] != 0,
+                         !a->presentation_mode && !strcmp(control, "on"),
+                         a->presentation_mode ? "Return to phone view" : control);
     ph_setup_update(&a->setup, a->input.enabled,
                      a->phone_name[0] && a->view_frame && a->view_frame->data[0]);
     ph_window_set_setup(a->win, &a->setup);
+}
+
+static void reset_mouse_input(app *a)
+{
+    ph_mouse_input_reset(&a->mouse_input);
+    a->wheel_point_valid = false;
+}
+
+static void cancel_control_intent(app *a, Uint64 now)
+{
+    ph_gesture_cancel(&a->gesture, now);
+    ph_pointer_cancel(&a->pointer, now);
+    ph_scroll_cancel(&a->wheel);
+    reset_mouse_input(a);
+    a->feed_have_wheel = false;
+}
+
+static bool start_control_gesture(app *a, ph_gesture_kind kind,
+                                  double x1, double y1, double x2, double y2,
+                                  uint32_t duration)
+{
+    if (a->polish && ph_polish_precise(a->polish))
+        return false; /* This scheduler owns the Bluetooth pointer, not the touch backend. */
+    if (!a->input.enabled || !a->phone_name[0] || a->presentation_mode || a->setup.visible
+        || ph_window_help_visible(a->win) || a->input.buttons
+        || a->pointer.buttons || a->pointer.requested_buttons
+        || ph_gesture_active(&a->gesture))
+        return false;
+    ph_gesture_request request = {.kind = kind, .start_x = x1, .start_y = y1,
+        .end_x = x2, .end_y = y2, .width = a->picture_w, .height = a->picture_h,
+        .duration_ms = duration};
+    ph_scroll_cancel(&a->wheel);
+    reset_mouse_input(a);
+    return ph_gesture_start(&a->gesture, &request, SDL_GetTicks64());
 }
 
 static void handle_ble_status(app *a, const char *line)
@@ -264,9 +311,14 @@ static void handle_ble_status(app *a, const char *line)
     if (state && !(!strcmp(line, "connected") && !strcmp(a->ble_status, "on")))
         snprintf(a->ble_status, sizeof a->ble_status, "%s", state);
     ph_input_set_enabled(&a->input, !a->link_stopping && !strcmp(a->ble_status, "on"));
-    ph_pointer_set_enabled(&a->pointer, a->input.enabled && a->phone_name[0], SDL_GetTicks64());
-    if (!a->input.enabled)
+    ph_pointer_set_enabled(&a->pointer, a->input.enabled && a->phone_name[0]
+                            && !a->presentation_mode, SDL_GetTicks64());
+    if (!a->input.enabled) {
+        ph_gesture_cancel(&a->gesture, SDL_GetTicks64());
+        reset_mouse_input(a);
         ph_scroll_reset(&a->wheel);
+        a->feed_mode = a->feed_have_wheel = false;
+    }
     if (!strcmp(line, "exited")) {
         ph_hid_link_stop(a->link);
         a->link = NULL;
@@ -358,7 +410,8 @@ static bool position_for_scroll(void *user, double x, double y, double aspect)
 static bool pointer_coordinates(app *a, int x, int y, double *nx, double *ny, double *aspect)
 {
     int width, height;
-    if (!a->link || !a->input.enabled || !a->phone_name[0] || a->input.buttons || a->setup.visible)
+    if (!a->link || !a->input.enabled || !a->phone_name[0] || a->presentation_mode
+        || a->input.buttons || a->setup.visible)
         return false;
     ph_window_video_size(a->win, &width, &height);
     if (width <= 0 || height <= 0 || !ph_window_to_video(a->win, x, y, nx, ny))
@@ -367,15 +420,42 @@ static bool pointer_coordinates(app *a, int x, int y, double *nx, double *ny, do
     return true;
 }
 
+static bool current_pointer_coordinates(app *a, double *nx, double *ny, double *aspect)
+{
+    SDL_Window *window = SDL_GetWindowFromID(ph_window_id(a->win));
+    if (!window)
+        return false;
+    /* A window can move underneath a stationary cursor without updating
+     * SDL_GetMouseState's cached client coordinates. Query the OS for hotkeys
+     * so a double-tap cannot target the cursor's former window position. */
+    int global_x, global_y, window_x, window_y, window_w, window_h;
+    SDL_ClearError();
+    SDL_GetGlobalMouseState(&global_x, &global_y);
+    if (*SDL_GetError())
+        return false;
+    SDL_GetWindowPosition(window, &window_x, &window_y);
+    SDL_GetWindowSize(window, &window_w, &window_h);
+    double local_x = (double)global_x - window_x, local_y = (double)global_y - window_y;
+    if (local_x < 0 || local_y < 0 || local_x >= window_w || local_y >= window_h)
+        return false;
+    return pointer_coordinates(a, (int)local_x, (int)local_y, nx, ny, aspect);
+}
+
 static void mouse_motion(app *a, const SDL_MouseMotionEvent *event)
 {
     double x, y, aspect;
+    if (ph_gesture_active(&a->gesture))
+        return; /* A deliberate gesture owns the pointer until release or cancellation. */
     if (pointer_coordinates(a, event->x, event->y, &x, &y, &aspect)) {
         mark_input(a, event->timestamp);
         /* Moving to a new location replaces wheel work aimed at the old location. */
-        double dx = x - a->wheel.target_x, dy = (y - a->wheel.target_y) / aspect;
-        if (dx * dx + dy * dy > 0.0001)
+        double wheel_x = a->wheel_point_valid ? a->wheel_point_x : a->wheel.target_x;
+        double wheel_y = a->wheel_point_valid ? a->wheel_point_y : a->wheel.target_y;
+        double dx = x - wheel_x, dy = (y - wheel_y) / aspect;
+        if (dx * dx + dy * dy > 0.0001) {
+            reset_mouse_input(a);
             ph_scroll_cancel(&a->wheel);
+        }
         if (a->wheel.pending_x || a->wheel.pending_y || a->wheel.in_flight
             || a->wheel.waiting_frame)
             ph_pointer_scroll_target(&a->pointer, x, y, aspect, SDL_GetTicks64());
@@ -387,10 +467,14 @@ static void mouse_motion(app *a, const SDL_MouseMotionEvent *event)
 static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
 {
     double x, y, aspect;
-    uint8_t button = event->button == SDL_BUTTON_LEFT ? PH_HID_BTN_LEFT
-                     : event->button == SDL_BUTTON_RIGHT ? PH_HID_BTN_RIGHT : 0;
+    uint8_t button = ph_mouse_input_button(event->button);
     if (!button)
         return;
+    if (ph_gesture_active(&a->gesture)) {
+        cancel_control_intent(a, SDL_GetTicks64());
+        SDL_CaptureMouse(SDL_FALSE);
+        return; /* Cancel; do not reinterpret this press at the gesture's endpoint. */
+    }
     if (a->polish && ph_polish_precise(a->polish) && event->button == SDL_BUTTON_LEFT) {
         double nx, ny;
         int vw = 0, vh = 0;
@@ -408,6 +492,7 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
         return;
     }
     mark_input(a, event->timestamp);
+    reset_mouse_input(a);
     ph_scroll_cancel(&a->wheel);
     ph_scroll_forget_bounds(&a->wheel);
     ph_pointer_button(&a->pointer, button, event->type == SDL_MOUSEBUTTONDOWN,
@@ -419,8 +504,7 @@ static void scroll(app *a, const SDL_MouseWheelEvent *event)
 {
     int x, y, width, height;
     double nx, ny;
-    if (!a->link || !a->input.enabled || !a->phone_name[0] || a->input.buttons || a->setup.visible
-        || a->pointer.requested_buttons || a->pointer.buttons)
+    if (!a->link || !a->input.enabled || !a->phone_name[0] || a->presentation_mode || a->setup.visible)
         return;
 #if SDL_VERSION_ATLEAST(2, 26, 0)
     x = event->mouseX;
@@ -430,12 +514,56 @@ static void scroll(app *a, const SDL_MouseWheelEvent *event)
 #endif
     ph_window_video_size(a->win, &width, &height);
     if (width > 0 && height > 0 && ph_window_to_video(a->win, x, y, &nx, &ny)) {
+        double aspect = (double)width / height;
+        double dx = nx - a->wheel_point_x, dy = (ny - a->wheel_point_y) / aspect;
+        if (a->wheel_point_valid && (fabs(aspect - a->wheel_point_aspect) > .0001
+            || dx * dx + dy * dy > .0001))
+            reset_mouse_input(a);
+        /* Record even a fractional event's location. The scroll controller has
+         * no target until a whole notch arrives; tiny intervening mouse motion
+         * must not compare against its unrelated old/default target. */
+        a->wheel_point_valid = true;
+        a->wheel_point_x = nx;
+        a->wheel_point_y = ny;
+        a->wheel_point_aspect = aspect;
         mark_input(a, event->timestamp);
-        int sign = event->direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1;
+        double wheel_x = event->x, wheel_y = event->y;
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+        /* Older event producers may fill only the integer compatibility fields. */
+        if (event->preciseX != 0 || event->x == 0)
+            wheel_x = event->preciseX;
+        if (event->preciseY != 0 || event->y == 0)
+            wheel_y = event->preciseY;
+#endif
+        if (a->feed_mode) {
+            if (!isfinite(wheel_y) || wheel_y == 0)
+                return;
+            Uint64 now = SDL_GetTicks64();
+            bool new_burst = !a->feed_have_wheel || now - a->feed_wheel_at >= 500;
+            a->feed_have_wheel = true;
+            a->feed_wheel_at = now;
+            if (ph_gesture_active(&a->gesture) || !new_burst || a->input.buttons
+                || a->pointer.requested_buttons || a->pointer.buttons)
+                return;
+            bool next = (event->direction == SDL_MOUSEWHEEL_FLIPPED ? -wheel_y : wheel_y) < 0;
+            start_control_gesture(a, PH_GESTURE_SWIPE, .5, next ? .8 : .2,
+                                   .5, next ? .2 : .8, 300);
+            return;
+        }
+        if (ph_gesture_active(&a->gesture) || a->input.buttons
+            || a->pointer.requested_buttons || a->pointer.buttons)
+            return;
+        int notches_x, notches_y;
+        if (!ph_mouse_input_wheel(&a->mouse_input, wheel_x, wheel_y,
+                                  event->direction == SDL_MOUSEWHEEL_FLIPPED,
+                                  (SDL_GetModState() & KMOD_SHIFT) != 0,
+                                  &notches_x, &notches_y))
+            return;
         PH_LOGD("wheel at PC (%d,%d), phone (%.3f,%.3f)", x, y, nx, ny);
         ph_scroll_request(&a->wheel, nx, ny, (double)width / height,
-                          sign * event->x, sign * event->y);
+                          notches_x, notches_y);
     } else {
+        reset_mouse_input(a);
         ph_scroll_cancel(&a->wheel);
     }
 }
@@ -476,6 +604,7 @@ static void finish_calibration(app *a, bool success)
 static void open_setup(app *a)
 {
     a->input_pending = false;
+    cancel_control_intent(a, SDL_GetTicks64());
     ph_input_release_all(&a->input);
     PH_LOGD("pointer cancel: guided setup opened");
     ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
@@ -498,7 +627,7 @@ static void setup_action(app *a, ph_setup_action action)
         else
             ph_setup_back(&a->setup);
     } else if (action == PH_SETUP_ACTION_CALIBRATE) {
-        if (ph_setup_start_calibration(&a->setup, SDL_GetTicks64())) {
+        if (!a->presentation_mode && ph_setup_start_calibration(&a->setup, SDL_GetTicks64())) {
             a->previous_scale_x = a->pointer.scale_x > 0 ? a->pointer.scale_x : 1;
             a->previous_scale_y = a->pointer.scale_y > 0 ? a->pointer.scale_y : 1;
             a->calibration_saved = true;
@@ -557,6 +686,22 @@ static void tick_metrics(app *a)
     }
 }
 
+static uint16_t pc_consumer_usage(SDL_Scancode scancode)
+{
+    switch (scancode) {
+    case SDL_SCANCODE_VOLUMEUP: return PH_HID_CONSUMER_VOLUME_UP;
+    case SDL_SCANCODE_VOLUMEDOWN: return PH_HID_CONSUMER_VOLUME_DOWN;
+    case SDL_SCANCODE_MUTE:
+    case SDL_SCANCODE_AUDIOMUTE: return PH_HID_CONSUMER_MUTE;
+    case SDL_SCANCODE_AUDIOPLAY: return PH_HID_CONSUMER_PLAY_PAUSE;
+    case SDL_SCANCODE_AUDIONEXT: return PH_HID_CONSUMER_NEXT_TRACK;
+    case SDL_SCANCODE_AUDIOPREV: return PH_HID_CONSUMER_PREV_TRACK;
+    case SDL_SCANCODE_AUDIOSTOP: return PH_HID_CONSUMER_STOP;
+    case SDL_SCANCODE_EJECT: return PH_HID_CONSUMER_EJECT;
+    default: return 0;
+    }
+}
+
 static uint8_t pc_modifiers(SDL_Keymod mods)
 {
     uint8_t result = 0;
@@ -574,7 +719,15 @@ static uint8_t pc_modifiers(SDL_Keymod mods)
 static void handle_key(app *a, const SDL_KeyboardEvent *e)
 {
     SDL_Scancode sc = e->keysym.scancode;
-    if (sc == SDL_SCANCODE_F2) {
+    bool down = e->type == SDL_KEYDOWN;
+    bool plain = !(e->keysym.mod & (KMOD_SHIFT | KMOD_CTRL | KMOD_ALT | KMOD_GUI));
+    if ((unsigned)sc < 256 && a->gesture_keys[sc]) {
+        if (!down)
+            a->gesture_keys[sc] = false;
+        return;
+    }
+    if (down && sc == SDL_SCANCODE_F2 && plain && !a->input.down[sc]) {
+        a->gesture_keys[sc] = true;
         if (e->type == SDL_KEYDOWN && !e->repeat) {
             a->input_pending = false;
             if (a->setup.visible)
@@ -584,7 +737,8 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         }
         return;
     }
-    if (sc == SDL_SCANCODE_F3) {
+    if (down && sc == SDL_SCANCODE_F3 && plain && !a->input.down[sc]) {
+        a->gesture_keys[sc] = true;
         if (e->type == SDL_KEYDOWN && !e->repeat)
             ph_window_toggle_diagnostics(a->win);
         return;
@@ -594,13 +748,14 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
                                    a->picture_h, a->view_frame,
                                    !a->setup.visible && !ph_window_help_visible(a->win)))
         return;
-    if (sc == SDL_SCANCODE_F1) {
+    if (down && sc == SDL_SCANCODE_F1 && plain && !a->input.down[sc]) {
+        a->gesture_keys[sc] = true;
         if (e->type == SDL_KEYDOWN && !e->repeat) {
             a->input_pending = false;
             if (a->setup.visible)
                 setup_action(a, PH_SETUP_ACTION_CLOSE);
             PH_LOGD("pointer cancel: help toggled");
-            ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
+            cancel_control_intent(a, SDL_GetTicks64());
             SDL_CaptureMouse(SDL_FALSE);
             ph_input_release_all(&a->input);
             ph_scroll_cancel(&a->wheel);
@@ -622,14 +777,82 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
     }
     if (ph_window_help_visible(a->win))
         return;
+    if (down && sc == SDL_SCANCODE_F4 && plain && !a->input.down[sc]) {
+        a->gesture_keys[sc] = true;
+        if (down && !e->repeat) {
+            cancel_control_intent(a, SDL_GetTicks64());
+            a->feed_mode = !a->feed_mode;
+            update_title(a);
+            PH_LOGI("feed wheel: %s", a->feed_mode ? "on (one swipe per wheel burst)" : "off");
+        }
+        return;
+    }
+    if (down && sc == SDL_SCANCODE_ESCAPE && (ph_gesture_active(&a->gesture)
+        || a->pointer.buttons || a->pointer.requested_buttons || a->input.buttons)) {
+        cancel_control_intent(a, SDL_GetTicks64());
+        ph_input_release_all(&a->input);
+        SDL_CaptureMouse(SDL_FALSE);
+        a->gesture_keys[sc] = true;
+        return;
+    }
+    if (down && (e->keysym.mod & KMOD_LALT)) {
+        ph_gesture_kind kind = PH_GESTURE_SWIPE;
+        double x1 = .5, y1 = .8, x2 = .5, y2 = .2;
+        uint32_t duration = 300;
+        bool gesture_key = true;
+        switch (sc) {
+        case SDL_SCANCODE_PAGEDOWN: break;
+        case SDL_SCANCODE_PAGEUP: y1 = .2; y2 = .8; break;
+        case SDL_SCANCODE_U: y1 = .98; y2 = .35; break;
+        case SDL_SCANCODE_UP: gesture_key = (e->keysym.mod & KMOD_SHIFT) != 0; break;
+        case SDL_SCANCODE_DOWN:
+            gesture_key = (e->keysym.mod & KMOD_SHIFT) != 0; y1 = .2; y2 = .8; break;
+        case SDL_SCANCODE_LEFT:
+            gesture_key = (e->keysym.mod & KMOD_SHIFT) != 0;
+            x1 = .8; x2 = .2; y1 = y2 = .5; break;
+        case SDL_SCANCODE_RIGHT:
+            gesture_key = (e->keysym.mod & KMOD_SHIFT) != 0;
+            x1 = .2; x2 = .8; y1 = y2 = .5; break;
+        case SDL_SCANCODE_D:
+        case SDL_SCANCODE_L: {
+            double aspect;
+            gesture_key = current_pointer_coordinates(a, &x1, &y1, &aspect);
+            x2 = x1; y2 = y1;
+            kind = sc == SDL_SCANCODE_D ? PH_GESTURE_DOUBLE_TAP : PH_GESTURE_HOLD;
+            duration = 1000;
+            break;
+        }
+        default: gesture_key = false; break;
+        }
+        if (gesture_key) {
+            a->gesture_keys[sc] = true;
+            if (!e->repeat) {
+                mark_input(a, e->timestamp);
+                if (!start_control_gesture(a, kind, x1, y1, x2, y2, duration))
+                    PH_LOGD("gesture skipped: controls or pointer busy");
+            }
+            return;
+        }
+    }
     if (e->type == SDL_KEYDOWN) {
+        if (ph_gesture_active(&a->gesture))
+            ph_gesture_cancel(&a->gesture, SDL_GetTicks64());
+        reset_mouse_input(a);
         ph_scroll_cancel(&a->wheel); /* a new action cancels queued wheel batches */
         ph_scroll_forget_bounds(&a->wheel);
         if ((e->keysym.mod & KMOD_LALT) || sc == SDL_SCANCODE_LALT) {
             PH_LOGD("pointer cancel: Alt shortcut");
-            ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
+            cancel_control_intent(a, SDL_GetTicks64());
             SDL_CaptureMouse(SDL_FALSE);
         }
+    }
+    uint16_t consumer = pc_consumer_usage(sc);
+    if (a->phone_name[0] && consumer) {
+        if (!down || !(e->keysym.mod & KMOD_LALT)) {
+            mark_input(a, e->timestamp);
+            ph_input_consumer_key(&a->input, consumer, down, e->repeat != 0);
+        }
+        return;
     }
     if (a->phone_name[0] && (unsigned)sc < 256) {
         mark_input(a, e->timestamp);
@@ -640,6 +863,10 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
 
 static void release_everything(app *a)
 {
+    ph_gesture_cancel(&a->gesture, SDL_GetTicks64());
+    a->feed_mode = a->feed_have_wheel = false;
+    memset(a->gesture_keys, 0, sizeof a->gesture_keys);
+    reset_mouse_input(a);
     ph_input_release_all(&a->input);
     ph_pointer_reset(&a->pointer, SDL_GetTicks64());
     ph_scroll_reset(&a->wheel);
@@ -712,7 +939,21 @@ static void show_frame(app *a, const AVFrame *f)
         a->portrait_aspect = aspect;
     }
     ph_rect screen = ph_video_content_rect_stable(&planes, a->portrait_aspect, &a->crop);
+    bool presentation = !ph_video_matches_phone_screen(screen, a->portrait_aspect);
+    if (presentation != a->presentation_mode) {
+        a->presentation_mode = presentation;
+        cancel_control_intent(a, SDL_GetTicks64());
+        ph_pointer_set_enabled(&a->pointer, a->input.enabled && a->phone_name[0]
+                                && !presentation, SDL_GetTicks64());
+        SDL_CaptureMouse(SDL_FALSE);
+        PH_LOGI("pointer mapping: %s (%dx%d, phone aspect %.4f)",
+                presentation ? "paused; display layout differs from phone"
+                             : "phone layout restored", screen.w, screen.h, a->portrait_aspect);
+        update_title(a);
+    }
     if (screen.w != a->picture_w || screen.h != a->picture_h) {
+        ph_gesture_cancel(&a->gesture, SDL_GetTicks64());
+        reset_mouse_input(a);
         PH_LOGD("pointer reset: picture size %dx%d -> %dx%d", a->picture_w, a->picture_h,
                  screen.w, screen.h);
         ph_pointer_reset(&a->pointer, SDL_GetTicks64());
@@ -744,9 +985,14 @@ static void show_frame(app *a, const AVFrame *f)
 
 static void clear_view(app *a)
 {
+    ph_gesture_cancel(&a->gesture, SDL_GetTicks64());
+    reset_mouse_input(a);
+    a->feed_mode = a->feed_have_wheel = false;
     av_frame_unref(a->view_frame);
     av_frame_unref(a->pointer_baseline);
     a->picture_w = a->picture_h = 0;
+    a->presentation_mode = false;
+    a->portrait_aspect = 0;
     ph_video_crop_reset(&a->crop);
     a->view_seen_at = a->candidate_since = 0;
     a->checked_sync = a->candidate_sync = 0;
@@ -843,15 +1089,14 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
                 ph_window_set_setup(a->win, &a->setup);
             }
             ph_input_release_all(&a->input);
-            ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
-            ph_scroll_cancel(&a->wheel);
+            cancel_control_intent(a, SDL_GetTicks64());
+            memset(a->gesture_keys, 0, sizeof a->gesture_keys);
             SDL_CaptureMouse(SDL_FALSE);
         } else if (e->window.event == SDL_WINDOWEVENT_LEAVE) {
             PH_LOGD("pointer cancel: mouse left window");
             if (a->setup.calibrating)
                 break; /* calibration is autonomous; the mouse may be outside the picture */
-            ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
-            ph_scroll_cancel(&a->wheel);
+            cancel_control_intent(a, SDL_GetTicks64());
             SDL_CaptureMouse(SDL_FALSE);
         }
         break;
@@ -1028,6 +1273,7 @@ int ph_app_run(const ph_app_options *opt)
     app a = {.opt = opt};
     a.input.output = (ph_input_output){&a, send_keys, send_mouse, send_consumer};
     a.pointer.output = (ph_pointer_output){&a, send_mouse, send_delay, send_pointer_sync};
+    ph_gesture_init(&a.gesture, &a.pointer);
     a.wheel.output = (ph_scroll_output){&a, send_mouse, send_delay, send_sync};
     a.wheel.position = position_for_scroll;
     a.wheel.feedback = true;
@@ -1119,7 +1365,7 @@ int ph_app_run(const ph_app_options *opt)
         /* Button holds and video confirmation are timed in this loop: run it more
          * often while input is on its way to the phone. */
         bool busy = a.pointer.phase != PH_POINTER_IDLE || a.pointer.count
-                    || a.wheel.in_flight || a.wheel.waiting_frame;
+                    || a.wheel.in_flight || a.wheel.waiting_frame || ph_gesture_active(&a.gesture);
         if (SDL_WaitEventTimeout(&e, busy ? 4 : 16)) {
             do {
                 running = handle_event(&a, &e, frame, &seq) && running;
@@ -1134,6 +1380,10 @@ int ph_app_run(const ph_app_options *opt)
                 running = false;
         }
         observe_pointer(&a);
+        bool gesture_running = ph_gesture_active(&a.gesture);
+        ph_gesture_tick(&a.gesture, a.picture_w, a.picture_h, SDL_GetTicks64());
+        if (gesture_running && !ph_gesture_active(&a.gesture))
+            PH_LOGD("gesture finished: result %d", (int)ph_gesture_get_result(&a.gesture));
         ph_pointer_tick(&a.pointer, SDL_GetTicks64());
         ph_scroll_tick(&a.wheel, SDL_GetTicks64());
         if (a.link)

@@ -6,6 +6,8 @@ add_library(porthole_core STATIC
     core/metrics.c
     control/keyboard.c
     control/input.c
+    control/mouse_input.c
+    control/gesture.c
     control/pointer.c
     control/scroll.c
     control/setup.c

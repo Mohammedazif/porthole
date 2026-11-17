@@ -272,11 +272,15 @@ static void draw_help(ph_window *w, int width, int height)
     SDL_bool clipped;
     const char *mouse = "Move over the picture to point.\n"
                         "Left click: tap\nRight click: secondary click\n"
-                        "Hold and drag: swipe\nWheel: scroll";
+                        "Hold and drag: swipe\nWheel: scroll\n"
+                        "Shift+wheel: horizontal\nMiddle/side: assigned iPhone actions\n"
+                        "F4: feed wheel on/off";
     const char *keys = "Type directly. Ctrl is Command.\n"
-                       "Alt+H Home\nAlt+F Spotlight\nAlt+S App Switcher\n"
-                       "Alt+C Control Center\nAlt+N Notifications\n"
-                       "Alt+P Screenshot\nAlt+Left Back\nAlt+Up or Down Volume";
+                       "Alt+H Home / Alt+F Search\nAlt+S Apps / Alt+C Controls\n"
+                       "Alt+N Notifications / Alt+P Shot\nAlt+Left Back / Alt+Up,Down Volume\n"
+                       "Alt+PgDn,PgUp: swipe up,down\nAlt+Shift+arrows: swipe\n"
+                       "Alt+D double-tap / Alt+L hold\nAlt+U bottom-up swipe\n"
+                       "Esc cancel/release held input\nMedia keys: phone playback/volume";
     const char *setup = "AssistiveTouch on. Dwell Control off.\n" PH_PAIR_LINE "\n"
                         "Buttons 3-6: App Switcher, Control Center, Notifications, Screenshot.";
 
@@ -291,7 +295,7 @@ static void draw_help(ph_window *w, int width, int height)
     y = draw_text(w->renderer, "F1 closes", margin, y, panel.w - 2 * margin, scale, color_muted);
     y += gap;
     {
-        int key_h = 12 * 10 * scale;
+        int key_h = 15 * 10 * scale;
         if (wide && panel.w > 80 * scale) {
             int col = (panel.w - 2 * margin - gap) / 2;
             int card_h = key_h;
@@ -303,7 +307,7 @@ static void draw_help(ph_window *w, int width, int height)
             draw_card(w->renderer, right, scale, "Keyboard", keys);
             y += left.h + gap;
         } else {
-            SDL_Rect card = {margin, y, panel.w - 2 * margin, 8 * 10 * scale};
+            SDL_Rect card = {margin, y, panel.w - 2 * margin, 11 * 10 * scale};
             draw_card(w->renderer, card, scale, "Mouse", mouse);
             y = card.y + card.h + gap;
             card.y = y;
