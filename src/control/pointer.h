@@ -42,7 +42,7 @@ typedef struct ph_pointer {
     double scale_x, scale_y;
     double hint_x, hint_y, search_radius;
     double sent_start_x, sent_start_y, sent_dx, sent_dy;
-    bool learn_move, anchoring;
+    bool learn_move, anchoring, confirm_after_drain;
     uint8_t buttons, requested_buttons;
     ph_pointer_action actions[PH_POINTER_QUEUE];
     unsigned int head, count, attempts, recoveries;
@@ -68,8 +68,9 @@ bool ph_pointer_transport_stalled(const ph_pointer *p);
 bool ph_pointer_ready(const ph_pointer *p, double x, double y, double aspect);
 /* Search radius is expressed as a fraction of picture WIDTH, even for Y search. */
 bool ph_pointer_hint(const ph_pointer *p, double *x, double *y, double *radius);
-/* Cancel intent and release held buttons; reset also forgets the location.
- * Both retain a transport fence while already-sent reports drain. */
+/* Cancel intent and release held buttons, retaining endpoint feedback only for
+ * already-sent unpressed motion. Reset also forgets that confirmation. Both keep
+ * the transport fence until already-sent reports drain. */
 void ph_pointer_cancel(ph_pointer *p, uint64_t now_ms);
 void ph_pointer_reset(ph_pointer *p, uint64_t now_ms);
 /* Only when the old link/helper is gone: discard its unacknowledgeable fence. */

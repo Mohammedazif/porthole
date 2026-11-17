@@ -136,8 +136,74 @@ static void confirmed_position(fixture *f, double x, double y, double aspect)
     f->pointer.observed_at = f->now;
 }
 
+static void canceled_motion_confirmation(void)
+{
+    /* Leaving during either transport dispatch or its video wait clears the
+     * click/hover intent, but must not throw away an already-sent endpoint. */
+    for (int acknowledged = 0; acknowledged < 2; acknowledged++) {
+        fixture f;
+        init(&f);
+        confirmed_position(&f, 250, 540, .46);
+        CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true,
+                                 .75, .7, .46, ++f.now));
+        uint32_t id = f.pointer.sync_id;
+        if (acknowledged)
+            ph_pointer_ack(&f.pointer, id, f.now += 40);
+        size_t sent = f.count;
+        ph_pointer_cancel(&f.pointer, ++f.now);
+        CHECK(!f.pointer.active && !f.pointer.count && !f.pointer.requested_buttons);
+        CHECK(first_button(&f, PH_HID_BTN_LEFT) == f.count);
+        if (!acknowledged)
+            ph_pointer_ack(&f.pointer, id, f.now += 40);
+        CHECK(f.pointer.phase == PH_POINTER_WAIT_VIDEO && !f.pointer.known);
+        CHECK(f.count == sent && f.anchors == 0);
+        /* No post-ACK settling interval has elapsed. The old picture cannot
+         * confirm the endpoint, even though cancellation cleared the click. */
+        ph_pointer_observe(&f.pointer, true, .5, .5, f.pointer.wait_since - 1);
+        CHECK(!f.pointer.known && f.count == sent);
+        ph_pointer_observe(&f.pointer, true, .5, .5, f.now + 1);
+        CHECK(!f.pointer.known && f.count == sent);
+        f.now += 40;
+        ph_pointer_observe(&f.pointer, true, f.x / 500, f.y * .46 / 500, f.now);
+        CHECK(f.pointer.known && f.pointer.phase == PH_POINTER_IDLE);
+        CHECK(f.count == sent && !f.pointer.active); /* no cancelled-target follow-up */
+        CHECK(ph_pointer_target(&f.pointer, .4, .5, .46, ++f.now));
+        settle(&f);
+        CHECK(ph_pointer_ready(&f.pointer, .4, .5, .46) && f.anchors == 0);
+        CHECK(first_button(&f, PH_HID_BTN_LEFT) == f.count);
+    }
+
+    /* With no video while outside the window, expiry forgets the endpoint
+     * quietly. Cancellation must never reveal/probe/move the inactive phone. */
+    fixture f;
+    init(&f);
+    confirmed_position(&f, 250, 540, .46);
+    CHECK(ph_pointer_target(&f.pointer, .8, .8, .46, ++f.now));
+    ph_pointer_cancel(&f.pointer, ++f.now);
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now += 40);
+    size_t sent = f.count;
+    ph_pointer_tick(&f.pointer, f.now += 701);
+    ph_pointer_tick(&f.pointer, f.now += 4000);
+    CHECK(f.count == sent && !f.pointer.known && !f.pointer.active);
+    CHECK(f.pointer.phase == PH_POINTER_IDLE && !ph_pointer_transport_stalled(&f.pointer));
+
+    /* A second leave during that same confirmation must keep the original
+     * feedback instead of silently turning re-entry into another corner sweep. */
+    init(&f);
+    CHECK(ph_pointer_target(&f.pointer, .8, .8, .46, f.now));
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now += 40);
+    for (int i = 0; i < 20; i++) {
+        ph_pointer_cancel(&f.pointer, ++f.now);
+        CHECK(ph_pointer_target(&f.pointer, i % 2 ? .4 : .6, .5, .46, ++f.now));
+        CHECK(f.pointer.phase == PH_POINTER_WAIT_VIDEO && f.anchors == 8);
+    }
+    settle(&f);
+    CHECK(ph_pointer_ready(&f.pointer, .4, .5, .46) && f.anchors == 8);
+}
+
 int main(void)
 {
+    canceled_motion_confirmation();
     fixture f;
     init(&f);
     /* Motion before the first ACK coalesces. There is just one initial anchor. */
@@ -359,7 +425,7 @@ int main(void)
     ph_pointer_ack(&f.pointer, stale_id, ++f.now);
     CHECK(f.pointer.phase == PH_POINTER_DRAINING && f.count == initial);
     ph_pointer_ack(&f.pointer, release_id, ++f.now);
-    CHECK(f.pointer.phase == PH_POINTER_MOVING);
+    CHECK(f.pointer.phase == PH_POINTER_MOVING && f.anchors == 16);
     CHECK(f.pointer.sync_id != release_id);
 
     /* A missing transport ACK while dragging also releases the physical button. */
@@ -432,10 +498,10 @@ int main(void)
         CHECK(f.pointer.sync_id == stale_id && f.pointer.phase == PH_POINTER_DRAINING);
     }
     ph_pointer_ack(&f.pointer, stale_id, ++f.now);
-    CHECK(f.anchors == 16 && f.pointer.phase == PH_POINTER_MOVING);
+    CHECK(f.anchors == 8 && f.pointer.phase == PH_POINTER_WAIT_VIDEO);
     uint32_t next_id = f.pointer.sync_id;
     ph_pointer_ack(&f.pointer, stale_id, ++f.now);
-    CHECK(f.pointer.sync_id == next_id && f.pointer.phase == PH_POINTER_MOVING);
+    CHECK(f.pointer.sync_id == next_id && f.pointer.phase == PH_POINTER_WAIT_VIDEO);
     settle(&f);
     CHECK(ph_pointer_ready(&f.pointer, .2, .7, .46));
 

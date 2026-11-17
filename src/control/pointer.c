@@ -177,6 +177,9 @@ static void pop_action(ph_pointer *p)
 static void fail(ph_pointer *p)
 {
     ph_pointer_cancel(p, p->now_ms);
+    p->confirm_after_drain = false;
+    if (p->phase == PH_POINTER_WAIT_VIDEO)
+        p->phase = PH_POINTER_IDLE;
     p->known = false;
     p->failed = true;
     p->retry_at = p->now_ms + 500;
@@ -239,12 +242,19 @@ void ph_pointer_cancel(ph_pointer *p, uint64_t now_ms)
 {
     p->now_ms = now_ms;
     bool pending = awaiting_ack(p);
-    if (p->phase == PH_POINTER_MOVING || p->phase == PH_POINTER_WAIT_VIDEO)
+    bool waiting_video = p->phase == PH_POINTER_WAIT_VIDEO;
+    bool moving = p->phase == PH_POINTER_MOVING;
+    /* Releasing a held drag sends a new fence/baseline and invalidates its
+     * path geometry. Retain endpoint feedback only for unpressed motion. */
+    bool confirming = !p->buttons && (moving || waiting_video || p->confirm_after_drain);
+    if (moving || waiting_video || confirming)
         p->known = false;
     /* Cancelling our intent cannot retract reports already in the helper's
      * pipe. Keep their fence so rapid leave/re-enter events cannot flood it
      * with corner sweeps while ignoring every superseded acknowledgement. */
-    p->phase = pending ? PH_POINTER_DRAINING : PH_POINTER_IDLE;
+    p->phase = pending ? PH_POINTER_DRAINING
+                      : waiting_video && confirming ? PH_POINTER_WAIT_VIDEO : PH_POINTER_IDLE;
+    p->confirm_after_drain = pending && confirming;
     p->active = false;
     p->failed = false;
     p->head = p->count = 0;
@@ -254,8 +264,10 @@ void ph_pointer_cancel(ph_pointer *p, uint64_t now_ms)
         p->buttons = 0;
         if (p->output.mouse) {
             emit_mouse(p, 0, 0);
-            if (p->output.sync)
+            if (p->output.sync) {
+                p->confirm_after_drain = confirming;
                 sync(p, PH_POINTER_DRAINING); /* include the release in the drain */
+            }
         }
     }
 }
@@ -263,6 +275,9 @@ void ph_pointer_cancel(ph_pointer *p, uint64_t now_ms)
 void ph_pointer_reset(ph_pointer *p, uint64_t now_ms)
 {
     ph_pointer_cancel(p, now_ms);
+    p->confirm_after_drain = false;
+    if (p->phase == PH_POINTER_WAIT_VIDEO)
+        p->phase = PH_POINTER_IDLE;
     p->known = false;
     p->aspect = 0;
     p->failed = false;
@@ -384,7 +399,12 @@ void ph_pointer_ack(ph_pointer *p, uint32_t id, uint64_t now_ms)
         p->phase = PH_POINTER_WAIT_VIDEO;
         p->wait_since = now_ms;
     } else if (p->phase == PH_POINTER_DRAINING) {
-        p->phase = PH_POINTER_IDLE;
+        /* Cancelling a target cannot undo its queued motion. Confirm where it
+         * actually stopped before re-entering, rather than sweeping a corner
+         * every time the PC mouse briefly leaves the window. */
+        p->phase = p->confirm_after_drain ? PH_POINTER_WAIT_VIDEO : PH_POINTER_IDLE;
+        p->confirm_after_drain = false;
+        p->wait_since = now_ms;
         p->failed = false;
         p->retry_at = now_ms;
         pump(p);
@@ -428,7 +448,8 @@ static bool held_observation(const ph_pointer *p, double x, double y)
 void ph_pointer_observe(ph_pointer *p, bool found, double x, double y, uint64_t now_ms)
 {
     p->now_ms = now_ms;
-    if (p->phase != PH_POINTER_WAIT_VIDEO || now_ms - p->wait_since < FRAME_SETTLE_MS
+    if (p->phase != PH_POINTER_WAIT_VIDEO || now_ms < p->wait_since
+        || now_ms - p->wait_since < FRAME_SETTLE_MS
         || !found || !valid(x, y, p->aspect) || !held_observation(p, x, y))
         return;
     double width = model_width(p->aspect);
@@ -462,6 +483,13 @@ void ph_pointer_tick(ph_pointer *p, uint64_t now_ms)
         return;
     }
     if (p->phase == PH_POINTER_WAIT_VIDEO && now_ms - p->wait_since >= FRAME_TIMEOUT_MS) {
+        if (!p->active) {
+            /* Video may disappear when the mouse leaves. Forget quietly; an
+             * inactive cancellation must never reveal or move the phone. */
+            p->phase = PH_POINTER_IDLE;
+            p->known = false;
+            return;
+        }
         bool pending_press = p->count && p->actions[p->head].down && p->known
                              && !p->anchoring && !p->ack_timed_out;
         if ((p->count && !pending_press) || p->buttons || p->recoveries) {

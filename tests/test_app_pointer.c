@@ -24,6 +24,8 @@
 #define TARGET_Y 700
 #define DRAG_END_X 350
 #define DRAG_END_Y 500
+#define REENTER_X 150
+#define REENTER_Y 600
 
 struct ph_window { int unused; };
 struct ph_decoder { int unused; };
@@ -88,6 +90,9 @@ static bool delayed_frame;
 static Uint64 frame_due;
 static double delayed_x, delayed_y;
 static uint8_t delayed_buttons;
+static bool reentry_mode, reentry_focus, cancel_after_ack;
+static unsigned int reentry_stage, interrupted_reports, anchor_reports;
+static Uint64 last_move_ack_at, interrupted_at;
 
 static void apply_delivery(const paced_report *report);
 static void pump_delivery(void);
@@ -145,6 +150,20 @@ static void push_key(SDL_Scancode scancode, bool down, SDL_Keymod modifiers)
     event.key.state = down ? SDL_PRESSED : SDL_RELEASED;
     event.key.keysym.scancode = scancode;
     event.key.keysym.mod = modifiers;
+    SDL_PushEvent(&event);
+}
+
+static void push_motion(int x, int y)
+{
+    SDL_Event event = {.type = SDL_MOUSEMOTION};
+    event.motion.windowID = 1; event.motion.x = x; event.motion.y = y;
+    SDL_PushEvent(&event);
+}
+
+static void push_window(Uint8 action)
+{
+    SDL_Event event = {.type = SDL_WINDOWEVENT};
+    event.window.windowID = 1; event.window.event = action;
     SDL_PushEvent(&event);
 }
 
@@ -311,6 +330,41 @@ void ph_window_tick(ph_window *w)
         publish_frame();
         phone_x = saved_x; phone_y = saved_y; held_buttons = saved_buttons;
         delayed_frame = false;
+    }
+    if (reentry_mode && mirroring && control_ready && initial_frame) {
+        if (reentry_stage == 0) {
+            injected = true;
+            push_motion(TARGET_X, TARGET_Y); /* establish a warm confirmed model */
+            reentry_stage = 1;
+        } else if (reentry_stage == 1 && !delivery_count && !delayed_frame && last_move_ack_at
+                   && SDL_GetTicks64() - last_move_ack_at >= 180
+                   && hypot(phone_x - (TARGET_X + .5), phone_y - (TARGET_Y + .5)) <= 5) {
+            push_motion(400, 250); /* cancellation must discard this old intent */
+            interrupted_at = SDL_GetTicks64();
+            reentry_stage = 2;
+        } else if (reentry_stage == 2 &&
+                   (cancel_after_ack ? last_move_ack_at > interrupted_at && delayed_frame
+                                     : interrupted_reports && delivery_count)) {
+            canceled_at = SDL_GetTicks64();
+            push_window(reentry_focus ? SDL_WINDOWEVENT_FOCUS_LOST : SDL_WINDOWEVENT_LEAVE);
+            reentry_stage = 3;
+        } else if (reentry_stage == 3) {
+            /* The canceled endpoint is not yet visible. A new target may wait
+             * for that physical endpoint, but must not finish the old intent. */
+            push_window(reentry_focus ? SDL_WINDOWEVENT_FOCUS_GAINED : SDL_WINDOWEVENT_ENTER);
+            push_motion(REENTER_X, REENTER_Y);
+            SDL_Event button = {.type = SDL_MOUSEBUTTONDOWN};
+            button.button.windowID = 1; button.button.button = SDL_BUTTON_LEFT;
+            button.button.state = SDL_PRESSED;
+            button.button.x = REENTER_X; button.button.y = REENTER_Y;
+            SDL_PushEvent(&button);
+            button.type = SDL_MOUSEBUTTONUP; button.button.state = SDL_RELEASED;
+            SDL_PushEvent(&button);
+            reentry_stage = 4;
+        } else if (reentry_stage == 4 && releases && !delivery_count && !delayed_frame) {
+            quit();
+        }
+        return;
     }
     if ((cancel_mode || freeze_mode) && presses && !fault_stage) {
         fault_stage = 1;
@@ -569,6 +623,8 @@ bool ph_hid_link_mouse(ph_hid_link *l, const ph_hid_mouse *m)
         modal_leaks++;
     if (m->dx || m->dy) {
         moved_since_frame = true;
+        if (reentry_mode && reentry_stage == 2 && m->dx != -127 && m->dy != -127)
+            interrupted_reports++;
         phone_x = fmin(PHONE_WIDTH - 16, fmax(16, phone_x + travel(m->dx)));
         phone_y = fmin(PHONE_HEIGHT - 16, fmax(16, phone_y + travel(m->dy)));
         if (m->buttons & PH_HID_BTN_LEFT)
@@ -576,6 +632,7 @@ bool ph_hid_link_mouse(ph_hid_link *l, const ph_hid_mouse *m)
     }
     if (m->dx == -127 && m->dy == -127 && m->buttons)
         anchored_with_button = true;
+    if (m->dx == -127 && m->dy == -127) anchor_reports++;
     if (!(held_buttons & PH_HID_BTN_LEFT) && (m->buttons & PH_HID_BTN_LEFT)) {
         presses++;
         pressed_x = phone_x;
@@ -643,6 +700,7 @@ static void apply_delivery(const paced_report *report)
         if (moved_since_frame) {
             moved_since_frame = false;
             movement_acks++;
+            last_move_ack_at = SDL_GetTicks64();
             if (!freeze_video && !draining_stop) {
                 if (after_ack) {
                     delayed_frame = true; frame_due = SDL_GetTicks64() + frame_delay_ms;
@@ -690,7 +748,16 @@ int main(int argc, char **argv)
         || !strcmp(argv[1], "--freeze-drag") || !strcmp(argv[1], "--disconnect-drag")
         || !strcmp(argv[1], "--focus-drag") || !strcmp(argv[1], "--close-drag")
         || !strcmp(argv[1], "--modal-drag") || !strcmp(argv[1], "--calibration-focus")
-        || !strcmp(argv[1], "--calibration-escape"));
+        || !strcmp(argv[1], "--calibration-escape")
+        || !strcmp(argv[1], "--cancel-move-leave") || !strcmp(argv[1], "--cancel-move-focus")
+        || !strcmp(argv[1], "--cancel-video-leave") || !strcmp(argv[1], "--cancel-video-focus"));
+    reentry_mode = argc == 2 && (!strcmp(argv[1], "--cancel-move-leave")
+        || !strcmp(argv[1], "--cancel-move-focus") || !strcmp(argv[1], "--cancel-video-leave")
+        || !strcmp(argv[1], "--cancel-video-focus"));
+    reentry_focus = argc == 2 && (!strcmp(argv[1], "--cancel-move-focus")
+        || !strcmp(argv[1], "--cancel-video-focus"));
+    cancel_after_ack = argc == 2 && (!strcmp(argv[1], "--cancel-video-leave")
+        || !strcmp(argv[1], "--cancel-video-focus"));
     filtered_mode = argc == 2 && !strcmp(argv[1], "--filtered-events");
     confirmation_mode = argc == 2 && !strcmp(argv[1], "--confirmation-latency");
     changing_mode = argc == 2 && !strcmp(argv[1], "--changing-confirmation");
@@ -710,8 +777,9 @@ int main(int argc, char **argv)
         : argc == 2 && !strcmp(argv[1], "--close-drag") ? "close"
         : argc == 2 && !strcmp(argv[1], "--modal-drag") ? "modal"
         : calibration_mode ? argv[1] + 2 : "focus";
-    after_ack = argc == 2 && (!strcmp(argv[1], "--paced-after-ack") || !strcmp(argv[1], "--paced-drag"));
-    frame_delay_ms = 80;
+    after_ack = reentry_mode || (argc == 2 && (!strcmp(argv[1], "--paced-after-ack")
+        || !strcmp(argv[1], "--paced-drag")));
+    frame_delay_ms = reentry_mode ? 120 : 80;
     char config[] = "/tmp/porthole-pointer-XXXXXX";
     if (!mkdtemp(config))
         return 1;
@@ -728,6 +796,20 @@ int main(int argc, char **argv)
     snprintf(app_config, sizeof app_config, "%s/porthole", config);
     rmdir(app_config);
     rmdir(config);
+    if (reentry_mode) {
+        double error = hypot(pressed_x - (REENTER_X + .5), pressed_y - (REENTER_Y + .5));
+        bool passed = !result && !timed_out && !frame_failure && !queue_overflow
+            && reentry_stage == 4 && interrupted_reports && canceled_at && presses == 1
+            && releases == 1 && !held_buttons && !keyboard_held && !delivery_count
+            && !anchored_with_button && release_synced && !stop_requests && link_starts == 1
+            && anchor_reports == 8 && error <= 5;
+        fprintf(passed ? stdout : stderr,
+                "canceled unpressed motion %s: pass=%d stage=%u anchors=%u interrupted_reports=%u "
+                "presses=%u releases=%u held=%u error=%.2f timeout=%d helper_stops=%u\n",
+                argv[1], passed, reentry_stage, anchor_reports, interrupted_reports,
+                presses, releases, held_buttons, error, timed_out, stop_requests);
+        return passed ? 0 : 1;
+    }
     if (filtered_mode) {
         bool passed = !result && !timed_out && filtered_events >= 2 && !injected && link_starts == 1;
         fprintf(passed ? stdout : stderr, "filtered app events: pass=%d rejected=%u helper_starts=%u\n",
