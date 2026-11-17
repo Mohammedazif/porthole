@@ -17,6 +17,18 @@ spec.loader.exec_module(ble)
 
 
 class SenderTests(unittest.TestCase):
+    def test_repeated_final_neutral_reports_continue_after_teardown_errors(self):
+        reports = {kind: Mock() for kind in (1, 2, 3)}
+        reports[1].notify.side_effect = ble.dbus.exceptions.DBusException('radio removed')
+        reports[2].notify.side_effect = ble.dbus.exceptions.DBusException('provider gone')
+        with patch.object(ble, 'log') as log:
+            ble.release_reports(reports)
+            ble.release_reports(reports)
+        for kind, size in ((1, 8), (2, 7), (3, 2)):
+            self.assertEqual([call.args for call in reports[kind].notify.call_args_list],
+                             [(bytes(size),), (bytes(size),)])
+        self.assertEqual(log.call_count, 4)
+
     def test_mouse_alone_cannot_mark_composite_input_ready(self):
         reports = {kind: Mock(subscribed_at=0.0) for kind in (1, 2, 3)}
         reports[ble.FRAME_MOUSE].subscribed_at = 20.0
@@ -221,16 +233,17 @@ class SenderTests(unittest.TestCase):
 class ConnectionTests(unittest.TestCase):
     """Drive the real helper setup and recovery callbacks without a radio."""
 
-    def run_helper(self, scenario, initial_devices=None):
+    def run_helper(self, scenario, initial_devices=None, auto_register=True):
         h = SimpleNamespace(bus=Mock(), gatt=Mock(), adv=Mock(), agent=Mock(),
                             properties=Mock(), device=Mock(), manager=Mock(), loop=Mock(),
-                            emit=Mock(), clock=Mock(return_value=10.0), bonded=True,
+                            emit=Mock(), log=Mock(), clock=Mock(return_value=10.0), bonded=True,
                             timers=[], states={}, reports={kind: Mock(subscribed_at=0.0)
                                                           for kind in (1, 2, 3)})
         h.objects = {str(path): {name: dict(properties) for name, properties in interfaces.items()}
                      for path, interfaces in (initial_devices or {}).items()}
         h.devices = {}
         h.application = Mock(get_path=lambda: ble.APP_PATH)
+        h.threads = Mock()
         h.registration_checks = []
         h.gatt.RegisterApplication.side_effect = lambda *args, **kwargs: h.registration_checks.append(
             {'InterfacesAdded', 'InterfacesRemoved', 'PropertiesChanged'}.issubset(
@@ -311,7 +324,11 @@ class ConnectionTests(unittest.TestCase):
         h.event, h.added, h.subscribe, h.timer = event, added, subscribed, find_timer
         h.fire = lambda item: item[1](*item[2])
         h.registered = lambda: h.gatt.RegisterApplication.call_args.kwargs['reply_handler']()
-        h.loop.run.side_effect = lambda: scenario(h)
+        def run_scenario():
+            if auto_register:
+                h.registered()
+            scenario(h)
+        h.loop.run.side_effect = run_scenario
         with ExitStack() as stack:
             for owner, name, value in (
                     (ble.dbus.mainloop.glib, 'DBusGMainLoop', Mock()),
@@ -323,14 +340,15 @@ class ConnectionTests(unittest.TestCase):
                     (ble, 'Advertisement', Mock(return_value=Mock(get_path=lambda: ble.ADV_PATH))),
                     (ble, 'Agent', Mock()),
                     (ble, 'build_hid', Mock(return_value=h.reports)),
-                    (ble.threading, 'Thread', Mock()),
+                    (ble.threading, 'Thread', h.threads),
                     (ble.GLib, 'MainLoop', Mock(return_value=h.loop)),
                     (ble.GLib, 'timeout_add', timer),
                     (ble.GLib, 'unix_signal_add', Mock()),
-                    (ble, 'emit', h.emit), (ble, 'log', Mock()),
+                    (ble, 'emit', h.emit), (ble, 'log', h.log),
                     (ble.time, 'time', h.clock)):
                 stack.enter_context(patch.object(owner, name, value))
             self.assertEqual(ble.main(), 0)
+        return h
 
     def test_advertising_waits_for_hid_registration(self):
         def scenario(h):
@@ -338,14 +356,14 @@ class ConnectionTests(unittest.TestCase):
             h.adv.RegisterAdvertisement.assert_not_called()
             h.registered()
             h.adv.RegisterAdvertisement.assert_called_once()
-        self.run_helper(scenario)
+        self.run_helper(scenario, auto_register=False)
 
     def test_failed_registration_never_advertises(self):
         def scenario(h):
             h.gatt.RegisterApplication.call_args.kwargs['error_handler']('registration failed')
             h.adv.RegisterAdvertisement.assert_not_called()
             h.loop.quit.assert_called_once()
-        self.run_helper(scenario)
+        self.run_helper(scenario, auto_register=False)
 
     def test_startup_cleanup_does_not_disconnect_a_fresh_link(self):
         def scenario(h):
@@ -357,14 +375,21 @@ class ConnectionTests(unittest.TestCase):
             h.gatt.UnregisterApplication.assert_not_called()
         self.run_helper(scenario)
 
-    def test_startup_cleanup_still_drops_an_old_link(self):
+    def test_startup_bonded_link_reconnects_once_after_replacement_registration_grace(self):
         def scenario(h):
             self.assertFalse(any(timer[0] == 2000 for timer in h.timers))
             self.assertGreaterEqual(h.timer('check_resubscribed')[0], 15000)
             h.fire(h.timer('check_resubscribed'))
-            h.fire(h.timer('reconnect_if_stale'))
-            h.device.Disconnect.assert_called_once()
-            self.assertEqual(h.device.Disconnect.call_args.args, ('/adapter/dev_PHONE',))
+            self.assertFalse(any(timer[1].__name__ == 'subscription_deadline' for timer in h.timers))
+            h.fire(next(timer for timer in h.timers if timer[0] == 500))
+            h.registered()
+            self.assertEqual(h.timer('subscription_deadline')[0], 15000)
+            h.fire(h.timer('subscription_deadline'))
+            h.device.Disconnect.assert_called_once_with('/adapter/dev_PHONE')
+            handlers = h.devices['/adapter/dev_PHONE'].Disconnect.call_args.kwargs
+            self.assertTrue(callable(handlers['reply_handler']))
+            self.assertTrue(callable(handlers['error_handler']))
+            h.gatt.UnregisterApplication.assert_called_once()
         self.run_helper(scenario, {'/adapter/dev_PHONE': {ble.DEVICE_IFACE: {
             'Connected': True, 'Icon': 'phone', 'Bonded': True, 'Trusted': True}}})
 
@@ -389,15 +414,15 @@ class ConnectionTests(unittest.TestCase):
             h.event(True)
             h.fire(h.timer('check_resubscribed'))
             h.gatt.UnregisterApplication.assert_called_once()
-            disconnect = h.timer('reconnect_if_stale')
-            h.event(False)
-            h.event(True)
-            h.fire(disconnect)
-            h.device.Disconnect.assert_not_called()
-            # Restoring the application after refresh must not advertise twice.
             registration = next(t for t in h.timers if t[0] == 500)
             h.fire(registration)
             h.registered()
+            deadline = h.timer('subscription_deadline')
+            h.event(False)
+            h.event(True)
+            h.fire(deadline)
+            h.device.Disconnect.assert_not_called()
+            # Restoring the application after refresh must not advertise twice.
             h.adv.RegisterAdvertisement.assert_called_once()
         self.run_helper(scenario)
 
@@ -477,9 +502,11 @@ class ConnectionTests(unittest.TestCase):
             h.event(False, '/adapter/dev_HEADSET')
             h.emit.assert_not_called()
             h.fire(phone_timer)
-            h.fire(h.timer('reconnect_if_stale'))
-            self.assertEqual(h.device.Disconnect.call_args_list[0].args, ('/adapter/dev_PHONE',))
-            self.assertEqual(h.device.Disconnect.call_count, 1)
+            h.fire(next(timer for timer in h.timers if timer[0] == 500))
+            h.registered()
+            h.fire(h.timer('subscription_deadline'))
+            h.device.Disconnect.assert_called_once_with('/adapter/dev_PHONE')
+            h.gatt.UnregisterApplication.assert_called_once()
         self.run_helper(scenario)
 
     def test_early_cccds_are_reconciled_when_unknown_client_is_identified_later(self):
@@ -520,7 +547,7 @@ class ConnectionTests(unittest.TestCase):
             '/other_adapter/dev_PHONE': {ble.DEVICE_IFACE: {'Connected': True, 'Icon': 'phone',
                                                          'Bonded': True, 'Trusted': True}}})
 
-    def test_automatic_disconnect_requires_current_trust_and_bond(self):
+    def test_provider_refresh_requires_current_trust_and_bond(self):
         def scenario(h):
             path = '/adapter/dev_PHONE'
             h.added(path, {'Connected': True, 'Icon': 'phone', 'Bonded': True,
@@ -532,12 +559,14 @@ class ConnectionTests(unittest.TestCase):
             h.objects[path][ble.DEVICE_IFACE]['Trusted'] = True
             h.fire(recovery)
             h.gatt.UnregisterApplication.assert_called_once()
-            disconnect = h.timer('reconnect_if_stale')
+            h.fire(next(timer for timer in h.timers if timer[0] == 500))
+            h.registered()
+            deadline = h.timer('subscription_deadline')
             h.objects[path][ble.DEVICE_IFACE]['Trusted'] = False
-            h.fire(disconnect)
+            h.fire(deadline)
             h.device.Disconnect.assert_not_called()
             h.objects[path][ble.DEVICE_IFACE].update(Trusted=True, Bonded=False)
-            h.fire(disconnect)
+            h.fire(deadline)
             h.device.Disconnect.assert_not_called()
         self.run_helper(scenario)
 
@@ -585,6 +614,234 @@ class ConnectionTests(unittest.TestCase):
             h.device.Disconnect.assert_not_called()
             h.gatt.UnregisterApplication.assert_not_called()
         self.run_helper(scenario)
+
+    def test_fresh_helper_replaces_provider_without_dropping_the_existing_bonded_link(self):
+        phone = '/adapter/dev_PHONE'
+        initial = {phone: {ble.DEVICE_IFACE: {'Connected': True, 'Paired': True,
+                                             'Bonded': True, 'Trusted': True, 'Icon': 'phone'}}}
+        old_reports = {}
+
+        def previous_helper(h):
+            h.subscribe(11.0)
+            h.emit.assert_any_call('subscribed')
+            old_reports.update(h.reports)
+        self.run_helper(previous_helper, initial)
+
+        def restarted_helper(h):
+            self.assertTrue(all(report is not old_reports[kind] and report.subscribed_at == 0
+                                for kind, report in h.reports.items()))
+            self.assertNotIn(('subscribed',), [call.args for call in h.emit.call_args_list])
+            old_registered = h.gatt.RegisterApplication.call_args.kwargs['reply_handler']
+            h.clock.return_value = 25.0
+            h.fire(h.timer('check_resubscribed'))
+            h.gatt.UnregisterApplication.assert_called_once()
+            self.assertFalse(any(timer[0] == 1500 for timer in h.timers))
+            registration = next(timer for timer in h.timers if timer[0] == 500)
+            h.fire(registration)
+            old_registered()  # A stale success cannot finish the replacement.
+            self.assertFalse(any(timer[1].__name__ == 'subscription_deadline' for timer in h.timers))
+            h.clock.return_value = 32.0  # Slow async registration exceeds the old 1.5 s recovery.
+            h.registered()
+            deadline = h.timer('subscription_deadline')
+            self.assertEqual(deadline[0], 15000)
+            h.subscribe(35.0)  # Restored CCCDs arrive three seconds after completion.
+            h.emit.assert_any_call('subscribed')
+            h.clock.return_value = 47.0
+            h.fire(deadline)
+            h.device.Disconnect.assert_not_called()
+            h.gatt.UnregisterApplication.assert_called_once()
+            self.assertEqual(h.gatt.RegisterApplication.call_count, 2)
+            self.assertTrue(h.objects[phone][ble.DEVICE_IFACE]['Bonded'])
+            self.assertTrue(h.objects[phone][ble.DEVICE_IFACE]['Trusted'])
+        self.run_helper(restarted_helper, initial)
+
+    def test_missing_replacement_cccds_reconnect_only_once_across_physical_reconnects(self):
+        def scenario(h):
+            h.event(True)
+            old_timer = h.timer('check_resubscribed')
+            h.fire(old_timer)
+            h.fire(next(timer for timer in h.timers if timer[0] == 500))
+            h.registered()
+            deadline = h.timer('subscription_deadline')
+            for _ in range(3):
+                h.fire(deadline)
+                h.fire(old_timer)
+            h.gatt.UnregisterApplication.assert_called_once()
+            self.assertEqual(h.gatt.RegisterApplication.call_count, 2)
+            h.device.Disconnect.assert_called_once_with('/adapter/dev_PHONE')
+            # Missing CCCDs after that reconnect cannot start another provider/
+            # Disconnect cycle, even though this is a new physical connection.
+            for _ in range(3):
+                h.event(False)
+                h.clock.return_value += 20.0
+                h.event(True)
+                h.fire(h.timer('check_resubscribed'))
+            h.device.Disconnect.assert_called_once_with('/adapter/dev_PHONE')
+            h.gatt.UnregisterApplication.assert_called_once()
+            self.assertEqual(h.gatt.RegisterApplication.call_count, 2)
+            self.assertTrue(any('waiting for the phone' in call.args[0] for call in h.log.call_args_list))
+            self.assertFalse(any(call.args[0].startswith('error') for call in h.emit.call_args_list))
+        self.run_helper(scenario)
+
+    def test_replacement_disconnect_waits_for_async_registration_to_complete(self):
+        def scenario(h):
+            h.event(True)
+            h.fire(h.timer('check_resubscribed'))
+            h.device.Disconnect.assert_not_called()
+            h.clock.return_value = 45.0
+            # Time while Unregister/RegisterApplication is pending contributes
+            # nothing to the replacement provider's full 15 second grace.
+            self.assertFalse(any(timer[1].__name__ == 'subscription_deadline' for timer in h.timers))
+            h.fire(next(timer for timer in h.timers if timer[0] == 500))
+            h.device.Disconnect.assert_not_called()
+            self.assertFalse(any(timer[1].__name__ == 'subscription_deadline' for timer in h.timers))
+            h.clock.return_value = 70.0
+            h.registered()
+            deadline = h.timer('subscription_deadline')
+            self.assertEqual(deadline[0], 15000)
+            h.device.Disconnect.assert_not_called()
+            h.clock.return_value = 85.0
+            h.fire(deadline)
+            h.device.Disconnect.assert_called_once_with('/adapter/dev_PHONE')
+        self.run_helper(scenario)
+
+    def test_replacement_partial_or_complete_cccd_progress_is_never_interrupted(self):
+        for subscribed_kinds in ((1,), (2,), (3,), (1, 2), (1, 2, 3)):
+            with self.subTest(subscribed_kinds=subscribed_kinds):
+                def scenario(h):
+                    h.event(True)
+                    h.fire(h.timer('check_resubscribed'))
+                    h.fire(next(timer for timer in h.timers if timer[0] == 500))
+                    h.registered()
+                    deadline = h.timer('subscription_deadline')
+                    for kind in subscribed_kinds:
+                        h.reports[kind].subscribed_at = 20.0
+                        h.reports[kind].on_subscribe()
+                    h.fire(deadline)
+                    h.device.Disconnect.assert_not_called()
+                    h.gatt.UnregisterApplication.assert_called_once()
+                self.run_helper(scenario)
+
+    def test_replacement_disconnect_requires_current_bond_trust_and_connection(self):
+        for changed in ({'Bonded': False}, {'Trusted': False}, {'Connected': False}):
+            with self.subTest(changed=changed):
+                def scenario(h):
+                    h.event(True)
+                    h.fire(h.timer('check_resubscribed'))
+                    h.fire(next(timer for timer in h.timers if timer[0] == 500))
+                    h.registered()
+                    deadline = h.timer('subscription_deadline')
+                    h.objects['/adapter/dev_PHONE'][ble.DEVICE_IFACE].update(changed)
+                    if 'Connected' in changed:
+                        h.states['/adapter/dev_PHONE'] = False  # before its signal arrives
+                    h.fire(deadline)
+                    h.device.Disconnect.assert_not_called()
+                self.run_helper(scenario)
+
+    def test_replacement_deadline_cannot_disconnect_a_different_peer(self):
+        def scenario(h):
+            h.event(True)
+            h.fire(h.timer('check_resubscribed'))
+            h.fire(next(timer for timer in h.timers if timer[0] == 500))
+            h.registered()
+            deadline = h.timer('subscription_deadline')
+            h.event(False)
+            h.added('/adapter/dev_PHONE_B', {'Connected': True, 'Icon': 'phone',
+                                           'Bonded': True, 'Trusted': True})
+            h.fire(deadline)
+            h.device.Disconnect.assert_not_called()
+        self.run_helper(scenario)
+
+    def test_failed_disconnect_still_consumes_the_single_recovery_attempt(self):
+        def scenario(h):
+            h.event(True)
+            h.fire(h.timer('check_resubscribed'))
+            h.fire(next(timer for timer in h.timers if timer[0] == 500))
+            h.registered()
+            deadline = h.timer('subscription_deadline')
+            h.fire(deadline)
+            handlers = h.devices['/adapter/dev_PHONE'].Disconnect.call_args.kwargs
+            self.assertTrue(callable(handlers['reply_handler']))
+            handlers['error_handler'](ble.dbus.exceptions.DBusException('already in progress'))
+            for _ in range(3):
+                h.fire(deadline)
+            h.device.Disconnect.assert_called_once_with('/adapter/dev_PHONE')
+            self.assertTrue(any('already in progress' in call.args[0] for call in h.log.call_args_list))
+        self.run_helper(scenario)
+
+    def test_early_cccds_wait_for_provider_completion_and_late_disconnected_cccds_stay_off(self):
+        def scenario(h):
+            h.event(True)
+            self.assertFalse(h.timers)  # No discovery timer before provider publication.
+            h.subscribe(11.0)
+            self.assertNotIn(('subscribed',), [call.args for call in h.emit.call_args_list])
+            h.clock.return_value = 20.0
+            h.registered()
+            h.emit.assert_any_call('subscribed')
+            h.event(False)
+            h.emit.reset_mock()
+            h.subscribe(21.0)
+            self.assertNotIn(('subscribed',), [call.args for call in h.emit.call_args_list])
+            h.device.Disconnect.assert_not_called()
+        self.run_helper(scenario, auto_register=False)
+
+    def test_cccd_callback_cannot_mark_ready_when_bluez_already_reports_disconnected(self):
+        def scenario(h):
+            h.event(True)
+            # The live state can change before its PropertiesChanged is delivered.
+            h.states['/adapter/dev_PHONE'] = False
+            h.emit.reset_mock()
+            h.subscribe(11.0)
+            self.assertNotIn(('subscribed',), [call.args for call in h.emit.call_args_list])
+        self.run_helper(scenario)
+
+    def test_sigterm_neutralizes_before_unregister_and_blocks_queued_normal_dispatch(self):
+        real_thread = threading.Thread
+        pending, history, workers = queue.Queue(), [], []
+
+        def scenario(h):
+            h.event(True)
+            h.subscribe(11.0)
+            for kind, report in h.reports.items():
+                report.notify.side_effect = lambda value, kind=kind: history.append(('notify', kind, value))
+            stopping = next(call.kwargs['kwargs']['stopping'] for call in h.threads.call_args_list
+                            if call.kwargs.get('target') == ble.sender)
+            frames = queue.Queue()
+            frames.put((ble.FRAME_MOUSE, b'\x01' + bytes(6)))
+            with patch.object(ble.GLib, 'idle_add', side_effect=lambda *args: pending.put(args)):
+                worker = real_thread(target=ble.sender, args=(frames, h.reports, h.loop, False),
+                                     kwargs={'stopping': stopping}, daemon=True)
+                workers.append(worker)
+                worker.start()
+                dispatch, *arguments = pending.get(timeout=1)
+
+            def unregister(*_arguments):
+                history.append(('unregister',))
+                dispatch(*arguments)  # Simulate a queued callback during D-Bus teardown.
+            h.gatt.UnregisterApplication.side_effect = unregister
+            sigterm = next(call.args[2] for call in ble.GLib.unix_signal_add.call_args_list
+                           if call.args[1] == ble.signal.SIGTERM)
+            sigterm()
+
+        self.run_helper(scenario)
+        for worker in workers:
+            worker.join(timeout=1)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(history, [('notify', 1, bytes(8)), ('notify', 2, bytes(7)),
+                                   ('notify', 3, bytes(2)), ('unregister',)])
+
+    def test_teardown_attempts_all_neutrals_and_remaining_unregisters_after_errors(self):
+        def scenario(h):
+            h.reports[1].notify.side_effect = ble.dbus.exceptions.DBusException('lost keyboard')
+            h.reports[2].notify.side_effect = ble.dbus.exceptions.DBusException('lost mouse')
+            h.gatt.UnregisterApplication.side_effect = ble.dbus.exceptions.DBusException('radio removed')
+        h = self.run_helper(scenario)
+        for kind, size in ((1, 8), (2, 7), (3, 2)):
+            h.reports[kind].notify.assert_called_once_with(bytes(size))
+        h.adv.UnregisterAdvertisement.assert_called_once()
+        h.gatt.UnregisterApplication.assert_called_once()
+        h.agent.UnregisterAgent.assert_called_once()
+        self.assertEqual(h.properties.Set.call_args.args[:2], (ble.ADAPTER_IFACE, 'Alias'))
 
 
 if __name__ == "__main__":

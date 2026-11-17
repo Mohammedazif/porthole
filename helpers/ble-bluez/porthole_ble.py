@@ -380,11 +380,15 @@ def stdin_reader(out_queue, key_queue=None):
     out_queue.put(None)
 
 
-def sender(in_queue, reports, loop, quit_at_eof=True, wait_for=None):
+def sender(in_queue, reports, loop, quit_at_eof=True, wait_for=None, stopping=None):
     """Sends one lane's queued reports; waits for the other lane before quitting."""
     interval = 0.015
     while True:
+        if stopping is not None and stopping.is_set():
+            return
         item = in_queue.get()
+        if stopping is not None and stopping.is_set():
+            return
         if item is None:
             if quit_at_eof:
                 if wait_for is not None:
@@ -403,7 +407,8 @@ def sender(in_queue, reports, loop, quit_at_eof=True, wait_for=None):
 
             def dispatch(chrc=reports[ftype], value=payload, done=sent):
                 try:
-                    chrc.notify(value)
+                    if stopping is None or not stopping.is_set():
+                        chrc.notify(value)
                 finally:
                     done.set()
                 return False
@@ -414,6 +419,20 @@ def sender(in_queue, reports, loop, quit_at_eof=True, wait_for=None):
             # acknowledge only reports whose callbacks have finished.
             sent.wait()
             time.sleep(interval)
+
+
+def release_reports(reports):
+    """Main-loop thread, before unregistering: leave no held key/button behind."""
+    for kind in (FRAME_KEYBOARD, FRAME_MOUSE, FRAME_CONSUMER):
+        report = reports.get(kind)
+        if report is None:
+            continue
+        try:
+            report.notify(bytes(EXPECTED_LEN[kind]))
+        except Exception as error:
+            # A disappearing radio/service must not prevent the other releases
+            # or provider/agent cleanup from being attempted.
+            log(f"final neutral report {kind} failed: {error}")
 
 
 # --------------------------------------------------------------------------- main
@@ -461,6 +480,7 @@ def main():
     props.Set(ADAPTER_IFACE, "Alias", dbus.String(name))
 
     loop = GLib.MainLoop()
+    stopping = threading.Event()
 
     def bluez_owner_changed(service, old_owner, new_owner):
         if old_owner:
@@ -487,17 +507,34 @@ def main():
     agent_mgr.RequestDefaultAgent(AGENT_PATH)
 
     advertising_started = [False]
+    service_registered = [False]
+    registration_generation = [0]
+    refreshed_link = [False]
+    reconnect_attempted = set()  # One recovery per peer for this helper's lifetime.
 
     def register_app(fatal=True):
+        registration_generation[0] += 1
+        registration = registration_generation[0]
+        service_registered[0] = False
+
         def registered():
+            if registration != registration_generation[0] or service_registered[0]:
+                return
+            service_registered[0] = True
             # BlueZ fetches our objects asynchronously. Advertising before that
             # finishes lets a fast reconnect discover an incomplete HID service.
             if not advertising_started[0]:
                 advertising_started[0] = True
                 adv_mgr.RegisterAdvertisement(adv.get_path(), {}, reply_handler=advertised,
                                               error_handler=adv_failed)
+            # Restored CCCDs may arrive before the async registration reply.
+            # Give the published provider its own full discovery grace.
+            on_subscribe()
+            arm_subscription_check()
 
         def failed(e):
+            if registration != registration_generation[0]:
+                return
             emit(f"error registering the HID service: {e}")
             if fatal:
                 loop.quit()
@@ -507,6 +544,8 @@ def main():
 
     def reregister():
         """iOS rediscovers the services and subscribes again after this."""
+        service_registered[0] = False
+        registration_generation[0] += 1  # retire timers/replies for the old provider
         for report in reports.values():
             report.subscribed_at = 0.0  # a replaced service cannot reuse its old CCC state
         try:
@@ -554,8 +593,17 @@ def main():
         except dbus.exceptions.DBusException:
             return False
 
+    def device_connected(path):
+        try:
+            dev = dbus.Interface(bus.get_object(BLUEZ, path), DBUS_PROP_IFACE)
+            return bool(dev.Get(DEVICE_IFACE, "Connected"))
+        except dbus.exceptions.DBusException:
+            return False
+
     def on_subscribe():
-        if (connected_path[0] and reports_subscribed(reports, connected_since[0])
+        if (service_registered[0] and connected_path[0]
+                and device_connected(connected_path[0])
+                and reports_subscribed(reports, connected_since[0])
                 and time.time() - subscribed_announced[0] > 1.0):
             subscribed_announced[0] = time.time()
             subscription_peer[0] = connected_path[0]
@@ -563,34 +611,63 @@ def main():
     for report in reports.values():
         report.on_subscribe = on_subscribe
 
-    def reconnect_if_stale(path, connected_at, generation):
-        if generation != connection_generation[0] or path != connected_path[0]:
-            return False  # a timer from an old link must never disconnect a new one
+    def subscription_deadline(connected_at, path, generation, registration):
+        if (generation != connection_generation[0] or path != connected_path[0]
+                or registration != registration_generation[0] or not service_registered[0]):
+            return False
         if reports_subscribed(reports, connected_at):
             return False
-        if not selected_adapter(path) or not bonded_and_trusted(path):
+        # Replacing a provider removes its native CCCDs. A bonded phone may
+        # rediscover them only after reconnecting, but first let publication
+        # finish and give it a full discovery grace. Never interrupt partial
+        # subscriptions, fresh pairing, or repeatedly cycle a quiet peer.
+        if (refreshed_link[0] and path not in reconnect_attempted
+                and not any(report.subscribed_at > 0 for report in reports.values())
+                and bonded_and_trusted(path)):
+            # Property reads may dispatch D-Bus callbacks: recheck the captured
+            # provider/connection and subscription progress immediately before
+            # acting on that peer. Consume the attempt even if Disconnect fails.
+            if (generation != connection_generation[0] or path != connected_path[0]
+                    or registration != registration_generation[0] or not service_registered[0]
+                    or any(report.subscribed_at > 0 for report in reports.values())):
+                return False
+            reconnect_attempted.add(path)
+            log("HID service discovery timed out; reconnecting the bonded phone once (bond kept)")
+
+            def disconnect_failed(error):
+                log(f"reconnecting the bonded phone failed; waiting for the phone: {error}")
+
+            try:
+                dbus.Interface(bus.get_object(BLUEZ, path), DEVICE_IFACE).Disconnect(
+                    reply_handler=lambda: None, error_handler=disconnect_failed)
+            except dbus.exceptions.DBusException as error:
+                disconnect_failed(error)
             return False
-        try:
-            device = bus.get_object(BLUEZ, path)
-            if dbus.Interface(device, DBUS_PROP_IFACE).Get(DEVICE_IFACE, "Connected"):
-                log("disconnecting the stale link so iOS subscribes to the new HID service")
-                dbus.Interface(device, DEVICE_IFACE).Disconnect(
-                    reply_handler=lambda: None,
-                    error_handler=lambda e: log(f"disconnect failed: {e}"))
-        except dbus.exceptions.DBusException as e:
-            log(f"checking stale link failed: {e}")
+        log("HID service is registered; waiting for the phone to enable input reports (bond kept)")
         return False
 
-    def check_resubscribed(connected_at, path, generation):
-        if generation != connection_generation[0] or path != connected_path[0]:
+    def check_resubscribed(connected_at, path, generation, registration):
+        if (generation != connection_generation[0] or path != connected_path[0]
+                or registration != registration_generation[0] or not service_registered[0]):
             return False
         if not bonded_and_trusted(path):
             return False  # Fresh pairing may still need user approval/encryption.
         if not reports_subscribed(reports, connected_at):
+            if refreshed_link[0] or path in reconnect_attempted:
+                return subscription_deadline(connected_at, path, generation, registration)
+            refreshed_link[0] = True
             log("iPhone reconnected without subscribing; re-registering the HID service")
             reregister()
-            GLib.timeout_add(1500, reconnect_if_stale, path, connected_at, generation)
         return False
+
+    def arm_subscription_check():
+        if not service_registered[0] or not connected_path[0]:
+            return
+        if reports_subscribed(reports, connected_since[0]):
+            return
+        callback = subscription_deadline if refreshed_link[0] else check_resubscribed
+        GLib.timeout_add(15000, callback, connected_since[0], connected_path[0],
+                         connection_generation[0], registration_generation[0])
 
     def on_device_changed(interface, changed, invalidated, path=None):
         if interface != DEVICE_IFACE or path is None or not selected_adapter(path):
@@ -608,6 +685,7 @@ def main():
         eligible = path in hid_devices or phone_device(properties)
         if properties.get("Connected") and eligible and connected_path[0] is None:
             connection_generation[0] += 1
+            refreshed_link[0] = False
             connected_since[0] = connection_observed.get(path, time.time())
             connected_path[0] = path
             if subscription_peer[0] not in (None, path):
@@ -616,17 +694,17 @@ def main():
                 subscription_peer[0] = None
             emit("connected")
             # Only the same bonded peer can reuse this service's enabled CCCDs.
-            if (subscription_peer[0] == path and reports_subscribed(reports)
+            if (service_registered[0] and subscription_peer[0] == path and reports_subscribed(reports)
                     and bonded_and_trusted(path)):
                 subscribed_announced[0] = time.time()
                 emit("subscribed")
-            elif reports_subscribed(reports, connected_since[0]):
+            elif (service_registered[0] and device_connected(path)
+                  and reports_subscribed(reports, connected_since[0])):
                 subscription_peer[0] = path
                 subscribed_announced[0] = time.time()
                 emit("subscribed")
             else:
-                GLib.timeout_add(15000, check_resubscribed, connected_since[0], path,
-                                 connection_generation[0])
+                arm_subscription_check()
         if "Connected" in changed and not changed["Connected"] and path == connected_path[0]:
             connection_generation[0] += 1
             connected_path[0] = None
@@ -639,8 +717,7 @@ def main():
                 if changed.get("Paired") and not paired_before:
                     # Pairing completion gets its own full discovery grace.
                     connection_generation[0] += 1
-                    GLib.timeout_add(15000, check_resubscribed, connected_since[0], path,
-                                     connection_generation[0])
+                    arm_subscription_check()
             except dbus.exceptions.DBusException as e:
                 log(f"trusting the paired phone failed: {e}")
 
@@ -692,10 +769,10 @@ def main():
     frames, key_frames = queue.Queue(), queue.Queue()
     threading.Thread(target=stdin_reader, args=(frames, key_frames), daemon=True).start()
     key_sender = threading.Thread(target=sender, args=(key_frames, reports, loop, False),
-                                  daemon=True)
+                                  kwargs={"stopping": stopping}, daemon=True)
     key_sender.start()
     threading.Thread(target=sender, args=(frames, reports, loop),
-                     kwargs={"wait_for": key_sender}, daemon=True).start()
+                     kwargs={"wait_for": key_sender, "stopping": stopping}, daemon=True).start()
     for sig in (signal.SIGINT, signal.SIGTERM):
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, loop.quit)
 
@@ -703,6 +780,8 @@ def main():
     try:
         loop.run()
     finally:
+        stopping.set()
+        release_reports(reports)
         for call in (lambda: adv_mgr.UnregisterAdvertisement(ADV_PATH),
                      lambda: gatt_mgr.UnregisterApplication(APP_PATH),
                      lambda: agent_mgr.UnregisterAgent(AGENT_PATH),
