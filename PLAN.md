@@ -44,6 +44,25 @@ Still pending: native double-tap recognition in an app with matching mirrored UI
 live hold/swipe, Notification Center dismissal and Reel/Short outcomes; and native Windows
 validation of this controls wave. A completed report sequence is not an app-level pass.
 
+The final Linux preview log records the display-layout pause and restoration on real
+Photos frames. The subsequent interactive grid check did not pass: after the preview
+restart, BlueZ reported the bonded phone disconnected, so mouse readiness could not be
+established. This is not evidence that Bluetooth or live control recovery is solved.
+
+**Windows controls preview (source `5f58874`):** all 150 Release cross-build targets
+compile with warnings as errors; 23/23 portable WinRT HID-core tests pass. The native
+Win32 pipe/lifecycle test and 12 native unit/SDL control checks pass under Wine,
+including presentation suppression and portrait recovery with a simulated phone.
+These checks do not validate a real Windows radio or iPhone timing.
+The initial packaging check caught the combined app's additional `avformat-63.dll`
+dependency. Its complete recursive closure is now bundled: 103 runtime DLLs, exact
+MSYS2 package hashes/source URLs/licenses, matching project/vendor sources and the
+static-runtime .NET helper. Both payload and final embedded-EXE verification pass.
+The locally generated file is `build/Porthole-Windows-Portable-5f58874.exe`
+(100,826,112 bytes), SHA-256
+`6400424b0a0147c3d2a638fdfb12f0db12b91cec938288ee7549c3bc43b04508`.
+No installer, driver, firewall or pairing changes were applied by these checks.
+
 The working controls run in the **Linux prototype in the VMware guest**. A full Windows
 Wi-Fi mirror now cross-builds with native discovery and portable dependencies. The user
 confirmed Windows host mirroring with the versioned preview. The item 4 WinRT Bluetooth
