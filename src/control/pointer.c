@@ -249,6 +249,9 @@ void ph_pointer_cancel(ph_pointer *p, uint64_t now_ms)
     bool confirming = !p->buttons && (moving || waiting_video || p->confirm_after_drain);
     if (moving || waiting_video || confirming)
         p->known = false;
+    /* Interrupted motion may establish a position, but its image may show only
+     * part of the travel. Keep that sample out of the next movement's gain. */
+    p->learn_move = false;
     /* Cancelling our intent cannot retract reports already in the helper's
      * pipe. Keep their fence so rapid leave/re-enter events cannot flood it
      * with corner sweeps while ignoring every superseded acknowledgement. */

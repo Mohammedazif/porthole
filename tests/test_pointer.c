@@ -201,8 +201,51 @@ static void canceled_motion_confirmation(void)
     CHECK(ph_pointer_ready(&f.pointer, .4, .5, .46) && f.anchors == 8);
 }
 
+static void canceled_motion_does_not_calibrate(void)
+{
+    /* Reproduce the live canceled sweep: its first stable image was (25,158),
+     * versus a planned endpoint near (16,16). It is useful position feedback,
+     * but must not turn Y gain 4.42 into 2.01 for the next long movement. */
+    const double aspect = 500.0 / 1080;
+    const double scale_x = 94.0 / 25.785, scale_y = 52.0 / 11.76;
+    for (int acknowledged = 0; acknowledged < 2; acknowledged++) {
+        for (int canceled = 0; canceled < 2; canceled++) {
+            fixture f;
+            init(&f);
+            CHECK(ph_pointer_set_scale(&f.pointer, scale_x, scale_y));
+            confirmed_position(&f, 162, 275, aspect);
+            CHECK(ph_pointer_target(&f.pointer, 16.0 / 500, 16.0 / 1080, aspect, ++f.now));
+            CHECK(f.pointer.learn_move && f.pointer.phase == PH_POINTER_MOVING);
+            uint32_t id = f.pointer.sync_id;
+            size_t sent = f.count;
+            if (acknowledged)
+                ph_pointer_ack(&f.pointer, id, f.now += 40);
+            if (canceled)
+                ph_pointer_cancel(&f.pointer, ++f.now);
+            if (!acknowledged)
+                ph_pointer_ack(&f.pointer, id, f.now += 40);
+            CHECK(f.pointer.phase == PH_POINTER_WAIT_VIDEO);
+            ph_pointer_observe(&f.pointer, true, 25.0 / 500, 158.0 / 1080, f.now += 42);
+            CHECK(f.pointer.known);
+            CHECK(fabs(f.pointer.actual_x - 25.0 / 500) < 1e-12);
+            CHECK(fabs(f.pointer.actual_y - 158.0 / 1080) < 1e-12);
+            if (canceled) {
+                CHECK(f.pointer.scale_x == scale_x && f.pointer.scale_y == scale_y);
+                CHECK(!f.pointer.learn_move && !f.pointer.active && !f.pointer.count);
+                CHECK(f.pointer.phase == PH_POINTER_IDLE && f.count == sent);
+            } else {
+                /* Uninterrupted verified hover movement still calibrates. */
+                CHECK(fabs(f.pointer.scale_x - 137.0 / 39.92) < 1e-12);
+                CHECK(fabs(f.pointer.scale_y - 117.0 / 58.305) < 1e-12);
+                CHECK(f.pointer.active && f.count > sent);
+            }
+        }
+    }
+}
+
 int main(void)
 {
+    canceled_motion_does_not_calibrate();
     canceled_motion_confirmation();
     fixture f;
     init(&f);
