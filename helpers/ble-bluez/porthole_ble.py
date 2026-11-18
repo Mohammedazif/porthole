@@ -59,6 +59,7 @@ ADV_PATH = "/org/porthole/adv0"
 AGENT_PATH = "/org/porthole/agent"
 
 FRAME_KEYBOARD, FRAME_MOUSE, FRAME_CONSUMER = 1, 2, 3
+FRAME_ABS_MOUSE = 4  # experimental: [buttons][x lo][x hi][y lo][y hi][wheel], x/y 0..32767
 FRAME_SYNC, FRAME_INTERVAL = 16, 17
 FRAME_DELAY = 18
 KEY_LANE = (FRAME_KEYBOARD, FRAME_CONSUMER)
@@ -78,6 +79,39 @@ def emit(line):
 def log(msg):
     sys.stderr.write(f"[porthole-ble] {msg}\n")
     sys.stderr.flush()
+
+
+def absolute_mouse_collection(report_id):
+    """Absolute pointer collection reported to work on iPhone under AssistiveTouch
+    (esp32-iphone-agent abs_mouse.h): X/Y map straight to screen fractions."""
+    return bytes([
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, report_id,
+        0x09, 0x01, 0xA1, 0x00,
+        0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x03, 0x81, 0x02,             # 3 buttons
+        0x75, 0x05, 0x95, 0x01, 0x81, 0x01,             # padding
+        0x05, 0x01, 0x09, 0x30, 0x09, 0x31,
+        0x15, 0x00, 0x26, 0xFF, 0x7F, 0x35, 0x00, 0x46, 0xFF, 0x7F,
+        0x75, 0x10, 0x95, 0x02, 0x81, 0x02,             # X, Y absolute 0..32767
+        0x09, 0x38, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01,
+        0x81, 0x06,                                     # wheel, relative
+        0xC0, 0xC0,
+    ])
+
+
+def apply_absolute_experiment(descriptor, ids, mode):
+    """PORTHOLE_HID_ABSOLUTE=add appends report 4; =replace swaps the relative mouse
+    (report 2) for the absolute one. Returns (descriptor, absolute report id)."""
+    if mode == "add":
+        return descriptor + absolute_mouse_collection(4), 4
+    if mode == "replace":
+        mouse_id = ids["PH_HID_REPORT_ID_MOUSE"]
+        start = descriptor.find(bytes([0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, mouse_id]))
+        end = descriptor.find(bytes([0xC0, 0xC0]), start)
+        if start < 0 or end < 0:
+            raise ValueError("relative mouse collection not found")
+        return descriptor[:start] + absolute_mouse_collection(mouse_id) + descriptor[end + 2:], mouse_id
+    raise ValueError(f"unknown PORTHOLE_HID_ABSOLUTE mode {mode!r}")
 
 
 def load_report_descriptor(c_file):
@@ -305,7 +339,7 @@ class Agent(dbus.service.Object):
         pass
 
 
-def build_hid(bus, app, descriptor, ids):
+def build_hid(bus, app, descriptor, ids, absolute=None):
     enc_r = ["encrypt-read"]
     hid = Service(bus, app, "1812")
     hid.add("2a4a", enc_r, bytes([0x11, 0x01, 0x00, 0x02]), "HID Information")
@@ -318,11 +352,12 @@ def build_hid(bus, app, descriptor, ids):
         chrc.add_descriptor("2908", ["read"], bytes([report_id, 0x01]))
         return chrc
 
-    reports = {
-        FRAME_KEYBOARD: input_report(ids["PH_HID_REPORT_ID_KEYBOARD"], "keyboard", 8),
-        FRAME_MOUSE: input_report(ids["PH_HID_REPORT_ID_MOUSE"], "mouse", 7),
-        FRAME_CONSUMER: input_report(ids["PH_HID_REPORT_ID_CONSUMER"], "consumer", 2),
-    }
+    reports = {FRAME_KEYBOARD: input_report(ids["PH_HID_REPORT_ID_KEYBOARD"], "keyboard", 8)}
+    if absolute is None or absolute[0] == "add":
+        reports[FRAME_MOUSE] = input_report(ids["PH_HID_REPORT_ID_MOUSE"], "mouse", 7)
+    if absolute is not None:
+        reports[FRAME_ABS_MOUSE] = input_report(absolute[1], "absolute mouse", 6)
+    reports[FRAME_CONSUMER] = input_report(ids["PH_HID_REPORT_ID_CONSUMER"], "consumer", 2)
     leds = hid.add("2a4d", enc_r + ["encrypt-write", "write-without-response"], b"\x00",
                    "keyboard LEDs")
     leds.add_descriptor("2908", ["read"], bytes([ids["PH_HID_REPORT_ID_KEYBOARD"], 0x02]))
@@ -338,7 +373,7 @@ def build_hid(bus, app, descriptor, ids):
 
 # --------------------------------------------------------------------------- stdin protocol
 
-EXPECTED_LEN = {FRAME_KEYBOARD: 8, FRAME_MOUSE: 7, FRAME_CONSUMER: 2, FRAME_SYNC: 4,
+EXPECTED_LEN = {FRAME_KEYBOARD: 8, FRAME_MOUSE: 7, FRAME_ABS_MOUSE: 6, FRAME_CONSUMER: 2, FRAME_SYNC: 4,
                 FRAME_INTERVAL: 2, FRAME_DELAY: 2}
 
 
@@ -402,6 +437,8 @@ def sender(in_queue, reports, loop, quit_at_eof=True, wait_for=None, stopping=No
             interval = max(0.005, struct.unpack("<H", payload)[0] / 1000.0)
         elif ftype == FRAME_DELAY:
             time.sleep(struct.unpack("<H", payload)[0] / 1000.0)
+        elif ftype not in reports:
+            continue  # e.g. a relative mouse report while the absolute map is active
         else:
             sent = threading.Event()
 
@@ -458,6 +495,13 @@ def main():
     source = Path(os.environ.get("PORTHOLE_HID_SOURCE", str(DEFAULT_DESCRIPTOR_SOURCE)))
     try:
         descriptor, ids = load_report_descriptor(source)
+        absolute = None
+        mode = os.environ.get("PORTHOLE_HID_ABSOLUTE", "")
+        if mode:
+            descriptor, abs_id = apply_absolute_experiment(descriptor, ids, mode)
+            absolute = (mode, abs_id)
+            log(f"experimental absolute mouse ({mode}, report {abs_id}); "
+                f"forget and re-pair the iPhone after changing this")
     except (OSError, AttributeError, KeyError, ValueError) as e:
         emit(f"error can't read the HID descriptor from {source}: {e}")
         return 1
@@ -497,7 +541,7 @@ def main():
     bus.add_signal_receiver(interfaces_removed, dbus_interface=DBUS_OM_IFACE,
                             signal_name="InterfacesRemoved", bus_name=BLUEZ)
     app = Application(bus)
-    reports = build_hid(bus, app, descriptor, ids)
+    reports = build_hid(bus, app, descriptor, ids, absolute)
     adv = Advertisement(bus, name)
     agent = Agent(bus, AGENT_PATH)
     gatt_mgr = dbus.Interface(adapter, GATT_MANAGER_IFACE)

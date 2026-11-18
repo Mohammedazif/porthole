@@ -25,6 +25,8 @@ ph_hid_link *ph_hid_link_start(char *const argv[], ph_hid_link_status_fn on_stat
  * a new link is started. Main thread only. */
 bool ph_hid_link_keyboard(ph_hid_link *l, const ph_hid_keyboard *k);
 bool ph_hid_link_mouse(ph_hid_link *l, const ph_hid_mouse *m);
+/* Absolute pointer: x/y are fractions 0..1 of the phone picture. */
+bool ph_hid_link_abs_mouse(ph_hid_link *l, uint8_t buttons, double x, double y);
 bool ph_hid_link_consumer(ph_hid_link *l, uint16_t usage);
 bool ph_hid_link_sync(ph_hid_link *l, uint32_t id);
 bool ph_hid_link_delay(ph_hid_link *l, uint16_t milliseconds);

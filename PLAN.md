@@ -436,6 +436,65 @@ after two missed probes. Two reacquires succeeded without a sweep. Probe episode
 end after probe 2; no runaway probing remained. Its detection latency (p90 270 ms)
 overlapped local build/test runs and is not a clean measurement.
 
+### Absolute mouse works on iOS 26.6.1 over BLE — 2026-11-18 17:40
+
+The research report (`reports/Automated iPhone control from Windows.md`) found absolute
+mouse support confirmed only on iOS 27. Test T1 on the user's iPhone 13 Pro Max
+(iPhone14,3, iOS 26.6.1) **passed**. The BlueZ helper, with
+`PORTHOLE_HID_ABSOLUTE=replace`, replaced report 2 with an absolute Generic Desktop mouse:
+3 buttons plus padding, X/Y 16-bit 0..32767 with Physical Min/Max, and a relative wheel
+(`absolute_mouse_collection` in `helpers/ble-bluez/porthole_ble.py`, copied from
+esp32-iphone-agent). Steps: forget on the iPhone, `bluetoothctl remove` on Linux, pair
+from the iPhone. It subscribed to keyboard, absolute mouse and consumer reports. Hover-only
+5×5 grid: 19/25 dots were detected within 1.6 px of the commanded fraction (most at 0–0.4 px),
+with no calibration, anchoring or acceleration. The contact sheet shows the dot centred in
+every readable tile; the three top-left tiles were black during the post-pairing
+transition. Evidence: `build/live/local-validation/abs-spike-replace/` and the driver
+`abs_spike.py`. The iPhone caches the report map, so switching between relative and
+absolute needs forget-and-re-pair. Next: tap test (move, about 60 ms settle, press, release),
+drag/flick and edge gestures, wheel, landscape, the Shift typing regression, then make the
+absolute mouse Porthole's default on Linux and WinRT. That retires dead reckoning and video
+pointer search.
+
+**Absolute-mode capability round (17:41–17:46, `abs_control.py` FIFO tool, same phone):**
+| Check | Result |
+|---|---|
+| Calculator taps (AC 1 2 3 × 4 =) | 120 ms and 200 ms settle: 2/2 correct each; 60 ms: 1/2 (a digit after a long jump lost); 0 ms: wrong keys (iOS ignores X/Y in a button-change report, so the press hits the previous spot) → use 120 ms |
+| Typing over the composite map | Spotlight shows `Aa!1? Hello` exactly; the iOS 26 Shift bug (forum 835175) did not reproduce |
+| Home | fast swipe from the bottom edge (y 1072 → 600, 120 ms) |
+| Control Center | swipe down from the top-right corner (470,6 → 520, 250 ms) |
+| Notification Center | swipe down from the top-left (60,6 → 600, 250 ms); a fast bottom swipe closes it |
+| App Switcher | bottom pixel (y 1079) → 760 over 250 ms, hold 700 ms, release (a 450 ms swipe from 1072 did nothing) |
+| Wheel (report wheel byte) | no scrolling in Settings; scroll with held-button drags instead |
+| Drag scrolling | Settings list scrolls down and back with 400 px, 500 ms drags |
+
+Every AssistiveTouch button-mapping action now has an exact gesture equivalent, so the
+3–6 mapping can be dropped. Untested: landscape mapping, long press, consumer AC Home with
+this map, lockdown AssistiveTouch enable, and the Windows WinRT helper with this map.
+
+**Absolute pointer is Porthole's Linux default (18:00).** New `src/control/abs_pointer.c`
+forwards the PC position as picture fractions (paced at 15 ms per report, latest wins). A
+press waits 120 ms after the last position change, with motion held back meanwhile; a click
+released early is pressed, then lifted 60 ms later. A fast second press lifts any scripted or
+queued press first. Wheel notches become 0.07-height held drags (at most 0.35, glided over
+150 ms; F4 feed mode gives one 0.45 swipe per burst). Alt H/S/C/N run the measured edge
+gestures, P sends ⌘⇧3, D/L double-tap/long-press, and PgUp/PgDn/U/Shift+arrows swipe. New
+link frame `PH_LINK_ABS_MOUSE` (4). `--relative-pointer` keeps the old controller; Windows
+defaults to relative until the WinRT helper publishes the absolute map. The Linux helper
+ignores frames for reports its map lacks. `test_abs_pointer` covers settle, pacing,
+held drags, quick and double clicks (including a second press while a release is queued),
+wheel direction and edge clamping, feed mode, gesture strokes and holds, refusal while
+held, and release-all. Removing the settle or the lift-first fails it. App tests assert that
+relative mode sends no absolute reports. Results: 71/71 in ASan/UBSan, Debug and Release,
+31/31 without AirPlay, 3× sanitizer repeats, and the Windows build with 66/66 under Wine.
+Live, through the real app with XTest input on the same phone: 12-point hover with every
+dot on target (10 detected within 1.4 px; 2 over text/icons confirmed by contact sheet);
+Alt+F, typing "calc" and Enter opened Calculator; clicks gave 7+8=15, and fast clicks 0.15 s
+apart gave 123×4=492; Alt+H/C/N/S gave Home, Control Center, Notification Center and App
+Switcher; the wheel scrolled Settings both ways (some flick overshoot, so the notch distance
+may need tuning). Next: port the absolute map to the WinRT helper, try lockdown AssistiveTouch
+enable, check landscape, and simplify setup (no calibration or button mapping in absolute mode).
+
 ### Remaining work — consolidated 2026-11-18
 
 **Linux controls (needs the phone):**

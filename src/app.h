@@ -20,6 +20,9 @@ typedef struct ph_app_options {
     const char *exe_path;
     const char *ble_helper; /* path of the Bluetooth helper script */
     bool usb;               /* open a plugged-in iPhone as a USB screen */
+    /* Absolute pointer: the PC mouse position maps straight to the phone screen.
+     * The phone must have paired with the matching (absolute) report map. */
+    bool absolute_pointer;
 } ph_app_options;
 
 /* Runs the mirror window until it is closed. Returns a process exit code. */

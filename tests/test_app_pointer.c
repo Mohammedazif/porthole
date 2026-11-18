@@ -880,6 +880,19 @@ bool ph_hid_link_keyboard(ph_hid_link *l, const ph_hid_keyboard *k)
     }
     return true;
 }
+/* Absolute reports: these app tests run the legacy relative pointer, so any
+ * absolute report here is a routing mistake. */
+static unsigned int unexpected_abs_reports;
+bool ph_hid_link_abs_mouse(ph_hid_link *l, uint8_t buttons, double x, double y)
+{
+    (void)l;
+    (void)buttons;
+    (void)x;
+    (void)y;
+    unexpected_abs_reports++;
+    return true;
+}
+
 bool ph_hid_link_consumer(ph_hid_link *l, uint16_t usage)
 {
     (void)l;
@@ -1121,6 +1134,10 @@ int main(int argc, char **argv)
     ph_app_options options = {.name = "Idle-frame test", .bluetooth = true,
                               .ble_helper = "unused fake helper"};
     int result = ph_app_run(&options);
+    if (unexpected_abs_reports) {
+        fprintf(stderr, "relative-mode run sent %u absolute reports\n", unexpected_abs_reports);
+        return 1;
+    }
     char saved_calibration[sizeof config + 32];
     snprintf(saved_calibration, sizeof saved_calibration, "%s/porthole/pointer-scale", config);
     bool calibration_written = access(saved_calibration, F_OK) == 0;

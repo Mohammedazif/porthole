@@ -62,13 +62,24 @@ on, and Dwell Control off. Use `--no-bluetooth` for mirroring only.
 If Bluetooth control is unavailable, the app retries every five seconds while mirroring
 continues. Input is discarded until control is ready.
 
+**Pointer modes.** On Linux Porthole uses an **absolute pointer** by default: it presents an
+absolute HID mouse, and iOS (verified on iOS 26.6.1) places the AssistiveTouch pointer exactly
+where the PC mouse is. No calibration, video tracking or button mapping is needed. Clicks are
+sent 120 ms after the pointer reaches its spot, because iOS ignores the position in a report that
+changes a button. The HID wheel does not scroll iOS, so wheel notches become short drags (F4 feed
+mode: one swipe per wheel burst). `--relative-pointer` keeps the older relative mouse with video
+tracking, which Windows still uses until its helper publishes the absolute map. The iPhone caches
+the mouse layout: after switching modes, choose **Forget This Device** on the iPhone (and
+`bluetoothctl remove <address>` on Linux), then pair again from the iPhone.
+
 Left Alt shortcuts: **H** Home, **F** Spotlight, **S** App Switcher, **C** Control Center,
-**N** Notification Center, **P** Screenshot, **←** Back, **↑/↓** Volume. Buttons 3–6 must be
-assigned to the corresponding actions in AssistiveTouch's device settings. PC Ctrl acts as
-Command on the iPhone; click a text field before using editing shortcuts such as Ctrl+A.
-Check the button assignments again after forgetting and re-pairing the device. Alt+N sends
-the assigned Notification Center action; it does not implement a second-press close toggle.
-Use Alt+H to return Home. **F1** opens local controls and setup help; input is paused while help
+**N** Notification Center, **P** Screenshot, **←** Back, **↑/↓** Volume, **D** double-tap,
+**L** long press, **PgUp/PgDn/U** and **Shift+arrows** swipes. In absolute mode, H/S/C/N are exact
+edge swipes and P sends ⌘⇧3, so no AssistiveTouch button assignment is needed. In relative mode,
+buttons 3–6 must be assigned to App Switcher, Control Center, Notification Center and Screenshot
+in AssistiveTouch's device settings; check them again after re-pairing. PC Ctrl acts as Command
+on the iPhone; click a text field before using editing shortcuts such as Ctrl+A. Use Alt+H to
+return Home. **F1** opens local controls and setup help; input is paused while help
 is open. The waiting screen shows mirroring and Bluetooth setup steps, and a status banner
 identifies when the mirror is available without controls.
 

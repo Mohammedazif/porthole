@@ -26,6 +26,9 @@ static void print_usage(FILE *out, const char *argv0)
             "      --random-ports  Let the system pick network ports instead of the fixed\n"
             "                    TCP 7000/7001/7100 and UDP 6000/6001/7011\n"
             "      --no-bluetooth  View only: don't control the phone over Bluetooth\n"
+            "      --relative-pointer  Legacy relative mouse with video tracking (the iPhone\n"
+            "                    must be forgotten and re-paired after switching modes)\n"
+            "      --absolute-pointer  Exact absolute pointer (default on Linux)\n"
             "      --no-audio     Mute audio playback on the PC\n"
             "      --setup        Open guided pairing and calibration setup\n"
             "      --no-setup     Skip automatic first-run setup (F2 still opens it)\n"
@@ -73,6 +76,11 @@ int main(int argc, char **argv)
     bool audio = true;
     bool diagnostics = false, setup = false, auto_setup = true;
     bool pin_required = false, four_k = false, autostart = false, usb = true;
+#ifdef _WIN32
+    bool absolute_pointer = false; /* the WinRT helper does not publish it yet */
+#else
+    bool absolute_pointer = true;
+#endif
     int audio_delay_ms = 0;
     const char *precise_touch = NULL;
 #ifdef PORTHOLE_BLE_HELPER
@@ -99,6 +107,10 @@ int main(int argc, char **argv)
             fixed_ports = false;
         } else if (!strcmp(arg, "--no-bluetooth")) {
             bluetooth = false;
+        } else if (!strcmp(arg, "--relative-pointer")) {
+            absolute_pointer = false;
+        } else if (!strcmp(arg, "--absolute-pointer")) {
+            absolute_pointer = true;
         } else if (!strcmp(arg, "--no-audio")) {
             audio = false;
         } else if (!strcmp(arg, "--setup")) {
@@ -192,7 +204,8 @@ int main(int argc, char **argv)
                               .precise_touch = precise_touch,
                               .exe_path = argv[0],
                               .ble_helper = ble_helper,
-                              .usb = usb};
+                              .usb = usb,
+                              .absolute_pointer = absolute_pointer};
         int result = ph_app_run(&opt);
 #ifdef _WIN32
         free(windows_helper);
@@ -214,6 +227,7 @@ int main(int argc, char **argv)
     (void)precise_touch;
     (void)ble_helper;
     (void)usb;
+    (void)absolute_pointer;
     PH_LOGW("this build has no Wi-Fi receiver (configured with PORTHOLE_WITH_AIRPLAY=OFF)");
     return 0;
 #endif

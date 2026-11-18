@@ -17,6 +17,7 @@
 #include "control/input.h"
 #include "control/gesture.h"
 #include "control/mouse_input.h"
+#include "control/abs_pointer.h"
 #include "control/pointer.h"
 #include "control/scroll.h"
 #include "control/setup.h"
@@ -68,6 +69,8 @@ typedef struct app {
     char ble_status[64];       /* last state reported by the Bluetooth helper */
     ph_input input;
     ph_pointer pointer;
+    ph_abs abs; /* used instead of `pointer` in absolute mode */
+    bool absolute;
     ph_scroll wheel;
     ph_mouse_input mouse_input;
     bool wheel_point_valid;
@@ -248,6 +251,8 @@ static void reset_mouse_input(app *a)
 
 static void cancel_control_intent(app *a, Uint64 now)
 {
+    if (a->absolute)
+        ph_abs_release_all(&a->abs, now);
     ph_gesture_cancel(&a->gesture, now);
     ph_pointer_cancel(&a->pointer, now);
     ph_scroll_cancel(&a->wheel);
@@ -378,9 +383,18 @@ static void send_consumer(void *user, uint16_t usage)
         record_input_handoff(a);
 }
 
+static void send_abs(void *user, uint8_t buttons, double x, double y)
+{
+    app *a = user;
+    if (a->link && ph_hid_link_abs_mouse(a->link, buttons, x, y))
+        record_input_handoff(a);
+}
+
 static void send_mouse(void *user, const ph_hid_mouse *mouse)
 {
     app *a = user;
+    if (a->absolute)
+        return; /* the absolute report map has no relative mouse */
     if (a->link) {
         ph_hid_mouse merged = *mouse;
         merged.buttons |= a->input.buttons | a->pointer.buttons;
@@ -475,8 +489,25 @@ static bool current_pointer_coordinates(app *a, double *nx, double *ny, double *
     return pointer_coordinates(a, (int)local_x, (int)local_y, nx, ny, aspect);
 }
 
+/* Absolute mode: window position -> phone picture fraction. */
+static bool abs_coordinates(app *a, int x, int y, double *nx, double *ny)
+{
+    if (!a->link || !a->input.enabled || !a->phone_name[0] || a->presentation_mode
+        || a->setup.visible)
+        return false;
+    return ph_window_to_video(a->win, x, y, nx, ny);
+}
+
 static void mouse_motion(app *a, const SDL_MouseMotionEvent *event)
 {
+    if (a->absolute) {
+        double x, y;
+        if (abs_coordinates(a, event->x, event->y, &x, &y)) {
+            mark_input(a, event->timestamp);
+            ph_abs_move(&a->abs, x, y, SDL_GetTicks64());
+        }
+        return;
+    }
     double x, y, aspect;
     if (ph_gesture_active(&a->gesture))
         return; /* A deliberate gesture owns the pointer until release or cancellation. */
@@ -504,6 +535,19 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
     uint8_t button = ph_mouse_input_button(event->button);
     if (!button)
         return;
+    if (a->absolute) {
+        bool down = event->type == SDL_MOUSEBUTTONDOWN;
+        x = a->abs.want_x;
+        y = a->abs.want_y;
+        if (button > 0x04)
+            return; /* the absolute map has three buttons */
+        if (!abs_coordinates(a, event->x, event->y, &x, &y) && down)
+            return; /* a press outside the picture does nothing; a release always lifts */
+        mark_input(a, event->timestamp);
+        ph_abs_button(&a->abs, button, down, x, y, SDL_GetTicks64());
+        SDL_CaptureMouse(a->abs.held ? SDL_TRUE : SDL_FALSE);
+        return;
+    }
     if (ph_gesture_active(&a->gesture)) {
         cancel_control_intent(a, SDL_GetTicks64());
         SDL_CaptureMouse(SDL_FALSE);
@@ -538,6 +582,26 @@ static void scroll(app *a, const SDL_MouseWheelEvent *event)
 {
     int x, y, width, height;
     double nx, ny;
+    if (a->absolute) {
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+        x = event->mouseX;
+        y = event->mouseY;
+#else
+        SDL_GetMouseState(&x, &y);
+#endif
+        double notches = event->y;
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+        if (event->preciseY != 0)
+            notches = event->preciseY;
+#endif
+        if (event->direction == SDL_MOUSEWHEEL_FLIPPED)
+            notches = -notches;
+        if (abs_coordinates(a, x, y, &nx, &ny) && notches != 0) {
+            mark_input(a, event->timestamp);
+            ph_abs_wheel(&a->abs, notches, nx, ny, a->feed_mode, SDL_GetTicks64());
+        }
+        return;
+    }
     if (!a->link || !a->input.enabled || !a->phone_name[0] || a->presentation_mode || a->setup.visible)
         return;
 #if SDL_VERSION_ATLEAST(2, 26, 0)
@@ -829,6 +893,57 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         a->gesture_keys[sc] = true;
         return;
     }
+    if (down && a->absolute && (e->keysym.mod & KMOD_LALT) && a->phone_name[0]
+        && a->input.enabled) {
+        /* Exact edge gestures replace AssistiveTouch's mapped buttons 3-6. */
+        Uint64 now = SDL_GetTicks64();
+        double px = a->abs.want_x, py = a->abs.want_y;
+        bool shift = (e->keysym.mod & KMOD_SHIFT) != 0, handled = true, sent = true;
+        switch (sc) {
+        case SDL_SCANCODE_H: sent = ph_abs_home(&a->abs, now); break;
+        case SDL_SCANCODE_S: sent = ph_abs_app_switcher(&a->abs, now); break;
+        case SDL_SCANCODE_C: sent = ph_abs_control_center(&a->abs, now); break;
+        case SDL_SCANCODE_N: sent = ph_abs_notification_center(&a->abs, now); break;
+        case SDL_SCANCODE_D: sent = ph_abs_tap(&a->abs, px, py, 2, 60, now); break;
+        case SDL_SCANCODE_L: sent = ph_abs_tap(&a->abs, px, py, 1, 1000, now); break;
+        case SDL_SCANCODE_PAGEDOWN: sent = ph_abs_swipe(&a->abs, .5, .8, .5, .2, 300, 0, now); break;
+        case SDL_SCANCODE_PAGEUP: sent = ph_abs_swipe(&a->abs, .5, .2, .5, .8, 300, 0, now); break;
+        case SDL_SCANCODE_U: sent = ph_abs_swipe(&a->abs, .5, .98, .5, .35, 300, 0, now); break;
+        case SDL_SCANCODE_UP:
+        case SDL_SCANCODE_DOWN:
+        case SDL_SCANCODE_LEFT:
+        case SDL_SCANCODE_RIGHT:
+            if (!shift) {
+                handled = false; /* plain Alt+arrows: volume / Back */
+                break;
+            }
+            sent = ph_abs_swipe(&a->abs,
+                                sc == SDL_SCANCODE_LEFT ? .8 : sc == SDL_SCANCODE_RIGHT ? .2 : .5,
+                                sc == SDL_SCANCODE_UP ? .8 : sc == SDL_SCANCODE_DOWN ? .2 : .5,
+                                sc == SDL_SCANCODE_LEFT ? .2 : sc == SDL_SCANCODE_RIGHT ? .8 : .5,
+                                sc == SDL_SCANCODE_UP ? .2 : sc == SDL_SCANCODE_DOWN ? .8 : .5,
+                                300, 0, now);
+            break;
+        case SDL_SCANCODE_P: {
+            /* Screenshot: Cmd+Shift+3 with the hardware keyboard. */
+            ph_hid_keyboard shot = {.modifiers = PH_HID_MOD_LGUI | PH_HID_MOD_LSHIFT,
+                                    .keys = {0x20}};
+            send_keys(a, &shot);
+            memset(&shot, 0, sizeof shot);
+            send_keys(a, &shot);
+            break;
+        }
+        default: handled = false; break;
+        }
+        if (handled) {
+            a->gesture_keys[sc] = true;
+            if (!e->repeat)
+                mark_input(a, e->timestamp);
+            if (!sent)
+                PH_LOGD("gesture skipped: a mouse button is held");
+            return;
+        }
+    }
     if (down && (e->keysym.mod & KMOD_LALT)) {
         ph_gesture_kind kind = PH_GESTURE_SWIPE;
         double x1 = .5, y1 = .8, x2 = .5, y2 = .2;
@@ -897,6 +1012,8 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
 
 static void release_everything(app *a)
 {
+    if (a->absolute)
+        ph_abs_release_all(&a->abs, SDL_GetTicks64());
     ph_gesture_cancel(&a->gesture, SDL_GetTicks64());
     a->feed_mode = a->feed_have_wheel = false;
     memset(a->gesture_keys, 0, sizeof a->gesture_keys);
@@ -1291,6 +1408,10 @@ static void start_bluetooth(app *a)
     a->ble_retry_at = 0;
 #ifndef _WIN32
     setenv("PORTHOLE_BLE_NAME", a->opt->name, 1);
+    if (a->opt->absolute_pointer)
+        setenv("PORTHOLE_HID_ABSOLUTE", "replace", 1);
+    else
+        unsetenv("PORTHOLE_HID_ABSOLUTE");
 #endif
     snprintf(a->ble_status, sizeof a->ble_status, "starting");
     a->link = ph_hid_link_start(argv, on_ble_status, a);
@@ -1330,6 +1451,8 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
             PH_LOGD("pointer cancel: mouse left window");
             if (a->setup.calibrating)
                 break; /* calibration is autonomous; the mouse may be outside the picture */
+            if (a->absolute && a->abs.held)
+                break; /* a captured absolute drag continues outside the window */
             cancel_control_intent(a, SDL_GetTicks64());
             SDL_CaptureMouse(SDL_FALSE);
         }
@@ -1507,6 +1630,10 @@ int ph_app_run(const ph_app_options *opt)
     app a = {.opt = opt};
     a.input.output = (ph_input_output){&a, send_keys, send_mouse, send_consumer};
     a.pointer.output = (ph_pointer_output){&a, send_mouse, send_delay, send_pointer_sync};
+    a.absolute = opt->absolute_pointer;
+    ph_abs_init(&a.abs, (ph_abs_output){&a, send_abs});
+    if (a.absolute)
+        PH_LOGI("absolute pointer: the PC mouse position maps straight to the phone screen");
     ph_gesture_init(&a.gesture, &a.pointer);
     a.wheel.output = (ph_scroll_output){&a, send_mouse, send_delay, send_sync};
     a.wheel.position = position_for_scroll;
@@ -1603,13 +1730,18 @@ int ph_app_run(const ph_app_options *opt)
         /* Button holds and video confirmation are timed in this loop: run it more
          * often while input is on its way to the phone. */
         bool busy = a.pointer.phase != PH_POINTER_IDLE || a.pointer.count
-                    || a.wheel.in_flight || a.wheel.waiting_frame || ph_gesture_active(&a.gesture);
+                    || a.wheel.in_flight || a.wheel.waiting_frame || ph_gesture_active(&a.gesture)
+                    || (a.absolute && (ph_abs_busy(&a.abs) || a.abs.wheel != 0
+                                       || (a.abs.want_valid && (a.abs.x != a.abs.want_x
+                                                                || a.abs.y != a.abs.want_y))));
         if (SDL_WaitEventTimeout(&e, busy ? 4 : 16)) {
             do {
                 running = handle_event(&a, &e, frame, &seq) && running;
             } while (SDL_PollEvent(&e));
         }
         ph_window_tick(a.win);
+        if (a.absolute)
+            ph_abs_tick(&a.abs, SDL_GetTicks64());
         if (a.audio)
             ph_audio_pump(a.audio, ph_metrics_now_ms());
         if (a.polish) {

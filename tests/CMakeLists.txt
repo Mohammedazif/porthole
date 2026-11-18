@@ -221,6 +221,11 @@ target_link_libraries(test_placement PRIVATE porthole_core)
 porthole_set_warnings(test_placement)
 add_test(NAME placement COMMAND test_placement)
 
+add_executable(test_abs_pointer test_abs_pointer.c)
+target_link_libraries(test_abs_pointer PRIVATE porthole_core)
+porthole_set_warnings(test_abs_pointer)
+add_test(NAME abs_pointer COMMAND test_abs_pointer)
+
 add_executable(test_paste test_paste.c)
 target_link_libraries(test_paste PRIVATE porthole_core)
 porthole_set_warnings(test_paste)

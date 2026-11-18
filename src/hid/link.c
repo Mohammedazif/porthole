@@ -1,5 +1,6 @@
 #include "hid/link.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -746,6 +747,20 @@ bool ph_hid_link_mouse(ph_hid_link *l, const ph_hid_mouse *m)
     uint8_t r[PH_HID_MOUSE_REPORT_LEN];
     ph_hid_build_mouse(m, r);
     return send_frame(l, PH_LINK_MOUSE, r, sizeof r);
+}
+
+bool ph_hid_link_abs_mouse(ph_hid_link *l, uint8_t buttons, double x, double y)
+{
+    uint8_t r[6];
+    long fx = lround((x < 0 ? 0 : x > 1 ? 1 : x) * 32767);
+    long fy = lround((y < 0 ? 0 : y > 1 ? 1 : y) * 32767);
+    r[0] = buttons & 0x07;
+    r[1] = (uint8_t)(fx & 0xFF);
+    r[2] = (uint8_t)(fx >> 8);
+    r[3] = (uint8_t)(fy & 0xFF);
+    r[4] = (uint8_t)(fy >> 8);
+    r[5] = 0;
+    return send_frame(l, PH_LINK_ABS_MOUSE, r, sizeof r);
 }
 
 bool ph_hid_link_consumer(ph_hid_link *l, uint16_t usage)
