@@ -465,6 +465,7 @@ static bool send_frame(ph_hid_link *l, uint8_t type, const uint8_t *payload, siz
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <poll.h>
 #include <signal.h>
@@ -476,6 +477,9 @@ static bool send_frame(ph_hid_link *l, uint8_t type, const uint8_t *payload, siz
 
 #define EOF_GRACE_MS 1000
 #define TERM_GRACE_MS 1000
+
+/* A nonblocking pipe accepts these whole frames atomically or returns EAGAIN. */
+_Static_assert(PH_LINK_MAX_FRAME <= PIPE_BUF, "HID frames must fit an atomic pipe write");
 
 struct ph_hid_link {
     pid_t pid;
@@ -576,6 +580,11 @@ ph_hid_link *ph_hid_link_start(char *const argv[], ph_hid_link_status_fn on_stat
     signal(SIGPIPE, SIG_IGN);
     if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0)
         goto fail;
+    /* Input runs on the rendering thread. A helper that stops reading must not
+     * prevent that thread from polling its bounded shutdown/recovery sequence. */
+    int flags = fcntl(in_pipe[1], F_GETFL);
+    if (flags < 0 || fcntl(in_pipe[1], F_SETFL, flags | O_NONBLOCK) < 0)
+        goto fail;
 
     l->pid = fork();
     if (l->pid < 0)
@@ -626,7 +635,7 @@ fail:
 static bool send_frame(ph_hid_link *l, uint8_t type, const uint8_t *payload, size_t len)
 {
     uint8_t buf[PH_LINK_MAX_FRAME];
-    size_t n = ph_link_frame(type, payload, len, buf), off = 0;
+    size_t n = ph_link_frame(type, payload, len, buf);
 
     if (!l || l->dead || l->to_helper < 0 || n == 0)
         return false;
@@ -640,18 +649,20 @@ static bool send_frame(ph_hid_link *l, uint8_t type, const uint8_t *payload, siz
                                                             : "control",
                 hex);
     }
-    while (off < n) {
-        ssize_t w = write(l->to_helper, buf + off, n - off);
-        if (w < 0) {
-            if (errno == EINTR)
-                continue;
-            PH_LOGE("the Bluetooth helper stopped (%s)", strerror(errno));
-            l->dead = true;
-            return false;
-        }
-        off += (size_t)w;
-    }
-    return true;
+    ssize_t written;
+    do {
+        written = write(l->to_helper, buf, n);
+    } while (written < 0 && errno == EINTR);
+    if (written == (ssize_t)n)
+        return true;
+    /* Never wait for space or retry an incomplete frame: dropped input can
+     * include a key/button release, so retire this helper and reconnect. */
+    if (written < 0)
+        PH_LOGW("Bluetooth helper input failed (%s); reconnecting", strerror(errno));
+    else
+        PH_LOGW("Bluetooth helper input write was incomplete; reconnecting");
+    ph_hid_link_request_stop(l);
+    return false;
 }
 
 void ph_hid_link_request_stop(ph_hid_link *l)

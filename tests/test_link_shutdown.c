@@ -18,6 +18,27 @@ typedef struct observed {
 } observed;
 
 static int failures;
+static volatile sig_atomic_t watched_pid;
+
+static void saturation_timeout(int signal_number)
+{
+    (void)signal_number;
+    static const char message[] = "helper pipe saturation blocked input/shutdown\n";
+    /* Only this test's helper is eligible for cleanup, never unrelated apps. */
+    if (watched_pid > 0) {
+        pid_t pid = (pid_t)watched_pid;
+        pid_t result;
+        do {
+            result = waitpid(pid, NULL, WNOHANG);
+        } while (result < 0 && errno == EINTR);
+        if (result == 0) {
+            kill(pid, SIGKILL);
+            while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+        }
+    }
+    (void)write(STDERR_FILENO, message, sizeof message - 1);
+    _exit(124);
+}
 #define CHECK(condition) do { if (!(condition)) { \
     fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #condition); failures++; \
 } } while (0)
@@ -83,11 +104,59 @@ static void pump(ph_hid_link *link, observed *events, bool repeat_stop)
 
 int main(void)
 {
-    observed events = {0};
-    ph_hid_link *link = start(&events, "hung");
+    struct sigaction timeout_action = {.sa_handler = saturation_timeout};
+    sigemptyset(&timeout_action.sa_mask);
+    CHECK(sigaction(SIGALRM, &timeout_action, NULL) == 0);
+
+    /* A live helper may stop reading while leaving stdout open. Fill its pipe
+     * with complete reports; the first rejection must itself begin shutdown. */
+    observed saturated = {0};
+    ph_hid_link *link = start(&saturated, "never-reads");
     if (!link)
         return 1;
+    watched_pid = atomic_load(&saturated.pid);
+    alarm(5); /* A blocking implementation fails here instead of hanging CTest. */
+    bool rejected = false;
+    uint32_t accepted_reports = 0;
+    uint64_t max_write_ms = 0;
+    for (uint32_t i = 0; i < 1024 * 1024; i++) {
+        uint64_t call = ph_metrics_now_ms();
+        bool accepted = ph_hid_link_sync(link, i);
+        uint64_t write_ms = ph_metrics_now_ms() - call;
+        if (write_ms > max_write_ms)
+            max_write_ms = write_ms;
+        CHECK(write_ms < 100);
+        if (!accepted) {
+            rejected = true;
+            break;
+        }
+        accepted_reports++;
+    }
+    CHECK(rejected && accepted_reports > 0);
     uint64_t began = ph_metrics_now_ms();
+    CHECK(!ph_hid_link_sync(link, 1));
+    CHECK(!ph_hid_link_consumer(link, 0));
+    CHECK(!ph_hid_link_delay(link, 1));
+    ph_hid_keyboard keyboard = {0};
+    ph_hid_mouse mouse = {0};
+    CHECK(!ph_hid_link_keyboard(link, &keyboard));
+    CHECK(!ph_hid_link_mouse(link, &mouse));
+    pump(link, &saturated, false); /* Deliberately never call request_stop here. */
+    CHECK(ph_metrics_now_ms() - began < 3500);
+    CHECK(atomic_load(&saturated.eof) && atomic_load(&saturated.term));
+    CHECK(ph_hid_link_poll(link));
+    printf("pipe rejected after %u reports; longest write %llu ms; reaped in %llu ms\n",
+           (unsigned int)accepted_reports, (unsigned long long)max_write_ms,
+           (unsigned long long)(ph_metrics_now_ms() - began));
+    ph_hid_link_stop(link);
+    alarm(0);
+    watched_pid = 0;
+
+    observed events = {0};
+    link = start(&events, "hung");
+    if (!link)
+        return 1;
+    began = ph_metrics_now_ms();
     ph_hid_link_request_stop(link);
     CHECK(ph_metrics_now_ms() - began < 100);
     CHECK(!ph_hid_link_sync(link, 1));
@@ -139,6 +208,7 @@ int main(void)
     ph_hid_link_stop(NULL);
     if (failures)
         return 1;
-    puts("nonblocking stop, EOF/TERM/KILL escalation, reaping and bounded final shutdown passed");
+    puts("nonblocking writes/stop, automatic saturation recovery, EOF/TERM/KILL escalation, "
+         "reaping and bounded final shutdown passed");
     return 0;
 }
