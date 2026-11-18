@@ -68,6 +68,41 @@ The locally generated file is `build/Porthole-Windows-Portable-5f58874.exe`
 `6400424b0a0147c3d2a638fdfb12f0db12b91cec938288ee7549c3bc43b04508`.
 No installer, driver, firewall or pairing changes were applied by these checks.
 
+### Text feedback and stalled-helper corrections — 2026-11-18
+
+The native Notes check successfully typed `Porthole test`. The first double-tap
+attempt stopped before any press: the detector had mistaken a pre-existing letter
+edge for the pointer. Screenshot replay located the real dot around (103,142)
+while the old detector reported (95,150). Changed-frame detection now subtracts
+the old edge strength before accepting that candidate; circular-change thresholds
+and click-position tolerances remain intact. Bright-text, small-movement,
+contracted-press and disappearing-dot regressions pass. The original detector fails
+the new precise-coordinate regression.
+
+A separate code audit found that Linux wrote synchronously to a blocking helper
+pipe. A helper that stopped reading could therefore stall the event loop before
+its ACK timeout ran. The writer now submits complete atomic nonblocking frames;
+backpressure fails closed into the existing bounded shutdown and reconnect path.
+The never-reading-helper test rejects after 682 reports, with a longest write of
+1 ms and reaping in about 2.03 seconds. The old writer fails its five-second alarm.
+The historical long live-log gap is not proof of this cause; VM suspension/reboot
+can also interrupt execution.
+
+The combined source passes **69/69** ASan/UBSan CTest checks in 75.60 seconds and
+the optimized Linux build compiles cleanly. The updated preview is running from
+source `a006232`; Bluetooth reconnected with all three input subscriptions.
+Native Notes double-tap/hold recognition is still pending the next mirroring check.
+An alternative live attempt aborted before the shortcut when VMware overrode the
+programmatic PC-cursor position; that attempt does not establish gesture failure.
+
+The latest local Windows preview is `build/Porthole-Windows-Portable-a006232.exe`.
+Its Release cross-build, 23/23 portable HID checks, native Win32 pipe test and native
+cursor regressions under Wine pass. Complete payload and embedded runtime/dependency
+verification pass. SHA-256:
+`fbd8973a4d74488e04b786b328e6cd29fb5720982571dd42bc561676f36b747e`.
+Real Windows Bluetooth/radio and native gesture usability remain unverified for
+this build. No Grok audio, USB or advanced-feature implementation was changed here.
+
 The working controls run in the **Linux prototype in the VMware guest**. A full Windows
 Wi-Fi mirror now cross-builds with native discovery and portable dependencies. The user
 confirmed Windows host mirroring with the versioned preview. The item 4 WinRT Bluetooth
