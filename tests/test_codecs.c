@@ -63,6 +63,11 @@ int main(void)
     CHECK(!ph_codec_annexb_unambiguous(h264_au, sizeof h264_au, PH_CODEC_H265));
     CHECK(ph_codec_from_annexb(h265_au, sizeof h265_au) == PH_CODEC_H265);
     CHECK(ph_codec_annexb_unambiguous(h265_au, sizeof h265_au, PH_CODEC_H265));
+    CHECK(ph_codec_leading_nal(NULL, 0) == PH_CODEC_UNKNOWN);
+    CHECK(ph_codec_leading_nal(no_start, sizeof no_start) == PH_CODEC_UNKNOWN);
+    CHECK(ph_codec_leading_nal(h264_au, sizeof h264_au) == PH_CODEC_H264);
+    CHECK(ph_codec_leading_nal(h265_au, sizeof h265_au) == PH_CODEC_H265);
+    CHECK(ph_codec_leading_nal(mixed, sizeof mixed) == PH_CODEC_H264);
     CHECK(ph_codec_from_annexb(mixed, sizeof mixed) == PH_CODEC_UNKNOWN);
     CHECK(!ph_codec_annexb_unambiguous(mixed, sizeof mixed, PH_CODEC_H264));
     CHECK(!ph_codec_annexb_unambiguous(mixed, sizeof mixed, PH_CODEC_H265));

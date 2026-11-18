@@ -90,6 +90,12 @@ if(PORTHOLE_WITH_AIRPLAY)
     add_test(NAME decoder_timing COMMAND test_decoder_timing)
     set_tests_properties(decoder_timing PROPERTIES TIMEOUT 10)
 
+    add_executable(test_audio_resend test_audio_resend.c)
+    target_link_libraries(test_audio_resend PRIVATE porthole_airplay_core)
+    porthole_set_warnings(test_audio_resend)
+    add_test(NAME audio_resend COMMAND test_audio_resend)
+    set_tests_properties(audio_resend PROPERTIES TIMEOUT 10)
+
     add_executable(test_audio test_audio.c)
     target_link_libraries(test_audio PRIVATE porthole_app)
     porthole_set_warnings(test_audio)

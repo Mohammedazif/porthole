@@ -1216,7 +1216,9 @@ int main(int argc, char **argv)
         if (!faults) passed &= end_error <= 5 && (!drag_mode || dragged_reports);
         if (render_stall_mode) passed &= render_stalled;
         if (faults) passed &= fault_stage == 2 && (freeze_mode || fault_queued)
-            && released_at >= canceled_at && released_at - canceled_at <= 1000;
+            /* Frozen video may wait one bounded 250 ms extension past the
+             * fixed 700 ms held confirmation before releasing the button. */
+            && released_at >= canceled_at && released_at - canceled_at <= (freeze_mode ? 1250 : 1000);
         if (cancel_mode && strcmp(fault_name, "close")) passed &= fault_delivered;
         fprintf(passed ? stdout : stderr,
                 "paced app %s: pass=%d rc=%d timeout=%d helper_starts=%u stops=%u "

@@ -28,8 +28,9 @@ if(WIN32)
     find_package(OpenSSL 1.1.1 REQUIRED)
     find_package(Threads REQUIRED)
     file(GLOB _uxplay_sources CONFIGURE_DEPENDS ${UXPLAY_DIR}/lib/*.c)
-    list(REMOVE_ITEM _uxplay_sources ${UXPLAY_DIR}/lib/dnssd.c)
+    list(REMOVE_ITEM _uxplay_sources ${UXPLAY_DIR}/lib/dnssd.c ${UXPLAY_DIR}/lib/raop_buffer.c)
     add_library(airplay STATIC ${_uxplay_sources}
+        ${PROJECT_SOURCE_DIR}/src/airplay/raop_buffer.c
         ${PROJECT_SOURCE_DIR}/src/airplay/dnssd_records.c
         ${PROJECT_SOURCE_DIR}/src/airplay/dnssd_win.c)
     target_include_directories(airplay PRIVATE ${UXPLAY_DIR}/lib
@@ -46,6 +47,13 @@ if(WIN32)
         PkgConfig::UXPLAY_PLIST OpenSSL::Crypto ws2_32 iphlpapi dnsapi)
 else()
     add_subdirectory(${UXPLAY_DIR}/lib ${_uxplay_bin}/airplay EXCLUDE_FROM_ALL)
+    # Same bounded audio-resend wait as Windows: build Porthole's raop_buffer.c
+    # in place of upstream's, leaving the pinned submodule untouched.
+    get_target_property(_airplay_sources airplay SOURCES)
+    list(FILTER _airplay_sources EXCLUDE REGEX "(^|/)raop_buffer\\.c$")
+    set_property(TARGET airplay PROPERTY SOURCES ${_airplay_sources}
+        ${PROJECT_SOURCE_DIR}/src/airplay/raop_buffer.c)
+    target_include_directories(airplay PRIVATE ${UXPLAY_DIR}/lib)
 endif()
 
 if(UNIX AND NOT APPLE)

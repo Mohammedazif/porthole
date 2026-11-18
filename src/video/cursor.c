@@ -172,10 +172,40 @@ static bool locate(const ph_yuv_planes *p, const ph_rect *screen,
     if (left > right || top > bottom)
         return false;
     int x0 = (int)left, x1 = (int)right, y0 = (int)top, y1 = (int)bottom;
+    if (before) {
+        /* Candidate centres must be near at least one changed pixel. Bound
+         * that region once so an exact-pixel search does not rescan hundreds
+         * of thousands of unchanged pixels for a small pointer correction. */
+        int reach = (int)ceil(r + 1);
+        int dirty_left = screen->w, dirty_right = -1;
+        int dirty_top = screen->h, dirty_bottom = -1;
+        int scan_left = x0 - reach, scan_right = x1 + reach;
+        int scan_top = y0 - reach, scan_bottom = y1 + reach;
+        for (int cy = scan_top; cy <= scan_bottom; cy++) {
+            const uint8_t *a = p->y + (screen->y + cy) * p->y_stride + screen->x;
+            const uint8_t *b = before->y + (bs->y + cy) * before->y_stride + bs->x;
+            for (int cx = scan_left; cx <= scan_right; cx++) {
+                if (abs(a[cx] - b[cx]) < 8)
+                    continue;
+                if (cx < dirty_left) dirty_left = cx;
+                if (cx > dirty_right) dirty_right = cx;
+                if (cy < dirty_top) dirty_top = cy;
+                dirty_bottom = cy;
+            }
+        }
+        if (dirty_right < 0)
+            return false;
+        if (dirty_left - reach > x0) x0 = dirty_left - reach;
+        if (dirty_right + reach < x1) x1 = dirty_right + reach;
+        if (dirty_top - reach > y0) y0 = dirty_top - reach;
+        if (dirty_bottom + reach < y1) y1 = dirty_bottom + reach;
+    }
     double best = 0;
     int bx = 0, by = 0;
-    for (int cy = y0; cy <= y1; cy += 2) {
-        for (int cx = x0; cx <= x1; cx += 2) {
+    /* Over text, sometimes only the actual centre has a convincing changed
+     * ring. A two-pixel grid can skip it before refinement is reached. */
+    for (int cy = y0; cy <= y1; cy++) {
+        for (int cx = x0; cx <= x1; cx++) {
             double s = cursor_shapes(p, screen, before, bs, cx, cy, shapes[1], hint_x, hint_y);
             if (s > best) {
                 best = s;
@@ -186,8 +216,8 @@ static bool locate(const ph_yuv_planes *p, const ph_rect *screen,
     }
     if (best < 250)
         return false;
-    for (int cy = y0; cy <= y1; cy += 2) {
-        for (int cx = x0; cx <= x1; cx += 2) {
+    for (int cy = y0; cy <= y1; cy++) {
+        for (int cx = x0; cx <= x1; cx++) {
             if (hypot(cx - bx, cy - by) > 2 * r
                 && cursor_shapes(p, screen, before, bs, cx, cy, shapes[1], hint_x, hint_y) > best * .92)
                 return false;
@@ -226,4 +256,122 @@ bool ph_video_cursor_changed(const ph_yuv_planes *p, const ph_rect *screen,
     if (!before)
         return false;
     return locate(p, screen, before, before_screen, hint_x, hint_y, radius, x, y);
+}
+
+bool ph_video_cursor_referenced(const ph_yuv_planes *p, const ph_rect *screen,
+                                const ph_yuv_planes *before, const ph_rect *before_screen,
+                                const ph_yuv_planes *reference, const ph_rect *reference_screen,
+                                double old_x, double old_y, double hint_x, double hint_y,
+                                double radius, double *x, double *y)
+{
+    if (!x || !y || !valid(p, screen) || !valid(before, before_screen)
+        || !valid(reference, reference_screen)
+        || screen->w != before_screen->w || screen->h != before_screen->h
+        || screen->w != reference_screen->w || screen->h != reference_screen->h
+        || !isfinite(old_x) || !isfinite(old_y) || old_x < 0 || old_y < 0
+        || old_x >= screen->w || old_y >= screen->h)
+        return false;
+    double px, py;
+    if (!ph_video_cursor_changed(p, screen, reference, reference_screen,
+                                 hint_x, hint_y, radius, &px, &py))
+        return false;
+    double r = fmin(screen->w, screen->h) * 11.0 / 500;
+    if (hypot(px - old_x, py - old_y) > 2 * r)
+        return false;
+    cursor_samples samples;
+    sample_offsets(&samples, r);
+    if (!changed(p, screen, before, before_screen, (int)px, (int)py, &samples))
+        return false;
+    /* The earlier picture is only a background reference while the scene is
+     * unchanged outside the old dot. A new icon/menu cannot supply its circle. */
+    int left = (int)fmax(0, fmin(old_x, px) - r - 5);
+    int right = (int)fmin(screen->w - 1, fmax(old_x, px) + r + 5);
+    int top = (int)fmax(0, fmin(old_y, py) - r - 5);
+    int bottom = (int)fmin(screen->h - 1, fmax(old_y, py) + r + 5);
+    int dirty = 0;
+    for (int cy = top; cy <= bottom; cy++) {
+        for (int cx = left; cx <= right; cx++) {
+            if (hypot(cx - old_x, cy - old_y) <= r + 4)
+                continue;
+            int a = before->y[(before_screen->y + cy) * before->y_stride + before_screen->x + cx];
+            int b = reference->y[(reference_screen->y + cy) * reference->y_stride
+                                 + reference_screen->x + cx];
+            if (abs(a - b) >= 8 && ++dirty > 3)
+                return false;
+        }
+    }
+    *x = px;
+    *y = py;
+    return true;
+}
+
+/* Change between two post-movement pictures that counts as video motion. The
+ * dot itself is translucent, so mild background drift shows through it too;
+ * only stronger change (moving objects, cuts) is masked. */
+#ifndef SETTLED_MOTION
+#define SETTLED_MOTION 8
+#endif
+
+bool ph_video_cursor_settled(const ph_yuv_planes *p, const ph_rect *screen,
+                             const ph_yuv_planes *later, const ph_yuv_planes *later2,
+                             const ph_yuv_planes *before, const ph_rect *before_screen,
+                             int dilate, double hint_x, double hint_y, double radius,
+                             double *x, double *y)
+{
+    if (!x || !y || !valid(p, screen) || !valid(later, screen) || !valid(before, before_screen)
+        || (later2 && !valid(later2, screen)) || screen->w != before_screen->w
+        || screen->h != before_screen->h || dilate < 0 || dilate > 4 || !isfinite(radius))
+        return false;
+    /* Pixels that still change between pictures taken after the movement are
+     * video motion, not the dot, which has stopped. Hide them from the changed
+     * search by giving the baseline the current value there. The window is the
+     * search area plus the dot and dilation margin. */
+    int w = screen->w, h = screen->h;
+    int reach = (int)ceil(radius + fmin(w, h) * 11.0 / 500 + 8 + dilate);
+    int left = (int)fmax(0, floor(hint_x) - reach), right = (int)fmin(w - 1, ceil(hint_x) + reach);
+    int top = (int)fmax(0, floor(hint_y) - reach), bottom = (int)fmin(h - 1, ceil(hint_y) + reach);
+    if (left > right || top > bottom)
+        return false;
+    int mw = right - left + 1, mh = bottom - top + 1;
+    uint8_t *moving = calloc((size_t)mw * mh, 1);
+    uint8_t *base = malloc((size_t)w * h);
+    if (!moving || !base) {
+        free(moving);
+        free(base);
+        return false;
+    }
+    for (int cy = top; cy <= bottom; cy++) {
+        const uint8_t *a = p->y + (screen->y + cy) * p->y_stride + screen->x;
+        const uint8_t *b = later->y + (screen->y + cy) * later->y_stride + screen->x;
+        const uint8_t *c = later2 ? later2->y + (screen->y + cy) * later2->y_stride + screen->x : NULL;
+        for (int cx = left; cx <= right; cx++)
+            if (abs(a[cx] - b[cx]) >= SETTLED_MOTION || (c && abs(a[cx] - c[cx]) >= SETTLED_MOTION))
+                moving[(cy - top) * mw + (cx - left)] = 1;
+    }
+    for (int cy = 0; cy < h; cy++)
+        for (int cx = 0; cx < w; cx++)
+            base[cy * w + cx] = before->y[(before_screen->y + cy) * before->y_stride
+                                          + before_screen->x + cx];
+    for (int cy = top; cy <= bottom; cy++) {
+        for (int cx = left; cx <= right; cx++) {
+            bool hide = false;
+            for (int dy = -dilate; dy <= dilate && !hide; dy++) {
+                int yy = cy + dy - top;
+                if (yy < 0 || yy >= mh)
+                    continue;
+                for (int dx = -dilate; dx <= dilate && !hide; dx++) {
+                    int xx = cx + dx - left;
+                    hide = xx >= 0 && xx < mw && moving[yy * mw + xx];
+                }
+            }
+            if (hide)
+                base[cy * w + cx] = p->y[(screen->y + cy) * p->y_stride + screen->x + cx];
+        }
+    }
+    ph_yuv_planes masked = {base, NULL, NULL, w, 0, w, h};
+    ph_rect masked_screen = {0, 0, w, h};
+    bool found = locate(p, screen, &masked, &masked_screen, hint_x, hint_y, radius, x, y);
+    free(moving);
+    free(base);
+    return found;
 }

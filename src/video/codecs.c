@@ -62,6 +62,35 @@ static ph_codec_votes scan_annexb(const uint8_t *data, size_t len)
     return votes;
 }
 
+ph_codec ph_codec_leading_nal(const uint8_t *data, size_t len)
+{
+    ph_codec_votes votes = {false, false, false};
+    size_t i = 0;
+
+    if (!data)
+        return PH_CODEC_UNKNOWN;
+    while (i < len) {
+        size_t remain = len - i;
+        size_t start_len = 0;
+
+        if (remain >= 4 && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1)
+            start_len = 4;
+        else if (remain >= 3 && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1)
+            start_len = 3;
+        else {
+            i++;
+            continue;
+        }
+        if (remain <= start_len)
+            return PH_CODEC_UNKNOWN;
+        consider_nal(data[i + start_len], &votes);
+        break;
+    }
+    if (votes.ambiguous || votes.h264 == votes.h265)
+        return PH_CODEC_UNKNOWN;
+    return votes.h264 ? PH_CODEC_H264 : PH_CODEC_H265;
+}
+
 ph_codec ph_codec_from_annexb(const uint8_t *data, size_t len)
 {
     ph_codec_votes votes = scan_annexb(data, len);

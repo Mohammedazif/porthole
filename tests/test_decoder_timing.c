@@ -114,6 +114,13 @@ int main(int argc, char **argv)
     while (!atomic_load(&clone_paused) && ph_metrics_now_ms() < deadline)
         av_usleep(1000);
     CHECK(atomic_load(&clone_paused));
+    /* The worker is inside publication, so these copies sit in the queue.
+     * Overflow must discard a whole run and stay within the cap. */
+    for (unsigned int i = 0; i < PH_DECODER_MAX_QUEUED + 30; i++)
+        ph_decoder_push(decoder, black_idr, sizeof black_idr);
+    ph_decoder_get_stats(decoder, &stats);
+    CHECK(stats.queued_packets <= PH_DECODER_MAX_QUEUED);
+    CHECK(stats.packets_discarded >= PH_DECODER_MAX_QUEUED);
     ph_decoder_reset(decoder);
     uint64_t empty_sequence = 0;
     CHECK(!ph_decoder_latest_timed(decoder, frame, &empty_sequence, &timing));

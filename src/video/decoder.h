@@ -19,6 +19,10 @@ typedef struct ph_frame_timing {
     uint64_t received_ms, decoded_ms;
 } ph_frame_timing;
 
+/* Past this many waiting access units the queue is dropped and decoding resumes
+ * at the next keyframe. One picture is retained either way. */
+#define PH_DECODER_MAX_QUEUED 240
+
 typedef struct ph_decoder_stats {
     uint64_t packets_received, packets_discarded;
     uint64_t frames_decoded, frames_superseded, frames_stale;

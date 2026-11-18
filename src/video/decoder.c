@@ -1,5 +1,6 @@
 #include "video/decoder.h"
 
+#include <limits.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,20 +8,19 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/mem.h>
 #include <libswscale/swscale.h>
 
 #include "core/log.h"
 #include "core/metrics.h"
 #include "video/codecs.h"
 
-#define MAX_QUEUED 240 /* ~4 s at 60 fps; beyond that we're hopelessly behind */
-
 typedef struct packet {
     struct packet *next;
     size_t len;
     uint64_t received_ms;
     uint64_t generation;
-    uint8_t data[];
+    uint8_t *data; /* av_malloc, owned until av_packet_from_data */
 } packet;
 
 struct ph_decoder {
@@ -43,13 +43,21 @@ struct ph_decoder {
     void *user;
 };
 
+static void release_packet(packet *p)
+{
+    if (!p)
+        return;
+    av_free(p->data);
+    free(p);
+}
+
 static void free_queue(ph_decoder *d)
 {
     while (d->head) {
         packet *p = d->head;
         d->head = p->next;
         d->stats.packets_discarded++;
-        free(p);
+        release_packet(p);
     }
     d->tail = NULL;
     d->queued = 0;
@@ -77,7 +85,7 @@ static AVCodecContext *open_codec(enum AVCodecID codec_id)
         return NULL;
     ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
     ctx->thread_type = FF_THREAD_SLICE; /* frame threading would add a frame of latency each */
-    ctx->thread_count = 0;
+    ctx->thread_count = 4; /* one picture; do not spawn one thread per core */
     /* PTS carries local packet provenance only. Rendering remains immediate;
      * this does not schedule frames or change audio/video synchronization. */
     ctx->pkt_timebase = (AVRational){1, 1000};
@@ -158,44 +166,52 @@ static void *decode_thread(void *arg)
         pthread_mutex_unlock(&d->lock);
 
         {
-            ph_codec detected = ph_codec_from_annexb(p->data, p->len);
-            if (current != PH_CODEC_UNKNOWN && detected != PH_CODEC_UNKNOWN && detected != current
-                && !ph_codec_annexb_unambiguous(p->data, p->len, detected))
-                detected = PH_CODEC_UNKNOWN;
-            if (detected != PH_CODEC_UNKNOWN && detected != current) {
-                enum AVCodecID codec_id = detected == PH_CODEC_H264 ? AV_CODEC_ID_H264
-                                                                    : AV_CODEC_ID_HEVC;
-                avcodec_free_context(&ctx);
-                ctx = open_codec(codec_id);
-                if (!ctx) {
-                    if (detected == PH_CODEC_H265) {
-                        if (!logged_h265)
-                            PH_LOGE("this FFmpeg build has no H.265 decoder");
-                        logged_h265 = true;
-                    } else if (!logged_h264) {
-                        PH_LOGE("this FFmpeg build has no H.264 decoder");
-                        logged_h264 = true;
+            /* A steady stream repeats the same codec. Read the first NAL only;
+             * scan the whole access unit when the codec may have changed. */
+            ph_codec detected = current == PH_CODEC_UNKNOWN ? PH_CODEC_UNKNOWN
+                                                            : ph_codec_leading_nal(p->data, p->len);
+            if (current == PH_CODEC_UNKNOWN || detected != current) {
+                detected = ph_codec_from_annexb(p->data, p->len);
+                if (current != PH_CODEC_UNKNOWN && detected != PH_CODEC_UNKNOWN
+                    && detected != current
+                    && !ph_codec_annexb_unambiguous(p->data, p->len, detected))
+                    detected = PH_CODEC_UNKNOWN;
+                if (detected != PH_CODEC_UNKNOWN && detected != current) {
+                    enum AVCodecID codec_id = detected == PH_CODEC_H264 ? AV_CODEC_ID_H264
+                                                                        : AV_CODEC_ID_HEVC;
+                    avcodec_free_context(&ctx);
+                    ctx = open_codec(codec_id);
+                    if (!ctx) {
+                        if (detected == PH_CODEC_H265) {
+                            if (!logged_h265)
+                                PH_LOGE("this FFmpeg build has no H.265 decoder");
+                            logged_h265 = true;
+                        } else if (!logged_h264) {
+                            PH_LOGE("this FFmpeg build has no H.264 decoder");
+                            logged_h264 = true;
+                        }
+                        current = PH_CODEC_UNKNOWN;
+                        release_packet(p);
+                        continue;
                     }
-                    current = PH_CODEC_UNKNOWN;
-                    free(p);
-                    continue;
+                    current = detected;
                 }
-                current = detected;
             }
         }
         if (!ctx) {
-            free(p);
+            release_packet(p);
             continue;
         }
 
-        if (av_new_packet(pkt, (int)p->len) == 0) {
-            memcpy(pkt->data, p->data, p->len);
+        av_packet_unref(pkt);
+        if (av_packet_from_data(pkt, p->data, (int)p->len) == 0) {
+            p->data = NULL;
             pkt->pts = (int64_t)p->received_ms;
             if (avcodec_send_packet(ctx, pkt) < 0)
                 PH_LOGD("decoder rejected a packet (waiting for the next keyframe)");
             av_packet_unref(pkt);
         }
-        free(p);
+        release_packet(p);
 
         while (avcodec_receive_frame(ctx, frame) == 0) {
             uint64_t decoded_ms = ph_metrics_now_ms();
@@ -265,18 +281,28 @@ ph_decoder *ph_decoder_start(void (*on_frame)(void *user), void *user)
 
 void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len)
 {
-    packet *p = malloc(sizeof *p + len);
+    uint8_t *copy;
+    packet *p;
 
-    if (!p)
+    if (!d || !data || !len || len > (size_t)INT_MAX)
         return;
+    copy = av_malloc(len + AV_INPUT_BUFFER_PADDING_SIZE);
+    p = malloc(sizeof *p);
+    if (!copy || !p) {
+        av_free(copy);
+        free(p);
+        return;
+    }
+    memcpy(copy, data, len);
+    memset(copy + len, 0, AV_INPUT_BUFFER_PADDING_SIZE);
     p->next = NULL;
     p->len = len;
+    p->data = copy;
     p->received_ms = ph_metrics_now_ms();
-    memcpy(p->data, data, len);
 
     pthread_mutex_lock(&d->lock);
     d->stats.packets_received++;
-    if (d->queued >= MAX_QUEUED) {
+    if (d->queued >= PH_DECODER_MAX_QUEUED) {
         /* Can't drop single packets without corrupting the picture; start over instead. The
          * phone sends SPS/PPS with every keyframe, so decoding resumes at the next one. */
         PH_LOGW("video decoder fell behind; skipping to the next keyframe");

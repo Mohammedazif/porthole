@@ -1,9 +1,13 @@
 /* Main-loop recovery must not block rendering while a helper ignores EOF/TERM. */
+#include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -36,7 +40,10 @@ static void saturation_timeout(int signal_number)
             while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
         }
     }
-    (void)write(STDERR_FILENO, message, sizeof message - 1);
+    int wrote = (int)write(STDERR_FILENO, message, sizeof message - 1);
+    if (wrote < 0)
+        wrote = 0;
+    (void)wrote;
     _exit(124);
 }
 #define CHECK(condition) do { if (!(condition)) { \
@@ -152,10 +159,26 @@ int main(void)
     alarm(0);
     watched_pid = 0;
 
+    /* AirPlay sockets are not close-on-exec. A helper started while mirroring
+     * must not keep a listening port bound after the app closes its own copy;
+     * otherwise the next mirroring session cannot bind it. */
+    struct sockaddr_in address = {.sin_family = AF_INET,
+                                  .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t address_len = sizeof address;
+    int listener = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(listener >= 0 && fcntl(listener, F_GETFD) == 0);
+    CHECK(bind(listener, (struct sockaddr *)&address, sizeof address) == 0);
+    CHECK(listen(listener, 1) == 0);
+    CHECK(getsockname(listener, (struct sockaddr *)&address, &address_len) == 0);
     observed events = {0};
     link = start(&events, "hung");
     if (!link)
         return 1;
+    close(listener);
+    int rebound = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(rebound >= 0);
+    CHECK(bind(rebound, (struct sockaddr *)&address, sizeof address) == 0); /* not inherited */
+    close(rebound);
     began = ph_metrics_now_ms();
     ph_hid_link_request_stop(link);
     CHECK(ph_metrics_now_ms() - began < 100);

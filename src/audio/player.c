@@ -12,10 +12,16 @@
 
 #include "audio/sync.h"
 #include "core/log.h"
+#include "core/metrics.h"
 
 #define RATE 44100
 #define CHANNELS 2
 #define QUEUE_BYTES (RATE * CHANNELS * sizeof(float) / 5) /* at most 200 ms */
+/* PC output backlog. AirPlay delivers a burst when a stream (re)starts, e.g.
+ * scrolling to a new Reel; a queue only cleared at 200 ms then stayed that late
+ * for good. Drop arriving audio above this instead, so playback catches up. */
+#define BACKLOG_MAX_MS 100
+#define STATS_EVERY_MS 2000
 
 struct ph_held_pcm {
     struct ph_held_pcm *next;
@@ -47,6 +53,16 @@ struct ph_audio {
     size_t hold_bytes;
     bool clock_valid;
     uint64_t clock_ms;
+    uint8_t *pcm_scratch;
+    int pcm_capacity;
+    struct {
+        uint64_t since_ms;
+        unsigned int played, held, trimmed;
+        int lead_min, lead_max;
+        int64_t lead_sum;
+        unsigned int leads;
+        uint32_t backlog_max;
+    } stats;
 };
 
 static const char *format_name(unsigned char compression)
@@ -165,14 +181,13 @@ static uint32_t device_queued_ms_locked(const ph_audio *a)
     return SDL_GetQueuedAudioSize(a->device) * 1000U / (RATE * CHANNELS * sizeof(float));
 }
 
-static int convert_frame(ph_audio *a, uint8_t **out, int *count_out)
+static int convert_frame(ph_audio *a, int *count_out)
 {
     AVFrame *f = a->frame;
     int capacity;
-    uint8_t *pcm = NULL;
+    uint8_t *pcm;
     int count;
 
-    *out = NULL;
     *count_out = 0;
     if (!a->resample || a->input_format != f->format || a->input_rate != f->sample_rate
         || a->input_channels != f->ch_layout.nb_channels) {
@@ -189,47 +204,63 @@ static int convert_frame(ph_audio *a, uint8_t **out, int *count_out)
         a->input_channels = f->ch_layout.nb_channels;
     }
     capacity = swr_get_out_samples(a->resample, f->nb_samples);
-    if (capacity <= 0 || capacity > 16384
-        || av_samples_alloc(&pcm, NULL, CHANNELS, capacity, AV_SAMPLE_FMT_FLT, 0) < 0)
+    if (capacity <= 0 || capacity > 16384)
         return -1;
+    if (a->pcm_capacity < capacity) {
+        uint8_t *grown = NULL;
+        if (av_samples_alloc(&grown, NULL, CHANNELS, capacity, AV_SAMPLE_FMT_FLT, 0) < 0)
+            return -1;
+        av_free(a->pcm_scratch);
+        a->pcm_scratch = grown;
+        a->pcm_capacity = capacity;
+    }
+    pcm = a->pcm_scratch;
     count = swr_convert(a->resample, &pcm, capacity,
                         (const uint8_t **)f->extended_data, f->nb_samples);
     if (count <= 0) {
-        av_free(pcm);
         *count_out = count;
         return count < 0 ? -1 : 0;
     }
-    *out = pcm;
     *count_out = count;
     return 0;
 }
 
-static int queue_pcm(ph_audio *a, uint8_t *pcm, int count)
+static int queue_pcm(ph_audio *a, uint8_t *pcm, int count, bool own)
 {
     float *values;
     Uint32 bytes;
 
     if (count <= 0) {
-        av_free(pcm);
+        if (own)
+            av_free(pcm);
         return count;
     }
     if (!a->device) {
-        av_free(pcm);
+        if (own)
+            av_free(pcm);
         return -1;
     }
     values = (float *)pcm;
     for (int i = 0; i < count * CHANNELS; i++)
         values[i] *= a->gain;
     bytes = (Uint32)(count * CHANNELS * sizeof(float));
-    if (SDL_GetQueuedAudioSize(a->device) + bytes > QUEUE_BYTES)
-        SDL_ClearQueuedAudio(a->device); /* recover instead of accumulating audible lag */
+    uint32_t backlog = device_queued_ms_locked(a);
+    if (backlog > a->stats.backlog_max)
+        a->stats.backlog_max = backlog;
+    if (a->playing && backlog >= BACKLOG_MAX_MS) {
+        a->stats.trimmed++; /* catch up: the device already has enough to play */
+        if (own)
+            av_free(pcm);
+        return count;
+    }
     if (SDL_QueueAudio(a->device, pcm, bytes) != 0)
         count = -1;
     else if (!a->playing) {
         PH_LOGI("audio playing: %s, %d Hz stereo", format_name(a->compression), RATE);
         a->playing = true;
     }
-    av_free(pcm);
+    if (own)
+        av_free(pcm);
     return count;
 }
 
@@ -315,17 +346,33 @@ static int push_locked(ph_audio *a, unsigned char compression, const uint8_t *da
                        bool timed, uint64_t pts_ns)
 {
     int result = -1;
-    ph_sync_action action = {PH_SYNC_PLAY, 0};
+    ph_sync_action action = {PH_SYNC_PLAY, 0, 0, false};
     int error;
 
     if ((!a->codec || compression != a->compression)
         && !configure_locked(a, compression, compression == 2 ? 352 : compression == 8 ? 480 : 1024))
         goto done;
     if (timed) {
-        action = ph_sync_audio(a->sync, pts_ns, 0);
+        action = ph_sync_audio_at(a->sync, pts_ns, 0, ph_metrics_now_ms());
         if (action.kind == PH_SYNC_DROP) {
             result = 0;
             goto done;
+        }
+        if (action.have_lead) {
+            if (!a->stats.leads || action.lead_ms < a->stats.lead_min)
+                a->stats.lead_min = action.lead_ms;
+            if (!a->stats.leads || action.lead_ms > a->stats.lead_max)
+                a->stats.lead_max = action.lead_ms;
+            a->stats.lead_sum += action.lead_ms;
+            a->stats.leads++;
+        }
+        if (action.kind == PH_SYNC_HOLD) {
+            /* Audio already queued for the device plays first: hold only the rest. */
+            int net = action.hold_or_drop_ms - (int)device_queued_ms_locked(a);
+            if (net <= 10)
+                action.kind = PH_SYNC_PLAY;
+            else
+                action.hold_or_drop_ms = net;
         }
     }
     if (av_new_packet(a->packet, (int)len) < 0)
@@ -337,9 +384,8 @@ static int push_locked(ph_audio *a, unsigned char compression, const uint8_t *da
         goto done;
     result = 0;
     while ((error = avcodec_receive_frame(a->codec, a->frame)) == 0) {
-        uint8_t *pcm = NULL;
         int samples = 0;
-        int conv = convert_frame(a, &pcm, &samples);
+        int conv = convert_frame(a, &samples);
         av_frame_unref(a->frame);
         if (conv < 0) {
             result = -1;
@@ -347,17 +393,26 @@ static int push_locked(ph_audio *a, unsigned char compression, const uint8_t *da
         }
         if (samples <= 0)
             continue;
-        if (a->muted) {
-            av_free(pcm);
-        } else if (a->hold_head || (timed && action.kind == PH_SYNC_HOLD)) {
+        if (!a->muted && (a->hold_head || (timed && action.kind == PH_SYNC_HOLD))) {
             int delay = timed && action.kind == PH_SYNC_HOLD ? action.hold_or_drop_ms : 0;
-            if (hold_pcm(a, pcm, samples, delay) < 0) {
+            size_t bytes = (size_t)samples * CHANNELS * sizeof(float);
+            uint8_t *copy = av_malloc(bytes);
+            if (!copy) {
                 result = -1;
                 goto done;
             }
-        } else if (queue_pcm(a, pcm, samples) < 0) {
-            result = -1;
-            goto done;
+            memcpy(copy, a->pcm_scratch, bytes);
+            if (hold_pcm(a, copy, samples, delay) < 0) {
+                result = -1;
+                goto done;
+            }
+            a->stats.held++;
+        } else if (!a->muted) {
+            if (queue_pcm(a, a->pcm_scratch, samples, false) < 0) {
+                result = -1;
+                goto done;
+            }
+            a->stats.played++;
         }
         result += samples;
     }
@@ -380,6 +435,24 @@ static int push_outer(ph_audio *a, unsigned char compression, const uint8_t *dat
         return -1;
     SDL_LockMutex(a->lock);
     result = push_locked(a, compression, data, len, timed, pts_ns);
+    uint64_t now = ph_metrics_now_ms();
+    if (!a->stats.since_ms)
+        a->stats.since_ms = now;
+    else if (now - a->stats.since_ms >= STATS_EVERY_MS) {
+        uint32_t held_ms = (uint32_t)(a->hold_bytes * 1000 / (RATE * CHANNELS * sizeof(float)));
+        if (a->stats.leads)
+            PH_LOGD("audio: lead vs picture avg %lld ms (min %d, max %d); queued %u ms "
+                    "(max %u), held %u ms; played %u, held %u, trimmed %u",
+                    (long long)(a->stats.lead_sum / a->stats.leads), a->stats.lead_min,
+                    a->stats.lead_max, device_queued_ms_locked(a), a->stats.backlog_max,
+                    held_ms, a->stats.played, a->stats.held, a->stats.trimmed);
+        else
+            PH_LOGD("audio: no video timing; queued %u ms (max %u); played %u, trimmed %u",
+                    device_queued_ms_locked(a), a->stats.backlog_max, a->stats.played,
+                    a->stats.trimmed);
+        memset(&a->stats, 0, sizeof a->stats);
+        a->stats.since_ms = now;
+    }
     SDL_UnlockMutex(a->lock);
     return result;
 }
@@ -400,7 +473,7 @@ void ph_audio_note_video_pts(ph_audio *a, uint64_t pts_ns)
     if (!a)
         return;
     SDL_LockMutex(a->lock);
-    ph_sync_note_video(a->sync, pts_ns);
+    ph_sync_note_video_at(a->sync, pts_ns, ph_metrics_now_ms());
     SDL_UnlockMutex(a->lock);
 }
 
@@ -437,7 +510,7 @@ void ph_audio_pump(ph_audio *a, uint64_t now_ms)
         if (a->muted)
             av_free(node->pcm);
         else
-            queue_pcm(a, node->pcm, node->samples);
+            queue_pcm(a, node->pcm, node->samples, true);
         free(node);
     }
     SDL_UnlockMutex(a->lock);
@@ -548,6 +621,7 @@ void ph_audio_destroy(ph_audio *a)
     if (a->device)
         SDL_CloseAudioDevice(a->device);
     swr_free(&a->resample);
+    av_free(a->pcm_scratch);
     avcodec_free_context(&a->codec);
     av_frame_free(&a->frame);
     av_packet_free(&a->packet);

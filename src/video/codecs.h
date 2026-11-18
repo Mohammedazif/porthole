@@ -14,6 +14,10 @@ typedef enum ph_codec {
 /* Annex-B start codes 00 00 01 and 00 00 00 01. No start code, or both codecs, is UNKNOWN. */
 ph_codec ph_codec_from_annexb(const uint8_t *data, size_t len);
 
+/* Codec of the first decisive NAL only. The rest of the buffer is not read.
+ * UNKNOWN when that header is missing or matches both codec tables. */
+ph_codec ph_codec_leading_nal(const uint8_t *data, size_t len);
+
 /* True when a NAL is only `codec` and no NAL is only the other codec. */
 bool ph_codec_annexb_unambiguous(const uint8_t *data, size_t len, ph_codec codec);
 

@@ -220,17 +220,21 @@ static void sync_queue(ph_audio *audio)
     CHECK(produced > 0);
     queued = ph_audio_queued_ms(audio);
     CHECK(queued > 0);
-    produced = ph_audio_push_timed(audio, 4, packet->data, (size_t)packet->size, video + 80 * ms);
-    CHECK(produced == 0);
-    CHECK(ph_audio_queued_ms(audio) == queued);
+    /* Late audio is never delayed further: it plays at once. */
     produced = ph_audio_push_timed(audio, 4, packet->data, (size_t)packet->size, video - 80 * ms);
+    CHECK(produced > 0);
+    CHECK(ph_audio_queued_ms(audio) > queued);
+    queued = ph_audio_queued_ms(audio);
+    /* Audio well ahead of its picture waits out the lead not already covered
+     * by queued device audio (about 150 ms minus two queued AAC frames). */
+    produced = ph_audio_push_timed(audio, 4, packet->data, (size_t)packet->size, video + 150 * ms);
     CHECK(produced > 0);
     CHECK(ph_audio_queued_ms(audio) == queued);
     CHECK(ph_audio_settings(audio, &settings));
     CHECK(settings.queued_ms > queued);
-    ph_audio_pump(audio, 1079);
+    ph_audio_pump(audio, 1010);
     CHECK(ph_audio_queued_ms(audio) == queued);
-    ph_audio_pump(audio, 1080);
+    ph_audio_pump(audio, 1200);
     CHECK(ph_audio_queued_ms(audio) > queued);
 
     ph_audio_set_muted(audio, true);
@@ -243,9 +247,9 @@ static void sync_queue(ph_audio *audio)
     ph_audio_flush(audio);
     ph_audio_pump(audio, 2000);
     ph_audio_note_video_pts(audio, video);
-    produced = ph_audio_push_timed(audio, 4, packet->data, (size_t)packet->size, video - 50 * ms);
+    produced = ph_audio_push_timed(audio, 4, packet->data, (size_t)packet->size, video + 150 * ms);
     CHECK(produced > 0);
-    CHECK(ph_audio_queued_ms(audio) == 0);
+    CHECK(ph_audio_queued_ms(audio) == 0); /* held, not yet queued */
     ph_audio_flush(audio);
     ph_audio_pump(audio, 12000);
     CHECK(ph_audio_queued_ms(audio) == 0);
@@ -279,10 +283,20 @@ static void sync_queue(ph_audio *audio)
     ph_audio_pump(audio, 4100);
     CHECK(ph_audio_queued_ms(audio) > queued);
     queued = ph_audio_queued_ms(audio);
+    /* A negative offset cannot make late audio earlier: it simply plays. */
     ph_audio_set_sync_offset_ms(audio, -100);
     produced = ph_audio_push_timed(audio, 4, packet->data, (size_t)packet->size, video);
-    CHECK(produced == 0);
-    CHECK(ph_audio_queued_ms(audio) == queued);
+    CHECK(produced > 0);
+    CHECK(ph_audio_queued_ms(audio) > queued);
+
+    /* A burst (a new Reel/Short starting) cannot build a lasting backlog: once
+     * about 100 ms is queued, further arriving audio is dropped to catch up. */
+    ph_audio_set_sync_offset_ms(audio, 0);
+    ph_audio_flush(audio);
+    ph_audio_pump(audio, 9000);
+    for (int i = 0; i < 40; i++)
+        CHECK(ph_audio_push(audio, 4, packet->data, (size_t)packet->size) > 0);
+    CHECK(ph_audio_queued_ms(audio) >= 90 && ph_audio_queued_ms(audio) < 100 + 30);
     ph_audio_set_sync_offset_ms(audio, 0);
     ph_audio_set_volume(audio, 0);
     av_packet_free(&packet);

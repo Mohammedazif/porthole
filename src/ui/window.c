@@ -519,6 +519,13 @@ ph_window *ph_window_create(const char *title)
     place_window(w, WAITING_W, WAITING_H, true);
     /* No vsync: presenting a frame must not block this thread, which also forwards
      * mouse and keyboard input, for up to a whole display refresh. */
+#if !defined(_WIN32)
+    /* llvmpipe reports itself as accelerated OpenGL and otherwise starts one
+     * raster thread per core for a single textured quad. */
+    setenv("LP_NUM_THREADS", "4", 0);
+#endif
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
+    SDL_SetHint(SDL_HINT_RENDER_VSYNC, "0");
     w->renderer = SDL_CreateRenderer(w->window, -1, SDL_RENDERER_ACCELERATED);
     if (!w->renderer) {
         PH_LOGW("no accelerated renderer (%s); using software rendering", SDL_GetError());
@@ -526,7 +533,12 @@ ph_window *ph_window_create(const char *title)
     }
     if (!w->renderer)
         goto fail;
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
+    {
+        SDL_RendererInfo info;
+        if (SDL_GetRendererInfo(w->renderer, &info) == 0)
+            PH_LOGI("renderer %s (%s)", info.name,
+                    (info.flags & SDL_RENDERER_ACCELERATED) ? "gpu" : "software");
+    }
     ph_window_redraw(w);
     return w;
 

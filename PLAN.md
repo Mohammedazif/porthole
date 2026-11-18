@@ -95,6 +95,24 @@ Native Notes double-tap/hold recognition is still pending the next mirroring che
 An alternative live attempt aborted before the shortcut when VMware overrode the
 programmatic PC-cursor position; that attempt does not establish gesture failure.
 
+**Resumed native Notes check (2026-11-18, 12:13–12:18 IST):** after the VM restart,
+the existing adapter was present but soft-blocked. Clearing that block restored
+the existing bond and all three input subscriptions without re-pairing. The user
+reconnected Screen Mirroring, and the running `a006232` Linux preview successfully
+typed `Porthole test` into a fresh note. Alt+D and Alt+L attempts then ended with
+`PH_GESTURE_FAILED` during pointer alignment, before any primary-button press.
+Repeating with the window moved beneath a stationary PC cursor also failed, so
+those attempts were not aborted by the earlier cursor-warp guard. Movement fences
+were acknowledged and Bluetooth remained connected. Captured video shows the dot
+over the text in some frames, but does not establish why the app could not confirm
+its final position against its own baseline. Native word selection and long-press
+recognition therefore remain unverified; this is a reproduced live alignment
+failure, not a successful gesture check or a proven detector/transport diagnosis.
+Evidence is in `build/live/porthole-controls-resume-20261118-121151.log` and
+`build/live/local-validation/notes-20261118-121337`, `notes-20261118-121348`,
+`notes-20261118-121439`, `notes-20261118-121533`, `notes-20261118-121745`,
+`notes-20261118-121808`, and `motion-frames-20261118-121617`.
+
 The latest local Windows preview is `build/Porthole-Windows-Portable-a006232.exe`.
 Its Release cross-build, 23/23 portable HID checks, native Win32 pipe test and native
 cursor regressions under Wine pass. Complete payload and embedded runtime/dependency
@@ -102,6 +120,349 @@ verification pass. SHA-256:
 `fbd8973a4d74488e04b786b328e6cd29fb5720982571dd42bc561676f36b747e`.
 Real Windows Bluetooth/radio and native gesture usability remain unverified for
 this build. No Grok audio, USB or advanced-feature implementation was changed here.
+
+### Pointer correction follow-up — 2026-11-18
+
+Exact luma-frame capture reproduced two detection gaps over Notes text: an
+overlapping correction can leave too much of the old dot in the immediate
+baseline, and a two-pixel search grid can skip a valid centre before refinement.
+The candidate now searches every candidate pixel within bounds derived from
+changed pixels. Small unpressed corrections may also use a background reference
+from the same movement for at most two seconds. This still requires a changed
+current picture, an unambiguous circle and matching nearby content outside the
+previously confirmed dot. Presses, anchors and picture/layout resets discard the
+reference. Unchanged pictures, disappearing dots and changed-scene regressions
+remain rejected. The original search fails the new parity regression.
+
+Shutdown now saves an adapted scale only when the current target is freshly
+confirmed and aligned. The previous diagnostic restart had saved gains from an
+unsuccessful session, causing vertical overshoot; the previously validated
+`3.484 / 3.372` calibration was restored, with the replaced file retained in
+`build/live/local-validation/pointer-scale-before-notes-restore.txt`.
+
+The combined current checkout passes **69/69 ASan/UBSan CTest checks** in 41.38
+seconds with warnings as errors. The isolated controls candidate also passes
+69/69 sanitizer checks. Its Windows Release cross-build passes all 150 targets;
+12/12 native tests under Wine cover cursor/pointer/gesture code, changing and
+stale confirmation frames, paced input, held-input cancellation, presentation
+recovery and feed routing. These do not establish native iOS gesture recognition
+or real Windows radio behavior. The existing portable EXE remains the previously
+documented `a006232` build; it does not contain this uncommitted candidate.
+
+The live hover reached `(191,147)` for the Notes text target, but the test harness
+then spent about 2.75 seconds capturing XWD before issuing Alt+D, expiring the
+1.2-second confirmed-position window. That attempt sent no click and is not a
+native double-tap pass. The capture was moved before hover confirmation in the
+local harness. A subsequent VM restart ended the session before that corrected
+check could run. The diagnostic preview has been reopened, but the VM currently
+does not enumerate the AX211 adapter, so live double-tap/hold, panel dismissal and
+Reel/Short outcomes remain pending. The preview's current PID/log are in
+`build/live/active.json`. Build/test evidence is in
+`build/live/local-validation/alignment-combined-{build,tests}.log`,
+`alignment-sanitizer-final-tests.log`, `windows-alignment-candidate-build.log`,
+and `windows-alignment-wine/results.json` in the same directory.
+
+### Combined-checkout validation and two fixes — 2026-11-18 afternoon
+
+The earlier Windows cross-build compiled an isolated copy (`alignment-source`), not this
+checkout. The checkout also carries uncommitted, previously unrecorded performance
+changes: a reused audio PCM scratch buffer, zero-copy decoder packets with
+`PH_DECODER_MAX_QUEUED`, a first-NAL codec fast path, four decoder threads,
+`LP_NUM_THREADS=4` for llvmpipe, a renderer log line and SIGINT/SIGTERM shutdown.
+Review and testing found two defects, and both are now fixed:
+
+- **Held audio played uninitialised memory.** The scratch-buffer change allocated a
+  copy for A/V-sync-held PCM but never filled it. It now copies the decoded samples.
+  Existing audio tests check queue lengths only, so they could not catch this.
+- **The Linux Bluetooth helper inherited AirPlay sockets.** The live preview showed
+  `raop_rtp_mirror initializing socket failed` on each new Screen Mirroring attempt.
+  `porthole_ble.py` had been restarted during mirroring and held mirror port 7100
+  after the app closed its own copy. The child now closes every descriptor above
+  stderr before `exec`. A new `link_shutdown` regression re-binds a listening port
+  after helper start; it fails without the fix and passes with it (10/10 repeated runs
+  under sanitizers). The Windows helper already uses an explicit handle list.
+  This may explain some earlier "Porthole missing from Screen Mirroring" episodes
+  after helper restarts, but that has not been confirmed live.
+
+Results with both fixes: **69/69** CTest checks in ASan/UBSan, Debug and Release
+builds, **30/30** without AirPlay, and 3× repeated sanitizer runs (all with warnings
+as errors). The Windows Release cross-build of this checkout compiles **150/150**
+targets, and the complete Windows CTest list passes **64/64 under Wine**, including
+codecs, decoder timing, audio and every `app_*` control check. Evidence:
+`build/live/local-validation/validation-20261118-afternoon/`.
+
+**Live state at 14:21 IST:** the AX211 adapter is attached again (unblocked, bonded
+phone connected). The running preview (PID 7434, the `alignment-diagnostic` build)
+predates the helper fix, so mirroring cannot reconnect until it is restarted on the
+fixed build. The calibration `3.484 / 3.372` is backed up in
+`pointer-scale-before-fd-fix-restart.txt`. No live gesture result was obtained in
+this pass. The portable `a006232` EXE contains neither fix nor the pointer correction.
+
+### Stuck keys, corner sweeps and delayed moves — 2026-11-18 evening
+
+**Paste could leave Shift held.** Each pasted character was released with its own
+modifiers, so text ending in `!`, `?` or a capital left Shift held on the phone until
+the next physical key. `ph_input_type` now releases key and modifiers together; a new
+`test_input` regression fails on the old behavior. No other keyboard release path
+was found to drop key-ups: focus loss, F1/F2, Esc and Alt shortcuts release input,
+and the helper's key lane delivers every report in order at 15 ms. Remaining
+unproven causes: iOS auto-repeat when a release arrives late (radio or VM USB stall),
+and VMware's Ctrl+Alt grab hotkey swallowing guest key-ups (VM only).
+
+**Corner sweeps are the controller's recovery anchor.** When the confirmed position
+is lost, eight `(-127,-127)` reports park the dot top-left before re-acquiring it.
+The 14:44 session logged ten sweeps: three followed a held button whose drag was not
+re-detected within 700 ms (the controller then releases the button, forgets the
+position and sweeps), others followed missed detections after small moves or a mouse
+leaving the window mid-move. The sweep reason is not logged yet.
+
+**"Automatic"/old moves** come from the same closed loop: a sent batch (up to 24
+reports, 360 ms) cannot be retracted when the PC mouse changes direction or leaves
+the window; the dot returns from a corner sweep to the current PC position; and a
+missed detection sends a 2-unit probe, or a reveal nudge before a click on a position
+older than 1.2 s.
+
+**CPU starvation made detections miss.** ACK-to-detection median stayed at 80 ms, but
+p90/p95 rose to 348/526 ms (earlier sessions: 114–125 / 175–334 ms). VS Code's file
+search was using about ten cores for 30+ minutes after each VM boot, because it followed
+`build/wine/test-prefix/dosdevices/z:` → `/` and crawled the whole filesystem. A local,
+gitignored `.vscode/settings.json` now disables symlink following and excludes
+`build/` and `third_party/`. Latency script:
+`build/live/local-validation/ack_to_observe.py`.
+
+**Controller changes (implemented, live-unverified):**
+- Every loss of position records a reason, logged as `pointer lost:`,
+  `pointer anchor: corner sweep (<reason>)`, `pointer reacquire:` and
+  `pointer reacquired ... without a corner sweep`.
+- Before a corner sweep, a position confirmed within 15 s gets one neutral
+  2-unit reveal searched 80 model px (plus 65% of the last batch) around where that batch
+  should have stopped. Failure sweeps immediately and keeps queued unpressed clicks.
+- A missed unpressed confirmation now gets two probes; the second searches at least
+  80 px. Both failing skips the near-position search.
+- The unpressed confirmation timeout is 3× a tracked ACK-to-video delay (rises fast,
+  decays slowly), bounded to 700–1500 ms.
+- Held buttons keep the fixed 700 ms timeout plus one 250 ms wait that sends nothing;
+  frozen video therefore releases a held button within about 1.1 s of its ACK. The
+  stress harness's 1600 ms blackout still releases in time (worst case 1480 ms;
+  400/300 ms extensions were measured at 1600+/1530 ms).
+
+**First live check (15:34 session, about 70 s of use, VS Code search stopped):**
+ACK-to-detection improved to median 69 ms, p90 83 ms, p95 87 ms (from 348/526 ms).
+Five corner sweeps: one expected after start-up, one after a 4.9 s window switch
+(the estimate limit was then 3 s, now raised to 15 s) and three after two missed
+probes. One reacquire succeeded without a sweep. The log also exposed an older bug:
+each hover change reset the probe counter, so while the dot stayed undetected and the
+mouse kept moving, the controller sent seven consecutive 2-unit probes. The phone
+pointer crept right by itself every 700 ms (one source of "automatic" movement).
+Only a confirmed sighting now renews probes, and a regression test fails on the old
+code. The remaining misses follow clicks near the top of the screen (y ≈ 145–155 of
+1080), where tapping changes the UI under the dot; diagnosing them needs captured
+frames from a miss.
+
+Tests: new `recovery_before_corner` cases (reacquire success without a sweep, stale
+estimate sweeps, adaptive timeout, late held confirmation keeps the drag) and updated
+probe/drain/frozen-drag expectations. Disabling each feature in turn makes
+`test_pointer` fail (6, 1, 6 and 3 failed checks). Full results: 69/69 in ASan/UBSan,
+Debug and Release, 30/30 without AirPlay, 3× repeated sanitizer runs, Windows
+cross-build and 64/64 under Wine. Evidence:
+`build/live/local-validation/validation-20261118-pointer/`.
+
+### Audio latency and Reels/Shorts delay — 2026-11-18 evening
+
+The user reported delayed PC audio that grew after scrolling to a new Reel/Short.
+Code review found three causes (implemented; live-unverified):
+
+- **Inverted A/V sync.** Audio and video PTS are both the phone's presentation
+  timeline, and video is drawn on arrival. Audio *behind* the picture was held up
+  to 200 ms (making it later), and every following packet then queued behind that
+  hold. Audio *ahead* by more than 40 ms was dropped. Now late audio plays at once,
+  and audio ahead by more than 40 ms is held for its lead minus already-queued device
+  audio (at most 200 ms). Leads above 1 s are treated as a broken mapping and play.
+  A positive offset still delays audio; a negative offset can no longer drop audio.
+- **Stale picture clock.** AirPlay sends no frames for a still screen, so the "latest
+  video PTS" aged and looked like a large audio lead. The picture time is now the
+  latest video PTS plus the local time since that frame arrived.
+- **Persistent 200 ms backlog.** The SDL queue was cleared only above 200 ms, so a
+  stream-start burst (a new Reel) left playback up to 200 ms late for good. Arriving
+  audio is now dropped while 100 ms or more is queued, so playback catches up.
+
+Every 2 s, `--verbose` logs `audio: lead vs picture avg/min/max; queued; held; played,
+held, trimmed`, which gives the actual sync and backlog for the next live check.
+Tests: `test_sync` covers the corrected direction, the still-screen clock and offsets;
+`test_audio` covers immediate late play, net holds and the backlog cap (a 200 ms cap
+fails it). Results: 69/69 in ASan/UBSan, Debug and Release, 30/30 without AirPlay,
+3× sanitizer repeats, and the Windows build with 64/64 under Wine. Output latency
+added by PulseAudio/PipeWire and VMware's virtual sound device is outside these
+changes and should be compared on the Windows host.
+
+**15:50 live check:** the user confirmed lips are in sync and typing works. The stats
+show a steady audio lead of about +94 ms over the picture (now held, not dropped).
+Remaining complaint: on a new video the sound starts late. The log showed a gap
+(64 packets in 2 s) followed by a burst of about 440 packets whose oldest were 2.67 s
+behind the picture. Cause: UxPlay's `raop_buffer_dequeue` waits for a missing
+packet's resend until all 256 ring entries are filled (256 × 10.9 ms ≈ 2.8 s of
+AAC-ELD), then releases everything at once. Porthole now builds its own
+`src/airplay/raop_buffer.c` in place of upstream's (the submodule is untouched,
+like `dnssd.c` on Windows). It waits at most 24 later packets (~260 ms AAC-ELD)
+before skipping a lost one and logs `raop_buffer: skipped lost audio packet`. New
+`test_audio_resend` drives the real buffer: a late resend inside the window is
+still used in order, and an unrecovered loss resumes after 22 packets. With
+upstream's 256 the test fails.
+
+**Pointer "going somewhere else" was caused by the wide recovery search.** At 15:50,
+every reacquire landed 80–100 px from its estimate, e.g. near (0.289,0.288) →
+(0.490,0.251), after "target not reached after 8 corrections" over playing Reels.
+The 80 px (+65%) search had found other moving circles. Reacquire now searches
+30 px + 25% of travel, at most 60 px; the second probe no longer widens; and a
+"target not reached" failure goes straight to the corner sweep. Mutation checks:
+removing the guard or restoring the wide radius fails `test_pointer`.
+
+**Alt shortcuts:** the same log shows Porthole sending them correctly, e.g. 8 ×
+Alt+S as button 3 press/release about 220 ms apart, Alt+N as button 5, Alt+H as
+consumer Home and Ctrl+A as Cmd+A. Buttons 3–6 act only if AssistiveTouch → Devices →
+Porthole has them assigned on the iPhone (README); this needs checking on the phone.
+
+Results: 70/70 in ASan/UBSan, Debug and Release, 30/30 without AirPlay, 3×
+sanitizer repeats, and the Windows build (using the new buffer) with 65/65 under Wine.
+
+**Automated live pointer checks (16:10–16:25, hover only, never clicking):**
+`build/live/local-validation/hover_check.py` warps the PC cursor to 12 grid points and
+compares the logged position with the target. The Home screen and a playing Short both
+placed all 12 within 4.2 px, with no probes or losses; contact sheets confirm the dot on
+target. An earlier "Shorts failure" run was invalid: its screenshots showed the user
+navigating AssistiveTouch settings. `sweep_check.py` (smooth 2 s paths, then settle)
+reproduced the user's complaint over a playing Short: four of four paths lost the dot or
+settled 15–566 px off, with corner sweeps.
+
+Root cause from traces and replay: a long move searches 40 px + 65% of travel. Over moving
+video that area holds many changed, dot-like shapes, so the changed-frame search either
+rejects the result as ambiguous or matches the wrong one. On 40 real consecutive Shorts
+frames with a synthetic dot fitted to the real one (alpha 0.62, luma 113), the current
+search was correct for 50/150 moves and **wrong for 54/150**. New
+`ph_video_cursor_settled` masks pixels that still change by 8 or more between two
+post-move pictures (video motion; the stopped dot does not), grown by 2 px then 1 px,
+over 40 px + 35% of travel: 51/150 correct, 6/150 wrong. Higher thresholds (16–32)
+found more but were wrong up to 47 times, so 8 was kept. The app now re-checks every
+later post-move picture of the same fence with this cascade; a miss or disagreement
+voids the earlier candidate before its 32 ms stability. Still screens send no second
+picture and are unchanged. Separately, after 300 ms an unchanged dot within 6 px of the
+prediction is accepted without learning gain (resolved all 13 eligible traced misses).
+`PORTHOLE_CURSOR_TRACE_DIR` saves up to 150 miss frames for replay.
+Tests: `test_cursor` has a moving-texture case with a bright moving distractor; the plain
+search is asserted wrong or ambiguous there, and the masked search must find the dot. It
+also covers a still-moving dot being rejected and still-screen equivalence. Results:
+70/70 in ASan/UBSan, Debug and Release, 30/30 without AirPlay, 3× sanitizer repeats,
+and the Windows build with 65/65 under Wine.
+
+**Live result with the masked detector (16:30): continuous motion over a playing Short
+still failed.** All four sweep paths ended lost or 278–583 px off. The log showed the
+300 ms unchanged-dot fallback reporting a dot at the prediction seven times, with each
+report voided by the next video frame's miss. A real-frame check then showed the shape
+search unreliable over video: it reported a "dot" at 16–55% of empty spots (radius
+6–30 px) in recorded Shorts frames. The fallback is therefore limited to content where at
+most 2% of the area within 30 px of the prediction changed since the move started (its
+original still-screen case). The burst frames contained no dot at the assumed (250,700),
+because the controller had already lost it, so a "real dot" detection rate could not be
+measured from them.
+
+Conclusion: a translucent grey dot over full-screen moving video is not reliably
+separable by luma frame comparison or by shape. Proposed next step: have the user set
+iOS Pointer Control → Color (a saturated border such as yellow or green) and a larger
+pointer, then add a chroma (U/V) ring detector. A saturated ring of known size is rare in
+video content. Alternative or complement: dead-reckon hover on video using the
+calibrated movement model, and re-lock when a confirmation succeeds.
+
+**iPhone pointer appearance cannot be changed here:** the screens checked through the
+mirror (Accessibility → Physical and Motor, and AssistiveTouch → Pointer Devices, with
+Porthole connected) offer no Pointer Control or Pointer Style, so the colour-ring idea is
+dropped. The user then described the symptom precisely: on video the pointer "moves
+automatically as if following something", and returning Home loses it. That matches
+wrong sightings on moving video (54/150 in the replay): each one triggers a correction
+toward a moving look-alike and retunes the gain (5.85 seen live). Changes (live check
+pending):
+- `content_moving`: more than 8% of samples in the search area, excluding the dot's start
+  and predicted spots, changed by 8 or more since the baseline.
+- On moving content a single picture's match is never used; only the two-picture masked
+  cascade can confirm, and confirmations there never learn gain.
+- With no trusted sighting 250 ms after the ACK, `ph_pointer_assume` takes the predicted
+  end of the acknowledged unpressed movement. It never learns, refuses held buttons and
+  corner sweeps, allows at most 6 in a row, and resets on a real sighting. Still screens
+  confirm exactly as before.
+Tests: new `assumed_over_moving_video` in `test_pointer` (bound, no learning, held/sweep
+refusal, reset; removing the bound fails it). Results: 70/70 in ASan/UBSan, Debug and
+Release, 30/30 without AirPlay, 3× sanitizer repeats, and the Windows build with 65/65
+under Wine.
+
+**Live check of the moving-content policy (17:00, playing Short, hover only):**
+`sweep_check.py` settled paths 1, 3 and 4 within 2.8–3.0 px in 0.75–0.96 s, with no
+probes, losses or corner sweeps. Path 2's last real sighting was 30 px off, after which
+the controller's estimate reached (250,299), on target; the script scores only real
+sightings. There were 11 estimates in the run. Previous build, same test: four of four
+paths failed. Caveat: this clip was calmer (a talking head, 10% of pixels changing in
+0.5 s) than the earlier one, so the comparison is indicative, not like-for-like. In the
+user's own 4.5 min with this build: 50 estimates (the six-in-a-row limit was reached),
+47 sightings over moving content, and 7 corner sweeps in use (3 "not found near its last
+position", 2 "not seen after two probes", 2 "target not reached"). The remaining
+sweeps are the next thing to reduce. Porthole did not quit by itself: closing the window
+shuts mirroring down first, which put "Connection closed" just before the exit in the log.
+
+**Video latency (17:05):** the user reported slower, sometimes stuck tracking on video.
+Measured from the 17:00 session (237 s), ACK to next decision took: still-screen sightings
+median 87 ms (p90 113); moving-content sightings 170 ms (p90 268); estimates 294 ms
+(p90 325). There were 7 probes, 2 losses and 4 sweeps. Change: while the PC mouse target
+has moved within the last 150 ms, an acknowledged step on moving content is estimated
+40 ms after the ACK, without waiting for video. Those estimates are not counted toward
+the limit. Once the mouse rests, sightings get 250 ms, and only resting estimates count
+toward the six-in-a-row limit. Test: uncounted in-motion estimates. Linux 70/70 in all
+configurations and 3× sanitizer repeats; Windows build passes. Under Wine 64/65 on the
+first run: `windows_hid_link` failed once with error 995 waiting for the fake helper to
+exit, then passed 13 consecutive reruns. That is an intermittent Wine timing flake in an
+unchanged path, tracked as a test-stability item.
+
+**Live check of the no-wait build (17:09, busy Short with foliage, stripes and metalwork):**
+there were 60 uncounted in-motion estimates, 17 resting estimates and only 5 sightings.
+No path settled within 3 s; the recorded final positions were 17–45 px off and one ended
+"target not reached". Resting sightings scattered by ±20–40 px. The dot was not visible
+by eye in the post-test screenshot. Because the clips differed (calm talking head vs.
+busy scene), this cannot rank the 250 ms build against the no-wait build. Current limit:
+on busy video, two-picture luma comparison cannot reliably find the translucent grey
+dot even at rest.
+Next candidate: at rest, take a per-pixel temporal median of about 8 post-movement
+pictures. Moving video averages out while the stationary dot remains, and is then
+located near the prediction. In motion, keep the no-wait estimates.
+
+The 15:39 pointer session (about 10 min) had 4 corner sweeps: one at start-up and three
+after two missed probes. Two reacquires succeeded without a sweep. Probe episodes now
+end after probe 2; no runaway probing remained. Its detection latency (p90 270 ms)
+overlapped local build/test runs and is not a clean measurement.
+
+### Remaining work — consolidated 2026-11-18
+
+**Linux controls (needs the phone):**
+1. Restart the preview on the fixed build, confirm repeated Screen Mirroring
+   reconnects (including after a helper restart), then run Notes double-tap (word
+   selection) and one-second hold (long press) with the alignment correction.
+2. Directional swipes, bottom-up swipe and Notification/Control Center dismissal.
+3. F4 feed mode: one wheel burst advances exactly one Reel/Short.
+4. Full-screen Photos zoom and interactive Photos/grid recovery.
+5. Longer sessions, sustained drags and custom scroll views.
+
+**Windows (item 4, needs the Windows host):**
+6. Package a new portable EXE from this checkout once committed.
+7. On the host: idle/resume after the Suspend correction, typing, pointer accuracy
+   and calibration, wheel edges, double-tap/hold/drag/swipes and reconnect.
+8. Run the native MSYS2 Windows CI (configured, never triggered remotely) and wider
+   network/host mirroring tests.
+
+**Responsiveness (item 2):** privileged `btmon` trace of the negotiated interval, a
+trial of 11.25–15 ms, external end-to-end latency measurement and the unexplained
+off-curve moves (about one in eight).
+
+**Housekeeping:** commit the pointer correction, performance changes and the two
+fixes above; add a sample-content audio test for the held-PCM path.
+
+**Other workstreams (Grok, items 5–7):** A/V sync and audio UI, window/tray/installer
+polish, USB capture (v0.3) and advanced features (WebDriverAgent, H.265/4K, iPad).
 
 The working controls run in the **Linux prototype in the VMware guest**. A full Windows
 Wi-Fi mirror now cross-builds with native discovery and portable dependencies. The user

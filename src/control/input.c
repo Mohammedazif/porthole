@@ -194,3 +194,9 @@ void ph_input_set_enabled(ph_input *input, bool enabled)
             input->output.consumer(input->output.user, 0);
     }
 }
+
+void ph_input_type(ph_input *input, uint8_t usage, uint8_t modifiers)
+{
+    ph_input_key(input, usage, true, false, modifiers);
+    ph_input_key(input, usage, false, false, 0);
+}

@@ -669,8 +669,7 @@ void ph_polish_tick(ph_polish *polish, ph_input *input)
     if (!input->enabled)
         return;
     event = polish->paste[polish->paste_i++];
-    ph_input_key(input, event.usage, true, false, event.modifiers);
-    ph_input_key(input, event.usage, false, false, event.modifiers);
+    ph_input_type(input, event.usage, event.modifiers);
 }
 
 bool ph_polish_quit(const ph_polish *polish)

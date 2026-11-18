@@ -43,6 +43,12 @@ typedef struct ph_pointer {
     double hint_x, hint_y, search_radius;
     double sent_start_x, sent_start_y, sent_dx, sent_dy;
     bool learn_move, anchoring, confirm_after_drain;
+    /* Recovery before a corner sweep: the last confirmed position (plus its sent
+     * batch) stays a usable estimate for a short wider local search. */
+    bool estimate_valid, reacquiring, held_extended;
+    unsigned int assumed; /* consecutive positions taken from prediction, not video */
+    double confirm_latency_ms; /* tracked ACK-to-video delay; sizes the timeout */
+    const char *lost_reason;
     uint8_t buttons, requested_buttons;
     ph_pointer_action actions[PH_POINTER_QUEUE];
     unsigned int head, count, attempts, recoveries;
@@ -66,6 +72,15 @@ void ph_pointer_tick(ph_pointer *p, uint64_t now_ms);
  * A matching current ACK or explicit transport_reset clears the fault. */
 bool ph_pointer_transport_stalled(const ph_pointer *p);
 bool ph_pointer_ready(const ph_pointer *p, double x, double y, double aspect);
+/* Moving video under the dot makes sightings unreliable: wrong matches made the
+ * phone pointer chase moving objects. For an acknowledged, unpressed movement,
+ * take its predicted end as the position instead (never learning gain from it).
+ * `at_rest` estimates (the PC mouse has stopped, a sighting was attempted) are
+ * limited to PH_POINTER_MAX_ASSUMED in a row; estimates while the mouse is still
+ * moving are not counted, since the next rest re-checks. A real sighting resets
+ * the count. Returns false when not applicable, leaving normal recovery. */
+#define PH_POINTER_MAX_ASSUMED 6
+bool ph_pointer_assume(ph_pointer *p, bool at_rest, uint64_t now_ms);
 /* Search radius is expressed as a fraction of picture WIDTH, even for Y search. */
 bool ph_pointer_hint(const ph_pointer *p, double *x, double *y, double *radius);
 /* Cancel intent and release held buttons, retaining endpoint feedback only for

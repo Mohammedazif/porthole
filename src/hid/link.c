@@ -596,6 +596,15 @@ ph_hid_link *ph_hid_link_start(char *const argv[], ph_hid_link_status_fn on_stat
         close(in_pipe[1]);
         close(out_pipe[0]);
         close(out_pipe[1]);
+        /* AirPlay's listening/data sockets are not close-on-exec. A helper
+         * (re)started during mirroring would otherwise keep the mirror port
+         * bound after the session ends, and the next session fails to bind. */
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+        closefrom(STDERR_FILENO + 1);
+#else
+        for (long fd = STDERR_FILENO + 1, max = sysconf(_SC_OPEN_MAX); fd < max && fd < 65536; fd++)
+            close((int)fd);
+#endif
         execvp(argv[0], argv);
         fprintf(stderr, "porthole: couldn't run %s: %s\n", argv[0], strerror(errno));
         _exit(127);

@@ -14,6 +14,7 @@
 
 static uint8_t image[STRIDE * HEIGHT];
 static uint8_t baseline[STRIDE * HEIGHT];
+static uint8_t reference_image[STRIDE * HEIGHT];
 static int failures;
 
 #define CHECK(condition)                                                                           \
@@ -75,6 +76,17 @@ static void title_background(ph_rect screen)
                     for (int dx = 0; dx < 3; dx++)
                         image[(screen.y + 125 + row * 3 + dy) * STRIDE
                               + screen.x + 75 + col * 3 + dx] = 215;
+}
+
+/* A moving texture plus a moving dot-shaped distractor, standing in for a
+ * playing video under the AssistiveTouch dot. */
+static void video_frame(ph_rect screen, int phase)
+{
+    for (int y = 0; y < screen.h; y++)
+        for (int x = 0; x < screen.w; x++)
+            image[(screen.y + y) * STRIDE + screen.x + x] = (uint8_t)lround(
+                60 + 25 * sin((x + phase) / 23.0) * cos((y - phase) / 29.0));
+    dot(screen, 318 + phase * 14, 545 + phase * 11, 11, 230, .9);
 }
 
 int main(void)
@@ -320,6 +332,116 @@ int main(void)
             ph_video_cursor(&p, &small, edge ? width - 1 : 0,
                             edge ? width - 1 : 0, width, &x, &y);
         }
+    }
+
+    /* Every search-grid parity must see the changed circle over text. Its
+     * strongest centre can be a single pixel that a two-pixel scan skips. */
+    title_background(screen);
+    memcpy(baseline, image, sizeof image);
+    dot(screen, 84, 131, 11, 255, .2);
+    for (int hx = 84; hx <= 85; hx++) {
+        for (int hy = 131; hy <= 132; hy++) {
+            CHECK(ph_video_cursor_changed(&p, &screen, &before, &screen,
+                                          hx, hy, 40, &x, &y));
+            CHECK(hypot(x - 84, y - 131) <= 2.5);
+        }
+    }
+
+    /* A short correction leaves most of the old dot in the dispatch baseline.
+     * A recent background reference can still locate the complete destination
+     * circle, provided the nearby scene and the new movement both check out. */
+    ph_yuv_planes reference = planes();
+    reference.y = reference_image;
+    title_background(screen);
+    memcpy(reference_image, image, sizeof image);
+    dot(screen, 109, 142, 11, 255, .2);
+    memcpy(baseline, image, sizeof image);
+    title_background(screen);
+    dot(screen, 106, 142, 11, 255, .2);
+    CHECK(ph_video_cursor_referenced(&p, &screen, &before, &screen, &reference, &screen,
+                                     109, 142, 106, 142, 40, &x, &y));
+    CHECK(hypot(x - 106, y - 142) <= 2.5);
+
+    memcpy(image, baseline, sizeof image);
+    CHECK(!ph_video_cursor_referenced(&p, &screen, &before, &screen, &reference, &screen,
+                                      109, 142, 106, 142, 40, &x, &y)); /* unchanged */
+    title_background(screen);
+    CHECK(!ph_video_cursor_referenced(&p, &screen, &before, &screen, &reference, &screen,
+                                      109, 142, 106, 142, 40, &x, &y)); /* disappeared */
+
+    title_background(screen);
+    dot(screen, 109, 142, 11, 255, .2);
+    for (int cy = 148; cy < 152; cy++)
+        for (int cx = 124; cx < 128; cx++)
+            image[(screen.y + cy) * STRIDE + screen.x + cx] = 100;
+    memcpy(baseline, image, sizeof image);
+    title_background(screen);
+    dot(screen, 106, 142, 11, 255, .2);
+    for (int cy = 148; cy < 152; cy++)
+        for (int cx = 124; cx < 128; cx++)
+            image[(screen.y + cy) * STRIDE + screen.x + cx] = 100;
+    CHECK(!ph_video_cursor_referenced(&p, &screen, &before, &screen, &reference, &screen,
+                                      109, 142, 106, 142, 40, &x, &y)); /* changed scene */
+    CHECK(!ph_video_cursor_referenced(&p, &screen, &before, &screen, NULL, &screen,
+                                      109, 142, 106, 142, 40, &x, &y));
+    CHECK(!ph_video_cursor_referenced(&p, &screen, &before, &screen, &reference, &screen,
+                                      NAN, 142, 106, 142, 40, &x, &y));
+
+    /* Playing video: the stopped dot is found once motion between two pictures
+     * taken after the movement is masked out; the changed search alone may pick
+     * the moving distractor or reject the result as ambiguous. */
+    {
+        static uint8_t later_image[STRIDE * HEIGHT];
+        ph_yuv_planes current = planes(), later = planes(), before_video = planes();
+        later.y = later_image;
+        before_video.y = baseline;
+        video_frame(screen, 0);
+        dot(screen, 120, 300, 11, 113, .62);
+        memcpy(baseline, image, sizeof image);
+        video_frame(screen, 2);
+        dot(screen, 300, 520, 11, 113, .62);
+        memcpy(later_image, image, sizeof image);
+        video_frame(screen, 1);
+        dot(screen, 300, 520, 11, 113, .62);
+        {
+            double cx = -1, cy = -1;
+            bool plain = ph_video_cursor_changed(&current, &screen, &before_video, &screen,
+                                                 306, 528, 200, &cx, &cy);
+            /* The bright moving distractor wins or makes the plain search ambiguous. */
+            CHECK(!plain || hypot(cx - 300, cy - 520) > 4);
+        }
+        for (int dilate = 1; dilate <= 2; dilate++) {
+            x = y = -1;
+            CHECK(ph_video_cursor_settled(&current, &screen, &later, NULL, &before_video, &screen,
+                                          dilate, 306, 528, 200, &x, &y));
+            CHECK(hypot(x - 300, y - 520) <= 2.5);
+        }
+        /* A dot still moving between the two later pictures is not settled. */
+        video_frame(screen, 2);
+        dot(screen, 318, 520, 11, 113, .62);
+        memcpy(later_image, image, sizeof image);
+        video_frame(screen, 1);
+        dot(screen, 300, 520, 11, 113, .62);
+        x = y = -1;
+        bool moving = ph_video_cursor_settled(&current, &screen, &later, NULL, &before_video,
+                                              &screen, 2, 306, 528, 200, &x, &y);
+        CHECK(!moving || hypot(x - 300, y - 520) > 4);
+        /* A still screen (identical later picture) behaves like the changed search. */
+        title_background(screen);
+        memcpy(baseline, image, sizeof image);
+        dot(screen, 84, 131, 11, 255, .2);
+        memcpy(later_image, image, sizeof image);
+        double cx = -1, cy = -1;
+        CHECK(ph_video_cursor_changed(&current, &screen, &before_video, &screen, 85, 131, 40,
+                                      &cx, &cy));
+        x = y = -1;
+        CHECK(ph_video_cursor_settled(&current, &screen, &later, NULL, &before_video, &screen,
+                                      2, 85, 131, 40, &x, &y));
+        CHECK(x == cx && y == cy);
+        CHECK(!ph_video_cursor_settled(NULL, &screen, &later, NULL, &before_video, &screen,
+                                       2, 85, 131, 40, &x, &y));
+        CHECK(!ph_video_cursor_settled(&current, &screen, &later, NULL, &before_video, &screen,
+                                       9, 85, 131, 40, &x, &y));
     }
 
     if (failures)

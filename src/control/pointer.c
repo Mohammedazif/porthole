@@ -2,12 +2,24 @@
 
 #include <math.h>
 
+#include "core/log.h"
+
 #define MODEL_WIDTH 500.0
 #define CORNER 16.0
 #define ALIGNMENT_PX 4.0
 #define SCROLL_ALIGNMENT_PX 20.0
 #define FRAME_SETTLE_MS 32
-#define FRAME_TIMEOUT_MS 700
+#define FRAME_TIMEOUT_MS 700      /* minimum; grows with measured video delay */
+#define FRAME_TIMEOUT_MAX_MS 1500
+#define HELD_TIMEOUT_MAX_MS FRAME_TIMEOUT_MS /* held: fixed, never adaptive */
+#define HELD_EXTENSION_MS 250
+#define ESTIMATE_MAX_AGE_MS 15000 /* the phone dot stays put while the PC mouse is away */
+/* Model pixels around the estimate. Live, an 80 px (+65% of travel) search over
+ * playing Reels locked onto other moving circles 80-100 px away, so the dot was
+ * then steered from a false position. Keep it close to a normal reveal. */
+#define REACQUIRE_RADIUS 30.0
+#define REACQUIRE_TRAVEL_SHARE 0.25
+#define REACQUIRE_MAX_RADIUS 60.0
 #define ACK_TIMEOUT_MS 3000
 #define POSITION_MAX_AGE_MS 1200
 #define MIN_PRESS_MS 80
@@ -26,6 +38,18 @@ static bool ack_expired(const ph_pointer *p, uint64_t now_ms)
 {
     return awaiting_ack(p) && now_ms >= p->sent_at
            && now_ms - p->sent_at >= ACK_TIMEOUT_MS;
+}
+
+static uint64_t confirm_timeout(const ph_pointer *p)
+{
+    /* A loaded host can delay decoded video well past the usual ~100 ms.
+     * Missing a slow confirmation forgets the position and sweeps a corner. */
+    double ms = 3 * p->confirm_latency_ms;
+    if (ms < FRAME_TIMEOUT_MS)
+        ms = FRAME_TIMEOUT_MS;
+    if (ms > FRAME_TIMEOUT_MAX_MS)
+        ms = FRAME_TIMEOUT_MAX_MS;
+    return (uint64_t)ms;
 }
 
 static double model_width(double aspect)
@@ -66,6 +90,7 @@ static void emit_mouse(ph_pointer *p, int dx, int dy)
 static void sync(ph_pointer *p, ph_pointer_phase phase)
 {
     p->phase = phase;
+    p->held_extended = false;
     p->sent_at = p->now_ms;
     p->sync_id = ((p->sync_id + 1) & 0x7fffffffU) | 0x80000000U;
     p->output.sync(p->output.user, p->sync_id);
@@ -116,6 +141,10 @@ static double move_axis(ph_pointer *p, double pixels, bool horizontal, int *repo
 static void anchor(ph_pointer *p)
 {
     /* Never anchor with a button held: that would turn recovery into a swipe. */
+    PH_LOGD("pointer anchor: corner sweep (%s)",
+            p->lost_reason ? p->lost_reason : "no position yet");
+    p->estimate_valid = false;
+    p->reacquiring = false;
     for (int i = 0; i < 8; i++)
         emit_mouse(p, -127, -127);
     p->output.delay(p->output.user, 150);
@@ -147,6 +176,7 @@ static void move_to(ph_pointer *p, double x, double y)
      * Its animation must never calibrate or redirect a held mouse button. */
     p->learn_move = p->buttons == 0;
     p->anchoring = false;
+    p->reacquiring = false;
     p->attempts++;
     sync(p, PH_POINTER_MOVING);
 }
@@ -163,6 +193,40 @@ static void reveal(ph_pointer *p)
     p->search_radius = 40.0 / model_width(p->aspect);
     p->learn_move = false;
     p->anchoring = false;
+    p->reacquiring = false;
+    sync(p, PH_POINTER_MOVING);
+}
+
+static bool can_reacquire(const ph_pointer *p)
+{
+    return p->estimate_valid && !p->buttons && p->observed_at && p->now_ms >= p->observed_at
+           && p->now_ms - p->observed_at <= ESTIMATE_MAX_AGE_MS
+           && valid(p->hint_x, p->hint_y, p->aspect);
+}
+
+static void reacquire(ph_pointer *p)
+{
+    /* The dot was confirmed recently and only its latest batch is unconfirmed.
+     * Reveal it where that batch should have left it, searching wider than a
+     * normal correction, before resorting to a full corner sweep. */
+    double width = model_width(p->aspect);
+    double travel = hypot(p->sent_dx, p->sent_dy);
+    PH_LOGD("pointer reacquire: searching %.0f px near (%.3f,%.3f) (%s)",
+            fmin(REACQUIRE_MAX_RADIUS, REACQUIRE_RADIUS + travel * REACQUIRE_TRAVEL_SHARE),
+            p->hint_x, p->hint_y,
+            p->lost_reason ? p->lost_reason : "position lost");
+    emit_mouse(p, 2, 0);
+    p->sent_start_x = p->hint_x;
+    p->sent_start_y = p->hint_y;
+    p->sent_dx = .72 * (p->scale_x ? p->scale_x : 1);
+    p->sent_dy = 0;
+    p->hint_x = p->sent_start_x + p->sent_dx / width;
+    p->search_radius = fmin(REACQUIRE_MAX_RADIUS,
+                            REACQUIRE_RADIUS + travel * REACQUIRE_TRAVEL_SHARE) / width;
+    p->learn_move = false;
+    p->anchoring = false;
+    p->reacquiring = true;
+    p->estimate_valid = false; /* one attempt per confirmed position */
     sync(p, PH_POINTER_MOVING);
 }
 
@@ -174,9 +238,11 @@ static void pop_action(ph_pointer *p)
     p->recoveries = 0;
 }
 
-static void fail(ph_pointer *p)
+static void fail(ph_pointer *p, const char *reason)
 {
+    PH_LOGD("pointer lost: %s", reason);
     ph_pointer_cancel(p, p->now_ms);
+    p->lost_reason = reason;
     p->confirm_after_drain = false;
     if (p->phase == PH_POINTER_WAIT_VIDEO)
         p->phase = PH_POINTER_IDLE;
@@ -199,7 +265,9 @@ static void pump(ph_pointer *p)
     }
     if (!p->known) {
         if (p->buttons)
-            fail(p);
+            fail(p, "position unknown with a button held");
+        else if (can_reacquire(p))
+            reacquire(p);
         else
             anchor(p);
         return;
@@ -208,7 +276,10 @@ static void pump(ph_pointer *p)
                            ? ALIGNMENT_PX : p->target_tolerance;
     if (distance(x, y, p->actual_x, p->actual_y, p->aspect) > tolerance) {
         if (p->attempts >= MAX_ATTEMPTS) {
-            fail(p);
+            fail(p, "target not reached after 8 corrections");
+            /* Its observations disagreed with its moves (often a playing video
+             * under the dot): the last position is no basis for a local search. */
+            p->estimate_valid = false;
             return;
         }
         move_to(p, x, y);
@@ -247,8 +318,10 @@ void ph_pointer_cancel(ph_pointer *p, uint64_t now_ms)
     /* Releasing a held drag sends a new fence/baseline and invalidates its
      * path geometry. Retain endpoint feedback only for unpressed motion. */
     bool confirming = !p->buttons && (moving || waiting_video || p->confirm_after_drain);
-    if (moving || waiting_video || confirming)
+    if ((moving || waiting_video || confirming) && p->known) {
         p->known = false;
+        p->lost_reason = "cancelled while moving";
+    }
     /* Interrupted motion may establish a position, but its image may show only
      * part of the travel. Keep that sample out of the next movement's gain. */
     p->learn_move = false;
@@ -282,6 +355,9 @@ void ph_pointer_reset(ph_pointer *p, uint64_t now_ms)
     if (p->phase == PH_POINTER_WAIT_VIDEO)
         p->phase = PH_POINTER_IDLE;
     p->known = false;
+    p->estimate_valid = false;
+    p->reacquiring = false;
+    p->lost_reason = "picture, link or calibration reset";
     p->aspect = 0;
     p->failed = false;
     p->retry_at = 0;
@@ -323,6 +399,7 @@ static bool target(ph_pointer *p, double x, double y, double aspect, uint64_t no
         p->now_ms = now_ms;
         p->failed = true;
         p->ack_timed_out = true;
+        p->lost_reason = "Bluetooth acknowledgement timed out";
         return false; /* wait for transport recovery, even if the target changes */
     }
     reachable(&x, &y, aspect);
@@ -336,9 +413,9 @@ static bool target(ph_pointer *p, double x, double y, double aspect, uint64_t no
         ph_pointer_reset(p, now_ms);
     if (!p->active || changed) {
         p->attempts = 0;
-        /* Hover changes cannot renew recovery while the original click waits. */
-        if (!p->count)
-            p->recoveries = 0;
+        /* Hover changes never renew probe recovery: only a confirmed sighting
+         * does. Otherwise a moving PC mouse kept probing an unseen dot forever,
+         * creeping it 2 units right every timeout. */
         p->failed = false;
     }
     p->now_ms = now_ms;
@@ -378,7 +455,7 @@ bool ph_pointer_button(ph_pointer *p, uint8_t button, bool down, double x, doubl
     if (down == requested)
         return true;
     if (p->count >= PH_POINTER_QUEUE) {
-        fail(p); /* never discard just a release and leave the phone dragging */
+        fail(p, "click queue full"); /* never discard just a release and leave the phone dragging */
         return false;
     }
     if (down)
@@ -463,6 +540,15 @@ void ph_pointer_observe(ph_pointer *p, bool found, double x, double y, uint64_t 
         && (p->sent_dx * moved_x + p->sent_dy * moved_y) / travel >= .5
         && distance(x, y, p->hint_x, p->hint_y, p->aspect) <= ALIGNMENT_PX)
         p->attempts = 0; /* confirmed progress, including a moving drag target */
+    double latency = (double)(now_ms - p->wait_since);
+    p->confirm_latency_ms += (latency - p->confirm_latency_ms)
+                             * (latency > p->confirm_latency_ms ? .3 : .05);
+    if (p->reacquiring)
+        PH_LOGD("pointer reacquired at (%.3f,%.3f) without a corner sweep", x, y);
+    p->reacquiring = false;
+    p->estimate_valid = true;
+    p->recoveries = 0;
+    p->assumed = 0;
     if (p->learn_move) {
         p->scale_x = learned_scale(p->scale_x, p->sent_dx, moved_x);
         p->scale_y = learned_scale(p->scale_y, p->sent_dy, moved_y);
@@ -477,32 +563,90 @@ void ph_pointer_observe(ph_pointer *p, bool found, double x, double y, uint64_t 
     pump(p);
 }
 
+bool ph_pointer_assume(ph_pointer *p, bool at_rest, uint64_t now_ms)
+{
+    p->now_ms = now_ms;
+    if (p->phase != PH_POINTER_WAIT_VIDEO || !p->active || !p->known || p->anchoring
+        || p->reacquiring || p->buttons || now_ms < p->wait_since
+        || now_ms - p->wait_since < FRAME_SETTLE_MS
+        || (at_rest && p->assumed >= PH_POINTER_MAX_ASSUMED)
+        || !valid(p->hint_x, p->hint_y, p->aspect))
+        return false;
+    if (at_rest)
+        p->assumed++;
+    PH_LOGD("pointer assumed at its prediction (%.3f,%.3f) over moving video (%s, %u in a row)",
+            p->hint_x, p->hint_y, at_rest ? "at rest" : "mouse moving", p->assumed);
+    p->actual_x = p->hint_x;
+    p->actual_y = p->hint_y;
+    p->observed_at = now_ms;
+    p->learn_move = false;
+    p->phase = PH_POINTER_IDLE;
+    p->failed = false;
+    p->recoveries = 0;
+    pump(p);
+    return true;
+}
+
 void ph_pointer_tick(ph_pointer *p, uint64_t now_ms)
 {
     p->now_ms = now_ms;
     if (ack_expired(p, now_ms)) {
         p->ack_timed_out = true;
-        fail(p);
+        fail(p, "Bluetooth acknowledgement timed out");
         return;
     }
-    if (p->phase == PH_POINTER_WAIT_VIDEO && now_ms - p->wait_since >= FRAME_TIMEOUT_MS) {
+    uint64_t timeout = confirm_timeout(p);
+    if (p->buttons && timeout > HELD_TIMEOUT_MAX_MS)
+        timeout = HELD_TIMEOUT_MAX_MS;
+    uint64_t limit = timeout + (p->held_extended ? HELD_EXTENSION_MS : 0);
+    if (p->phase == PH_POINTER_WAIT_VIDEO && now_ms - p->wait_since >= limit) {
         if (!p->active) {
             /* Video may disappear when the mouse leaves. Forget quietly; an
              * inactive cancellation must never reveal or move the phone. */
             p->phase = PH_POINTER_IDLE;
+            if (p->known)
+                p->lost_reason = "not seen after the mouse left";
             p->known = false;
+            p->reacquiring = false;
+            return;
+        }
+        if (p->reacquiring) {
+            /* The wider local search failed too: the estimate is wrong. Sweep
+             * now, keeping any queued unpressed click as an ordinary anchor does. */
+            p->reacquiring = false;
+            p->known = false;
+            p->lost_reason = "not found near its last position";
+            p->phase = PH_POINTER_IDLE;
+            pump(p);
+            return;
+        }
+        if (p->buttons && !p->held_extended) {
+            /* A held dot contracts and dragged content moves under it, so its
+             * confirmation is often late. Wait briefly once more before
+             * releasing the button; nothing is sent, so the path is unchanged. */
+            PH_LOGD("pointer: held movement not seen in %llu ms; waiting %d ms more",
+                    (unsigned long long)timeout, HELD_EXTENSION_MS);
+            p->held_extended = true;
             return;
         }
         bool pending_press = p->count && p->actions[p->head].down && p->known
                              && !p->anchoring && !p->ack_timed_out;
-        if ((p->count && !pending_press) || p->buttons || p->recoveries) {
-            fail(p);
+        if ((p->count && !pending_press) || p->buttons || p->recoveries >= 2) {
+            bool probed = !p->buttons && p->recoveries >= 2;
+            fail(p, p->buttons ? "held movement not seen in video"
+                    : probed ? "not seen after two probes"
+                             : "not seen in video with a queued release");
+            if (probed)
+                p->estimate_valid = false; /* both probes already searched nearby */
             return;
         }
-        /* A tiny correction can disappear in the rendered video. One neutral
-         * probe may reveal it, including before an unpressed queued click. The
-         * new fence and fresh position feedback still precede every press. */
+        /* A tiny correction can disappear in the rendered video. A neutral
+         * probe may reveal it, including before an unpressed queued click. Both
+         * probes keep the normal search area: widening it found false circles.
+         * The new fence and fresh position feedback still precede every press. */
         p->recoveries++;
+        PH_LOGD("pointer: not seen in %llu ms; probe %u", (unsigned long long)timeout,
+                p->recoveries);
         emit_mouse(p, 2, 0);
         p->learn_move = false;
         p->anchoring = false;

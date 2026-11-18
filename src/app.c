@@ -1,5 +1,6 @@
 #include "app.h"
 
+#include <signal.h>
 #include <stdatomic.h>
 #include <math.h>
 #include <pthread.h>
@@ -38,6 +39,14 @@
 
 #define BLE_RETRY_MS 5000
 
+static volatile sig_atomic_t stop_requested;
+
+static void request_stop(int sig)
+{
+    (void)sig;
+    stop_requested = 1;
+}
+
 enum { EV_FRAME, EV_CONNECTED, EV_DISCONNECTED, EV_BLE, EV_COUNT };
 
 typedef struct app {
@@ -67,11 +76,18 @@ typedef struct app {
     bool feed_mode, feed_have_wheel;
     bool gesture_keys[256];
     Uint64 feed_wheel_at;
-    AVFrame *view_frame, *pointer_baseline;
-    ph_rect view_screen, baseline_screen;
+    AVFrame *view_frame, *pointer_baseline, *pointer_reference, *pointer_after;
+    ph_rect view_screen, baseline_screen, reference_screen;
+    Uint64 reference_at;
     int picture_w, picture_h;
     Uint64 view_seen_at, candidate_since;
-    uint64_t view_serial, checked_serial;
+    uint64_t view_serial, checked_serial, fallback_serial, after_serial;
+    uint32_t after_sync;
+    ph_rect after_screen;
+    bool content_moving; /* latest checked picture differs widely from the baseline */
+    double seen_target_x, seen_target_y;
+    Uint64 target_moved_at; /* last change of the PC-requested pointer position */
+    uint32_t fallback_sync;
     uint32_t checked_sync, candidate_sync;
     bool checked_found;
     double checked_x, checked_y, candidate_x, candidate_y;
@@ -390,6 +406,24 @@ static void send_sync(void *user, uint32_t id)
 static void send_pointer_sync(void *user, uint32_t id)
 {
     app *a = user;
+    if (a->pointer_reference) {
+        if (a->pointer.anchoring || a->pointer.buttons
+            || a->pointer.phase != PH_POINTER_MOVING) {
+            av_frame_unref(a->pointer_reference);
+        } else if (a->view_frame && a->view_frame->data[0]
+                   && a->pointer.known && a->pointer.learn_move
+                   && (!a->pointer_reference->data[0]
+                       || hypot(a->pointer.sent_dx, a->pointer.sent_dy) >= 20)) {
+            /* Keep the background from before a larger move while subsequent
+             * small corrections overlap the dot. Each still gets its own
+             * dispatch baseline, ACK and changed-picture check. */
+            av_frame_unref(a->pointer_reference);
+            if (av_frame_ref(a->pointer_reference, a->view_frame) == 0) {
+                a->reference_screen = a->view_screen;
+                a->reference_at = SDL_GetTicks64();
+            }
+        }
+    }
     if (a->view_frame && a->pointer_baseline) {
         av_frame_unref(a->pointer_baseline);
         if (a->view_frame->data[0] && av_frame_ref(a->pointer_baseline, a->view_frame) == 0)
@@ -875,10 +909,92 @@ static void release_everything(app *a)
 
 /* AirPlay can stop sending frames once the pointer is still. Revisit the latest
  * decoded image after the HID ACK rather than requiring another encoded frame. */
+/* Diagnostics only, off unless PORTHOLE_CURSOR_TRACE_DIR is set: saves the exact
+ * luma frames and pointer state for detector misses (at most 150), so misses
+ * over real content can be replayed offline. Never alters control decisions. */
+static void trace_cursor_miss(app *a, const ph_yuv_planes *p, const ph_rect *screen)
+{
+    static unsigned int captures;
+    static const char *dir;
+    static bool checked;
+    if (!checked) {
+        dir = getenv("PORTHOLE_CURSOR_TRACE_DIR");
+        checked = true;
+    }
+    if (!dir || !*dir || captures >= 150 || a->checked_found || !a->pointer_baseline->data[0])
+        return;
+    captures++;
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%04u.txt", dir, captures);
+    FILE *meta = fopen(path, "w");
+    if (!meta)
+        return;
+    fprintf(meta, "now=%llu sent=%llu ack=%llu frame_seen=%llu sync=%u anchoring=%d "
+                  "hint=%.4f,%.4f radius=%.4f actual=%.4f,%.4f start=%.4f,%.4f "
+                  "sent_delta=%.2f,%.2f target=%.4f,%.4f known=%d buttons=%u "
+                  "recoveries=%u reacquiring=%d scale=%.3f,%.3f screen=%d,%d,%d,%d\n",
+            (unsigned long long)SDL_GetTicks64(), (unsigned long long)a->pointer.sent_at,
+            (unsigned long long)a->pointer.wait_since, (unsigned long long)a->view_seen_at,
+            a->pointer.sync_id, a->pointer.anchoring, a->pointer.hint_x, a->pointer.hint_y,
+            a->pointer.search_radius, a->pointer.actual_x, a->pointer.actual_y,
+            a->pointer.sent_start_x, a->pointer.sent_start_y, a->pointer.sent_dx,
+            a->pointer.sent_dy, a->pointer.target_x, a->pointer.target_y, a->pointer.known,
+            a->pointer.buttons, a->pointer.recoveries, a->pointer.reacquiring,
+            a->pointer.scale_x, a->pointer.scale_y, screen->x, screen->y, screen->w, screen->h);
+    fclose(meta);
+    for (int old = 0; old < 2; old++) {
+        ph_rect crop = old ? a->baseline_screen : *screen;
+        const uint8_t *data = old ? a->pointer_baseline->data[0] : p->y;
+        int stride = old ? a->pointer_baseline->linesize[0] : p->y_stride;
+        snprintf(path, sizeof path, "%s/%04u-%s.pgm", dir, captures, old ? "before" : "after");
+        FILE *file = fopen(path, "wb");
+        if (!file)
+            continue;
+        fprintf(file, "P5\n%d %d\n255\n", crop.w, crop.h);
+        for (int row = 0; row < crop.h; row++)
+            fwrite(data + (crop.y + row) * stride + crop.x, 1, (size_t)crop.w, file);
+        fclose(file);
+    }
+}
+
+/* True when much of the search area (outside the dot's start and predicted end)
+ * changed since the movement's baseline: playing video, scrolling, animation. */
+static bool content_moving(const app *a, const ph_yuv_planes *p, const ph_rect *screen,
+                           double hx, double hy, double radius)
+{
+    const AVFrame *b = a->pointer_baseline;
+    if (!b->data[0] || a->baseline_screen.w != screen->w || a->baseline_screen.h != screen->h)
+        return false;
+    double dot = fmin(screen->w, screen->h) * 11.0 / 500 + 4;
+    double reach = fmax(radius, fmin(screen->w, screen->h) * 60.0 / 500) + dot;
+    double sx = a->pointer.sent_start_x * screen->w, sy = a->pointer.sent_start_y * screen->h;
+    int left = (int)fmax(0, hx - reach), right = (int)fmin(screen->w - 1, hx + reach);
+    int top = (int)fmax(0, hy - reach), bottom = (int)fmin(screen->h - 1, hy + reach);
+    int changed = 0, samples = 0;
+    for (int y = top; y <= bottom; y += 3) {
+        for (int x = left; x <= right; x += 3) {
+            if (hypot(x - hx, y - hy) <= dot || hypot(x - sx, y - sy) <= dot)
+                continue;
+            int now_luma = p->y[(screen->y + y) * p->y_stride + screen->x + x];
+            int then_luma = b->data[0][(a->baseline_screen.y + y) * b->linesize[0]
+                                       + a->baseline_screen.x + x];
+            changed += abs(now_luma - then_luma) >= 8;
+            samples++;
+        }
+    }
+    return samples >= 50 && changed * 100 > samples * 8;
+}
+
 static void observe_pointer(app *a)
 {
     const AVFrame *f = a->view_frame;
     Uint64 now = SDL_GetTicks64();
+    if (fabs(a->pointer.target_x - a->seen_target_x) > 1e-4
+        || fabs(a->pointer.target_y - a->seen_target_y) > 1e-4) {
+        a->seen_target_x = a->pointer.target_x;
+        a->seen_target_y = a->pointer.target_y;
+        a->target_moved_at = now;
+    }
     double hx, hy, radius;
     if (!f || !f->data[0] || a->pointer.phase != PH_POINTER_WAIT_VIDEO
         || atomic_load(&a->frame_pending) /* inspect already-arrived video first */
@@ -901,15 +1017,125 @@ static void observe_pointer(app *a)
             found = ph_video_cursor_changed(&planes, &screen, &baseline, &a->baseline_screen,
                                              hx * screen.w, hy * screen.h,
                                              radius * screen.w, &px, &py);
+            if (!found && a->pointer.known && a->pointer.learn_move && !a->pointer.buttons
+                && a->pointer_reference->data[0] && now >= a->reference_at
+                && now - a->reference_at <= 2000
+                && hypot(a->pointer.sent_dx, a->pointer.sent_dy) < 20) {
+                AVFrame *ref = a->pointer_reference;
+                ph_yuv_planes reference = {ref->data[0], ref->data[1], ref->data[2],
+                                           ref->linesize[0], ref->linesize[1],
+                                           ref->width, ref->height};
+                found = ph_video_cursor_referenced(&planes, &screen, &baseline, &a->baseline_screen,
+                             &reference, &a->reference_screen,
+                             a->pointer.sent_start_x * screen.w,
+                             a->pointer.sent_start_y * screen.h,
+                             hx * screen.w, hy * screen.h, radius * screen.w, &px, &py);
+            }
         }
+        a->content_moving = !a->pointer.anchoring
+                            && content_moving(a, &planes, &screen, hx * screen.w, hy * screen.h,
+                                              radius * screen.w);
+        if (a->content_moving)
+            found = false; /* a single picture's match is not trusted on moving content */
+        if (!a->pointer.anchoring && a->pointer_baseline->data[0]) {
+            /* Playing video changes the whole picture, so the changed search
+             * above often matches some other moving shape. Once a second
+             * picture after this movement exists, pixels still changing
+             * between them are video motion: mask them out and let only the
+             * stopped dot count. On recorded Shorts this kept correct matches
+             * (51 vs 50 of 150) and cut wrong positions from 54 to 6. A still
+             * screen sends no second picture and keeps the result above. */
+            if (a->after_sync == a->pointer.sync_id && a->after_serial != a->view_serial
+                && a->pointer_after->data[0] && a->after_screen.w == screen.w
+                && a->after_screen.h == screen.h && a->after_screen.x == screen.x
+                && a->after_screen.y == screen.y) {
+                AVFrame *b = a->pointer_baseline, *l = a->pointer_after;
+                ph_yuv_planes baseline = {b->data[0], b->data[1], b->data[2], b->linesize[0],
+                                          b->linesize[1], b->width, b->height};
+                ph_yuv_planes later = {l->data[0], l->data[1], l->data[2], l->linesize[0],
+                                       l->linesize[1], l->width, l->height};
+                double width = 500.0 * fmax(1, a->pointer.aspect);
+                double travel = hypot(a->pointer.sent_dx, a->pointer.sent_dy);
+                double near = fmin(radius * screen.w, (40 + 0.35 * travel) * screen.w / width);
+                found = ph_video_cursor_settled(&planes, &screen, &later, NULL, &baseline,
+                                                &a->baseline_screen, 2, hx * screen.w,
+                                                hy * screen.h, near, &px, &py)
+                        || ph_video_cursor_settled(&planes, &screen, &later, NULL, &baseline,
+                                                   &a->baseline_screen, 1, hx * screen.w,
+                                                   hy * screen.h, near, &px, &py);
+            }
+            av_frame_unref(a->pointer_after);
+            if (av_frame_ref(a->pointer_after, f) == 0) {
+                a->after_sync = a->pointer.sync_id;
+                a->after_serial = a->view_serial;
+                a->after_screen = screen;
+            }
+        }
+        if (!found)
+            a->candidate_sync = 0; /* a newer picture without the dot voids an older match */
         a->checked_sync = a->pointer.sync_id;
         a->checked_serial = a->view_serial;
         a->checked_found = found;
         a->checked_x = px;
         a->checked_y = py;
+        trace_cursor_miss(a, &planes, &screen);
     }
-    if (!a->checked_found)
+    if (!a->checked_found && !a->pointer.anchoring && !a->pointer.buttons
+        && now >= a->pointer.wait_since && now - a->pointer.wait_since >= 300
+        && (a->fallback_sync != a->pointer.sync_id || a->fallback_serial != a->view_serial)) {
+        /* The changed-frame search cannot see a dot that did not visibly move
+         * (a tiny correction, or one AirPlay has not re-encoded). Live traces
+         * showed it sitting on the prediction while the app waited to probe.
+         * Late, and only within 6 px of the prediction, accept the dot itself:
+         * a stale frame's old dot can then be off by at most that much. */
+        double fx = 0, fy = 0;
+        a->fallback_sync = a->pointer.sync_id;
+        a->fallback_serial = a->view_serial;
+        /* Only on content that is still around the prediction. Over playing
+         * video the shape search alone reported a "dot" at 16-55% of empty spots
+         * in recorded Shorts frames. */
+        bool still = false;
+        if (a->pointer_baseline->data[0] && a->baseline_screen.w == screen.w
+            && a->baseline_screen.h == screen.h) {
+            const AVFrame *b = a->pointer_baseline;
+            int cx = (int)lround(hx * screen.w), cy = (int)lround(hy * screen.h);
+            int reach = (int)ceil(fmin(screen.w, screen.h) * 30.0 / 500), moved = 0, total = 0;
+            for (int yy = cy - reach; yy <= cy + reach; yy++) {
+                if (yy < 0 || yy >= screen.h)
+                    continue;
+                for (int xx = cx - reach; xx <= cx + reach; xx++) {
+                    if (xx < 0 || xx >= screen.w)
+                        continue;
+                    int now_luma = planes.y[(screen.y + yy) * planes.y_stride + screen.x + xx];
+                    int then_luma = b->data[0][(a->baseline_screen.y + yy) * b->linesize[0]
+                                               + a->baseline_screen.x + xx];
+                    moved += abs(now_luma - then_luma) >= 8;
+                    total++;
+                }
+            }
+            still = total > 0 && moved * 50 <= total; /* at most 2% changed */
+        }
+        if (still && ph_video_cursor(&planes, &screen, hx * screen.w, hy * screen.h,
+                                     6.0 * fmin(screen.w, screen.h) / 500, &fx, &fy)) {
+            PH_LOGD("phone pointer found unchanged at its predicted position");
+            a->pointer.learn_move = false; /* not a measurement of this move */
+            a->checked_found = true;
+            a->checked_x = fx;
+            a->checked_y = fy;
+        }
+    }
+    if (!a->checked_found) {
+        /* Moving content and no trusted sighting yet: rather than probing, sweeping
+         * or chasing look-alikes, take the acknowledged movement's prediction.
+         * While the PC mouse keeps moving, do so as soon as the ACK has settled
+         * (waiting for video made each step 170-300 ms on video, against 87 ms on
+         * still screens). Once it stops, give real sightings 250 ms first. */
+        bool mouse_moving = now - a->target_moved_at < 150;
+        if (a->content_moving && now >= a->pointer.wait_since
+            && now - a->pointer.wait_since >= (mouse_moving ? 40 : 250))
+            ph_pointer_assume(&a->pointer, !mouse_moving, now);
         return;
+    }
     double dx = a->checked_x - a->candidate_x, dy = a->checked_y - a->candidate_y;
     if (a->candidate_sync != a->pointer.sync_id || dx * dx + dy * dy > 4) {
         a->candidate_sync = a->pointer.sync_id;
@@ -922,7 +1148,10 @@ static void observe_pointer(app *a)
      * the independent ACK-age check; neither 32 ms safety condition is removed. */
     if (now - a->candidate_since < 32)
         return;
-    PH_LOGD("phone pointer observed at (%.1f,%.1f)", a->candidate_x, a->candidate_y);
+    PH_LOGD("phone pointer observed at (%.1f,%.1f)%s", a->candidate_x, a->candidate_y,
+            a->content_moving ? " over moving content" : "");
+    if (a->content_moving)
+        a->pointer.learn_move = false; /* look-alikes must never retune the gain */
     ph_pointer_observe(&a->pointer, true, a->candidate_x / screen.w,
                         a->candidate_y / screen.h, now);
 }
@@ -941,6 +1170,7 @@ static void show_frame(app *a, const AVFrame *f)
     ph_rect screen = ph_video_content_rect_stable(&planes, a->portrait_aspect, &a->crop);
     bool presentation = !ph_video_matches_phone_screen(screen, a->portrait_aspect);
     if (presentation != a->presentation_mode) {
+        av_frame_unref(a->pointer_reference);
         a->presentation_mode = presentation;
         cancel_control_intent(a, SDL_GetTicks64());
         ph_pointer_set_enabled(&a->pointer, a->input.enabled && a->phone_name[0]
@@ -952,6 +1182,7 @@ static void show_frame(app *a, const AVFrame *f)
         update_title(a);
     }
     if (screen.w != a->picture_w || screen.h != a->picture_h) {
+        av_frame_unref(a->pointer_reference);
         ph_gesture_cancel(&a->gesture, SDL_GetTicks64());
         reset_mouse_input(a);
         PH_LOGD("pointer reset: picture size %dx%d -> %dx%d", a->picture_w, a->picture_h,
@@ -990,6 +1221,9 @@ static void clear_view(app *a)
     a->feed_mode = a->feed_have_wheel = false;
     av_frame_unref(a->view_frame);
     av_frame_unref(a->pointer_baseline);
+    av_frame_unref(a->pointer_reference);
+    av_frame_unref(a->pointer_after);
+    a->after_sync = 0;
     a->picture_w = a->picture_h = 0;
     a->presentation_mode = false;
     a->portrait_aspect = 0;
@@ -1318,12 +1552,16 @@ int ph_app_run(const ph_app_options *opt)
         PH_LOGE("couldn't initialise SDL: %s", SDL_GetError());
         return 1;
     }
+    signal(SIGINT, request_stop);
+    signal(SIGTERM, request_stop);
     pthread_mutex_init(&a.src_lock, NULL);
     ph_src_switch_init(&a.src);
     a.ev_base = SDL_RegisterEvents(EV_COUNT);
     frame = av_frame_alloc();
     a.view_frame = av_frame_alloc();
     a.pointer_baseline = av_frame_alloc();
+    a.pointer_reference = av_frame_alloc();
+    a.pointer_after = av_frame_alloc();
     a.win = ph_window_create(PORTHOLE_NAME);
     a.dec = ph_decoder_start(on_frame, &a);
     if (opt->audio)
@@ -1336,7 +1574,7 @@ int ph_app_run(const ph_app_options *opt)
         ph_audio_set_sync_offset_ms(a.audio, opt->audio_delay_ms);
     if (a.polish)
         ph_polish_set_audio(a.polish, a.audio);
-    if (a.ev_base == (Uint32)-1 || !frame || !a.view_frame || !a.pointer_baseline
+    if (a.ev_base == (Uint32)-1 || !frame || !a.view_frame || !a.pointer_baseline || !a.pointer_reference || !a.pointer_after
         || !a.win || !a.dec)
         goto done;
     if (a.polish)
@@ -1360,7 +1598,7 @@ int ph_app_run(const ph_app_options *opt)
     else if (opt->usb)
         PH_LOGW("couldn't start USB screen capture");
 
-    while (running) {
+    while (running && !stop_requested) {
         SDL_Event e;
         /* Button holds and video confirmation are timed in this loop: run it more
          * often while input is on its way to the phone. */
@@ -1418,8 +1656,8 @@ done:
     pthread_mutex_destroy(&a.src_lock);
     if (a.calibration_saved)
         finish_calibration(&a, false);
-    if (a.pointer.observed_at && a.pointer.known && !a.pointer.failed
-        && a.pointer.phase == PH_POINTER_IDLE
+    if (!a.pointer.failed
+        && ph_pointer_ready(&a.pointer, a.pointer.target_x, a.pointer.target_y, a.pointer.aspect)
         && a.pointer.scale_x >= 0.05 && a.pointer.scale_x <= 20
         && a.pointer.scale_y >= 0.05 && a.pointer.scale_y <= 20) {
         char learned[96];
@@ -1439,6 +1677,8 @@ done:
     av_frame_free(&frame);
     av_frame_free(&a.view_frame);
     av_frame_free(&a.pointer_baseline);
+    av_frame_free(&a.pointer_reference);
+    av_frame_free(&a.pointer_after);
     SDL_Quit();
     return rc;
 }

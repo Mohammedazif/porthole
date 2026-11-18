@@ -281,6 +281,17 @@ int main(void)
     ph_input_set_enabled(&f.input, false);
     CHECK(f.sent[f.count - 1].keys.keys[0] == 0 && !f.input.down[0x04]);
 
+    /* Pasted text ending in a shifted character ("Hi!") must not leave Shift
+     * held on the phone after the final release. */
+    init(&f);
+    ph_input_type(&f.input, 0x0B, PH_HID_MOD_LSHIFT); /* H */
+    ph_input_type(&f.input, 0x0C, 0);                 /* i */
+    ph_input_type(&f.input, 0x1E, PH_HID_MOD_LSHIFT); /* ! */
+    CHECK(f.count == 6);
+    CHECK(f.sent[4].keys.modifiers == PH_HID_MOD_LSHIFT && f.sent[4].keys.keys[0] == 0x1E);
+    CHECK(f.sent[5].keys.modifiers == 0 && f.sent[5].keys.keys[0] == 0);
+    CHECK(f.input.keys.modifiers == 0 && !f.input.down[0x1E]);
+
     if (failures)
         return 1;
     puts("all input sequences passed");

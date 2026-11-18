@@ -243,8 +243,182 @@ static void canceled_motion_does_not_calibrate(void)
     }
 }
 
+static void assumed_over_moving_video(void)
+{
+    /* On moving video a sighting cannot be trusted; an acknowledged unpressed
+     * movement's prediction stands in for it, bounded and never learned from. */
+    fixture f;
+    init(&f);
+    confirmed_position(&f, 250, 540, .46);
+    double scale_x = f.pointer.scale_x, scale_y = f.pointer.scale_y;
+    CHECK(!ph_pointer_assume(&f.pointer, true, f.now)); /* idle: nothing to assume */
+    unsigned int made = 0;
+    for (int i = 0; i < PH_POINTER_MAX_ASSUMED + 2; i++) {
+        CHECK(ph_pointer_target(&f.pointer, i % 2 ? .3 : .7, .4 + i * .02, .46, ++f.now));
+        if (f.pointer.phase != PH_POINTER_MOVING)
+            break;
+        double hx = f.pointer.hint_x, hy = f.pointer.hint_y;
+        ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now += 20);
+        CHECK(!ph_pointer_assume(&f.pointer, true, f.now + 5)); /* not before frames can settle */
+        bool took = ph_pointer_assume(&f.pointer, true, f.now += 260);
+        if (took) {
+            made++;
+            CHECK(f.pointer.known && f.pointer.actual_x == hx && f.pointer.actual_y == hy);
+        } else {
+            CHECK(made == PH_POINTER_MAX_ASSUMED); /* bounded run of estimates */
+            break;
+        }
+        settle_assumed:
+        while (f.pointer.phase == PH_POINTER_MOVING || f.pointer.phase == PH_POINTER_WAIT_VIDEO) {
+            if (f.pointer.phase == PH_POINTER_MOVING)
+                ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now += 20);
+            if (!ph_pointer_assume(&f.pointer, true, f.now += 260))
+                break;
+            made++;
+            goto settle_assumed;
+        }
+    }
+    CHECK(made >= PH_POINTER_MAX_ASSUMED && f.pointer.assumed == PH_POINTER_MAX_ASSUMED);
+    CHECK(f.pointer.scale_x == scale_x && f.pointer.scale_y == scale_y); /* never learned */
+    /* A real sighting resets the run. */
+    if (f.pointer.phase == PH_POINTER_WAIT_VIDEO) {
+        ph_pointer_observe(&f.pointer, true, f.x / 500, f.y * .46 / 500, f.now += 40);
+        CHECK(f.pointer.assumed == 0);
+    }
+
+    /* Estimates while the PC mouse is still moving are not counted. */
+    init(&f);
+    confirmed_position(&f, 250, 540, .46);
+    for (int i = 0; i < PH_POINTER_MAX_ASSUMED * 2; i++) {
+        CHECK(ph_pointer_target(&f.pointer, i % 2 ? .3 : .7, .5, .46, ++f.now));
+        if (f.pointer.phase == PH_POINTER_MOVING)
+            ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now += 20);
+        if (f.pointer.phase == PH_POINTER_WAIT_VIDEO)
+            CHECK(ph_pointer_assume(&f.pointer, false, f.now += 45));
+    }
+    CHECK(f.pointer.assumed == 0);
+
+    /* Never with a button held, and never during a corner sweep. */
+    init(&f);
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true, .5, .5, .46, f.now));
+    settle(&f);
+    CHECK(f.pointer.buttons == PH_HID_BTN_LEFT);
+    CHECK(ph_pointer_target(&f.pointer, .6, .5, .46, ++f.now));
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now += 20);
+    CHECK(!ph_pointer_assume(&f.pointer, true, f.now += 260));
+    init(&f);
+    CHECK(ph_pointer_target(&f.pointer, .5, .5, .46, f.now)); /* starts with a sweep */
+    CHECK(f.pointer.anchoring);
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now += 20);
+    CHECK(!ph_pointer_assume(&f.pointer, true, f.now += 260));
+}
+
+static void recovery_before_corner(void)
+{
+    /* Leaving the window mid-move loses confirmation of where that batch
+     * stopped. Re-entering soon after searches near it, without a sweep. */
+    fixture f;
+    init(&f);
+    f.bounded_video = true; /* detection only inside the controller's search area */
+    CHECK(ph_pointer_target(&f.pointer, .5, .5, .46, f.now));
+    settle(&f);
+    unsigned int anchors = f.anchors;
+    CHECK(anchors == 8 && f.pointer.known && f.pointer.estimate_valid);
+    CHECK(ph_pointer_target(&f.pointer, .7, .6, .46, ++f.now));
+    ph_pointer_cancel(&f.pointer, ++f.now);
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now += 20);
+    ph_pointer_tick(&f.pointer, f.now += 701); /* inactive: not observed after leaving */
+    CHECK(!f.pointer.known && f.pointer.phase == PH_POINTER_IDLE);
+    CHECK(ph_pointer_target(&f.pointer, .3, .4, .46, f.now += 100));
+    CHECK(f.pointer.reacquiring && f.anchors == anchors);
+    CHECK(f.events[f.count - 1].mouse.dx == 2 && !f.events[f.count - 1].mouse.buttons);
+    CHECK(f.pointer.search_radius <= 60.0 / 500 + 1e-9); /* stays local */
+    settle(&f);
+    CHECK(f.anchors == anchors && f.pointer.known && !f.pointer.reacquiring);
+    CHECK(hypot(f.x - .3 * 500, f.y - .4 * 500 / .46) <= 4);
+
+    /* Observations that never agree with the moves (a playing video under the
+     * dot) end in "target not reached": that position is no basis for a local
+     * search, so recovery sweeps the corner instead. */
+    {
+        fixture g;
+        init(&g);
+        CHECK(ph_pointer_target(&g.pointer, .5, .5, .46, g.now));
+        settle(&g);
+        unsigned int swept = g.anchors;
+        CHECK(g.pointer.estimate_valid);
+        g.true_x_scale = 0; /* the dot no longer follows horizontal reports */
+        CHECK(ph_pointer_target(&g.pointer, .8, .5, .46, ++g.now));
+        for (int i = 0; i < 200 && !g.pointer.failed; i++)
+            step(&g);
+        CHECK(g.pointer.failed && !g.pointer.estimate_valid);
+        g.true_x_scale = 1;
+        g.now += 600; /* past the retry delay */
+        CHECK(ph_pointer_target(&g.pointer, .3, .5, .46, g.now));
+        CHECK(!g.pointer.reacquiring && g.anchors == swept + 8);
+    }
+
+    /* An estimate older than fifteen seconds is not trusted: sweep the corner. */
+    CHECK(ph_pointer_target(&f.pointer, .7, .6, .46, ++f.now));
+    ph_pointer_cancel(&f.pointer, ++f.now);
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now += 20);
+    ph_pointer_tick(&f.pointer, f.now += 701);
+    CHECK(ph_pointer_target(&f.pointer, .3, .4, .46, f.now += 15500));
+    CHECK(!f.pointer.reacquiring && f.anchors == anchors + 8);
+
+    /* Slow video lengthens the confirmation timeout (bounded at 1.5 s), so a
+     * loaded host does not mistake late frames for a lost pointer. */
+    init(&f);
+    confirmed_position(&f, 250, 540, .46);
+    for (int i = 0; i < 12; i++) {
+        CHECK(ph_pointer_target(&f.pointer, i % 2 ? .3 : .6, .5, .46, ++f.now));
+        ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now += 20);
+        ph_pointer_observe(&f.pointer, true, f.x / 500, f.y * .46 / 500, f.now += 400);
+    }
+    CHECK(f.pointer.confirm_latency_ms > 300);
+    CHECK(ph_pointer_target(&f.pointer, .8, .5, .46, ++f.now));
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now += 20);
+    ph_pointer_tick(&f.pointer, f.now += 701);
+    CHECK(f.pointer.phase == PH_POINTER_WAIT_VIDEO && !f.pointer.recoveries);
+    ph_pointer_tick(&f.pointer, f.now += 800);
+    CHECK(f.pointer.recoveries == 1 && f.pointer.phase == PH_POINTER_MOVING);
+
+    /* Moving the PC mouse while the dot is unconfirmed must not renew the
+     * probe allowance: live, that crept the phone pointer 2 units right every
+     * 700 ms for as long as the mouse kept moving. */
+    init(&f);
+    confirmed_position(&f, 250, 540, .46);
+    CHECK(ph_pointer_target(&f.pointer, .6, .5, .46, ++f.now));
+    size_t probes_before = f.count;
+    for (int i = 0; i < 6 && !f.pointer.failed; i++) {
+        ph_pointer_ack(&f.pointer, f.pointer.sync_id, f.now += 20);
+        for (int j = 0; j < 8; j++) /* hover keeps changing while unconfirmed */
+            CHECK(ph_pointer_target(&f.pointer, j % 2 ? .62 : .58, .5 + i * .01, .46,
+                                    f.now += 90));
+        ph_pointer_tick(&f.pointer, f.now += 40);
+    }
+    CHECK(f.pointer.failed && f.pointer.recoveries == 0);
+    CHECK(f.count - probes_before == 2); /* exactly two neutral probes, then a sweep */
+
+    /* A held drag confirmed late keeps its button and continues. */
+    init(&f);
+    CHECK(ph_pointer_button(&f.pointer, PH_HID_BTN_LEFT, true, .5, .5, .46, f.now));
+    settle(&f);
+    CHECK(ph_pointer_target(&f.pointer, .55, .5, .46, ++f.now));
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, ++f.now);
+    ph_pointer_tick(&f.pointer, f.now += 701);
+    CHECK(f.pointer.held_extended && f.pointer.buttons == PH_HID_BTN_LEFT);
+    ph_pointer_observe(&f.pointer, true, f.x / 500, f.y * .46 / 500, f.now += 300);
+    CHECK(!f.pointer.failed && f.pointer.buttons == PH_HID_BTN_LEFT);
+    settle(&f);
+    CHECK(!f.pointer.failed && f.pointer.buttons == PH_HID_BTN_LEFT);
+    CHECK(hypot(f.x - .55 * 500, f.y - .5 * 500 / .46) <= 4);
+}
+
 int main(void)
 {
+    recovery_before_corner();
+    assumed_over_moving_video();
     canceled_motion_does_not_calibrate();
     canceled_motion_confirmation();
     fixture f;
@@ -400,9 +574,9 @@ int main(void)
     CHECK(!f.pointer.buttons && !f.pointer.count && !f.pointer.failed);
     CHECK(f.events[f.count - 1].at - f.events[pressed].at >= 80);
 
-    /* A frozen image gets exactly one neutral attempt. Hover target updates
-     * cannot replenish that pending click's allowance; no press is guessed and
-     * video failure must not be confused with failure of its healthy ACK pipe. */
+    /* A frozen image gets two neutral attempts in the normal search area.
+     * Hover target updates cannot replenish that pending click's allowance; no
+     * press is guessed and video failure is not a failure of its ACK pipe. */
     init(&f);
     CHECK(ph_pointer_set_scale(&f.pointer, 20, 20));
     confirmed_position(&f, 243, 810, .46);
@@ -419,8 +593,17 @@ int main(void)
         CHECK(ph_pointer_target(&f.pointer, i % 2 ? .2 : .8, .5, .46, ++f.now));
         CHECK(f.pointer.recoveries == 1 && f.count == initial);
     }
+    double first_radius = f.pointer.search_radius;
+    ph_pointer_tick(&f.pointer, f.now += 701);
+    CHECK(f.pointer.recoveries == 2 && f.pointer.phase == PH_POINTER_MOVING);
+    CHECK(f.count == initial + 1 && f.events[f.count - 1].mouse.dx == 2
+          && !f.events[f.count - 1].mouse.buttons);
+    CHECK(f.pointer.search_radius == first_radius); /* widening found false circles live */
+    initial = f.count;
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, ++f.now);
     ph_pointer_tick(&f.pointer, f.now += 701);
     CHECK(f.pointer.failed && !f.pointer.count && !f.pointer.buttons);
+    CHECK(!f.pointer.estimate_valid); /* both probes searched; next recovery sweeps */
     CHECK(f.count == initial && first_button(&f, PH_HID_BTN_LEFT) == f.count);
     CHECK(!ph_pointer_transport_stalled(&f.pointer));
 
@@ -468,8 +651,15 @@ int main(void)
     ph_pointer_ack(&f.pointer, stale_id, ++f.now);
     CHECK(f.pointer.phase == PH_POINTER_DRAINING && f.count == initial);
     ph_pointer_ack(&f.pointer, release_id, ++f.now);
-    CHECK(f.pointer.phase == PH_POINTER_MOVING && f.anchors == 16);
+    /* The drag's position was confirmed moments ago: search near where its
+     * drained batch should have stopped, unpressed, instead of a corner sweep. */
+    CHECK(f.pointer.phase == PH_POINTER_MOVING && f.anchors == 8 && f.pointer.reacquiring);
+    CHECK(f.events[f.count - 1].mouse.dx == 2 && !f.events[f.count - 1].mouse.buttons);
     CHECK(f.pointer.sync_id != release_id);
+    /* If it is not found there either, the corner sweep follows immediately. */
+    ph_pointer_ack(&f.pointer, f.pointer.sync_id, ++f.now);
+    ph_pointer_tick(&f.pointer, f.now += 701);
+    CHECK(!f.pointer.reacquiring && f.anchors == 16 && f.pointer.phase == PH_POINTER_MOVING);
 
     /* A missing transport ACK while dragging also releases the physical button. */
     init(&f);
@@ -500,6 +690,11 @@ int main(void)
     CHECK(ph_pointer_target(&f.pointer, .8, .8, .46, ++f.now));
     ph_pointer_ack(&f.pointer, f.pointer.sync_id, ++f.now);
     CHECK(f.pointer.phase == PH_POINTER_WAIT_VIDEO && f.pointer.buttons == PH_HID_BTN_LEFT);
+    initial = f.count;
+    ph_pointer_tick(&f.pointer, f.now += 701);
+    /* A held dot is often confirmed late: wait once more, sending nothing. */
+    CHECK(f.pointer.phase == PH_POINTER_WAIT_VIDEO && f.pointer.buttons == PH_HID_BTN_LEFT);
+    CHECK(f.pointer.held_extended && f.count == initial && !f.pointer.failed);
     ph_pointer_tick(&f.pointer, f.now += 701);
     CHECK(f.pointer.failed && f.pointer.phase == PH_POINTER_DRAINING && !f.pointer.buttons);
     CHECK(!ph_pointer_transport_stalled(&f.pointer) && f.pointer.sent_at == f.now);

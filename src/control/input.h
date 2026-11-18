@@ -35,5 +35,8 @@ void ph_input_key(ph_input *input, uint8_t usage, bool down, bool repeat, uint8_
  * actions (including Power), and disabled input are ignored. */
 void ph_input_consumer_key(ph_input *input, uint16_t usage, bool down, bool repeat);
 void ph_input_release_all(ph_input *input);
+/* Types one generated character (clipboard paste): press with `modifiers`, then
+ * release the key and those modifiers together so none stays held afterwards. */
+void ph_input_type(ph_input *input, uint8_t usage, uint8_t modifiers);
 
 #endif
