@@ -68,6 +68,8 @@ bool ph_abs_swipe(ph_abs *a, double x1, double y1, double x2, double y2, uint32_
 bool ph_abs_tap(ph_abs *a, double x, double y, int count, uint32_t hold_ms, uint64_t now_ms);
 bool ph_abs_home(ph_abs *a, uint64_t now_ms);
 bool ph_abs_app_switcher(ph_abs *a, uint64_t now_ms);
+/* Back into the front card. A home swipe from the switcher goes to the Home Screen. */
+bool ph_abs_leave_app_switcher(ph_abs *a, uint64_t now_ms);
 bool ph_abs_control_center(ph_abs *a, uint64_t now_ms);
 bool ph_abs_notification_center(ph_abs *a, uint64_t now_ms);
 bool ph_abs_busy(const ph_abs *a);

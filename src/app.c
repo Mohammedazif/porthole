@@ -907,10 +907,12 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         bool panel = sc == SDL_SCANCODE_S || sc == SDL_SCANCODE_C || sc == SDL_SCANCODE_N;
         bool close = panel && !e->repeat && a->abs_panel == sc && now - a->abs_panel_at < 60000;
         if (!e->repeat && (sc == SDL_SCANCODE_H || close)) {
-            /* Home swipe; a second press of the same panel key closes that panel
-             * the same way. The consumer Home key cannot replace it: with the
-             * absolute map, iOS 26.6.1 opened Spotlight for it instead of Home. */
-            sent = ph_abs_home(&a->abs, now);
+            /* Home swipe closes Control Center and Notification Center back in
+             * the app. From the App Switcher that swipe goes to the Home Screen,
+             * so tap the front card. The consumer Home key cannot replace the
+             * swipe: with the absolute map, iOS 26.6.1 opened Spotlight for it. */
+            sent = sc == SDL_SCANCODE_S ? ph_abs_leave_app_switcher(&a->abs, now)
+                                        : ph_abs_home(&a->abs, now);
             a->abs_panel = 0;
             a->gesture_keys[sc] = true;
             mark_input(a, e->timestamp);

@@ -216,6 +216,12 @@ int main(void)
     CHECK(log_[last_held + 1].at - log_[last_held].at >= 700);
     CHECK(!ph_abs_busy(&a) && log_[count_ - 1].x == .5 && log_[count_ - 1].y == .5);
     fresh(&a);
+    CHECK(ph_abs_leave_app_switcher(&a, now_));
+    run_until(&a, now_ + 1000);
+    p = first_with_button();
+    CHECK(presses() == 1 && p >= 0 && log_[p].x == .5 && log_[p].y == .45);
+    CHECK(log_[p].at >= 1000 + 120);
+    fresh(&a);
     CHECK(ph_abs_home(&a, now_) && ph_abs_control_center(&a, now_)
           && ph_abs_notification_center(&a, now_));
     run_until(&a, now_ + 4000);

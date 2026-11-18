@@ -135,6 +135,11 @@ bool ph_abs_app_switcher(ph_abs *a, uint64_t now_ms)
     return scripted(a, .5, 1, .5, 760.0 / 1080, 250, 700, now_ms);
 }
 
+bool ph_abs_leave_app_switcher(ph_abs *a, uint64_t now_ms)
+{
+    return ph_abs_tap(a, .5, .45, 1, 60, now_ms);
+}
+
 bool ph_abs_control_center(ph_abs *a, uint64_t now_ms)
 {
     return scripted(a, .94, 6.0 / 1080, .94, 520.0 / 1080, 250, 0, now_ms);
