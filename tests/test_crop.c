@@ -38,10 +38,28 @@ static void paint(frame *f, int x0, int x1, uint8_t luma)
         memset(f->y + (size_t)y * f->w + x0, luma, (size_t)(x1 - x0));
 }
 
+static void paint_box(frame *f, int x0, int x1, int y0, int y1, uint8_t luma)
+{
+    for (int y = y0; y < y1 && y < f->h; y++)
+        memset(f->y + (size_t)y * f->w + x0, luma, (size_t)(x1 - x0));
+}
+
 static ph_rect detect(const frame *f, double aspect)
 {
     ph_yuv_planes p = {f->y, f->u, f->v, f->w, f->w / 2, f->w, f->h};
     return ph_video_content_rect(&p, aspect);
+}
+
+static ph_rect picture(const frame *f)
+{
+    ph_yuv_planes p = {f->y, f->u, f->v, f->w, f->w / 2, f->w, f->h};
+    return ph_video_picture_rect(&p);
+}
+
+static ph_rect item_at(const frame *f, int x, int y)
+{
+    ph_yuv_planes p = {f->y, f->u, f->v, f->w, f->w / 2, f->w, f->h};
+    return ph_video_item_rect(&p, x, y);
 }
 
 static ph_rect detect_stable(const frame *f, double aspect, ph_video_crop_state *state)
@@ -141,6 +159,36 @@ int main(void)
         CHECK(is_full(detect(&f, 0), &f));
         free_frame(&f);
     }
+    /* The same off-centre photo is the picture a drag must hash. A 4:3 photo
+     * shifted in a 1920x1080 frame stays 4:3, and the window crop stays full. */
+    {
+        frame f = make_frame(1920, 1080, 16);
+        paint_box(&f, 438, 1248, 0, 1080, 180);
+        ph_rect shown = detect(&f, 500.0 / 1080);
+        ph_rect photo = picture(&f);
+        CHECK(is_full(shown, &f));
+        CHECK(photo.x == 438 && photo.y == 0 && photo.w == 810 && photo.h == 1080);
+        CHECK(fabs((double)photo.w / photo.h - 0.75) < 0.001);
+        free_frame(&f);
+    }
+    /* Landscape photo between black bars above and below. */
+    {
+        frame f = make_frame(500, 1080, 16);
+        paint_box(&f, 0, 500, 200, 880, 180);
+        ph_rect photo = picture(&f);
+        CHECK(photo.x == 0 && photo.y == 200 && photo.w == 500 && photo.h == 680);
+        free_frame(&f);
+    }
+    /* A thin black edge is part of the photo. A speck is not a picture. */
+    {
+        frame f = make_frame(1920, 1080, 16);
+        paint(&f, 4, 1916, 180);
+        CHECK(is_full(picture(&f), &f));
+        paint(&f, 0, f.w, 16);
+        paint_box(&f, 100, 120, 100, 120, 220);
+        CHECK(is_full(picture(&f), &f));
+        free_frame(&f);
+    }
 
     /* Reproduce the live 1920x888 landscape stream. Its reciprocal phone shape
      * proves orientation even when black or containing only centred text. */
@@ -229,6 +277,50 @@ int main(void)
         CHECK(detect_stable(&f, .463, &state).w == 500);
         paint(&f, 0, f.w, 16);
         CHECK(is_full(detect_stable(&f, 1080.0 / 1920, &state), &f));
+        free_frame(&f);
+    }
+    /* A library grid is separate photos. One-pixel black gaps must not merge,
+     * and a press on the gap belongs to one thumbnail. The page does not. */
+    {
+        frame f = make_frame(3 * 80 + 2, 200, 16);
+        ph_rect a, b, gap, page;
+        paint_box(&f, 0, 80, 5, 85, 180);
+        paint_box(&f, 81, 161, 5, 85, 200);
+        paint_box(&f, 162, 242, 5, 85, 140);
+        a = item_at(&f, 40, 40);
+        b = item_at(&f, 120, 40);
+        gap = item_at(&f, 80, 40);
+        page = item_at(&f, 40, 150);
+        CHECK(a.w >= 64 && a.h >= 64 && a.x + a.w <= 80);
+        CHECK(b.x >= 81 && b.x + b.w <= 161 && b.w >= 64 && b.h >= 64);
+        CHECK(gap.w >= 64 && (gap.x + gap.w <= 80 || gap.x >= 81));
+        CHECK(gap.w < 160);
+        CHECK(page.w == 0 && page.h == 0);
+        f.y[(size_t)40 * f.w + 120] = 16; /* a dark pixel inside the thumbnail */
+        b = item_at(&f, 120, 40);
+        CHECK(b.x >= 81 && b.x + b.w <= 161 && b.w >= 64);
+        free_frame(&f);
+    }
+    /* Wider gaps, as on the Photos search cards, also stay apart. */
+    {
+        frame f = make_frame(300, 100, 16);
+        ph_rect a, b;
+        paint_box(&f, 10, 90, 10, 90, 180);
+        paint_box(&f, 110, 190, 10, 90, 160);
+        a = item_at(&f, 40, 50);
+        b = item_at(&f, 140, 50);
+        CHECK(a.x >= 10 && a.x + a.w <= 90 && a.w >= 64);
+        CHECK(b.x >= 110 && b.x + b.w <= 190 && b.w >= 64);
+        free_frame(&f);
+    }
+    /* A photo between black bars is that photo, not the whole frame. */
+    {
+        frame f = make_frame(200, 180, 16);
+        ph_rect photo;
+        paint_box(&f, 0, 200, 40, 140, 170);
+        photo = item_at(&f, 100, 80);
+        CHECK(photo.w >= 64 && photo.h >= 64);
+        CHECK(photo.y >= 40 && photo.y + photo.h <= 140);
         free_frame(&f);
     }
 

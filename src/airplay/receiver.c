@@ -257,7 +257,9 @@ static void cb_log(void *cls, int level, const char *msg)
 
 /* ------------------------------------------------------------------ setup */
 
-/* Same feature bits as UxPlay's front end (mirroring + audio, no HLS, H.264 only). */
+/* Same feature bits as UxPlay's front end (mirroring + audio, no HLS, H.264 only).
+ * Clearing Photo (1) and Slideshow (5) was tried on iOS 26.6.1: Photos still replaced
+ * the mirrored screen with the bare photo, so they stay as UxPlay sets them. */
 static void set_features(dnssd_t *d)
 {
     static const int on[] = {1, 2, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17,

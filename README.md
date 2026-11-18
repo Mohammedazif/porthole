@@ -123,7 +123,9 @@ landscape presentation to AirPlay while the iPhone keeps its portrait controls.
 The Photos library grid mirrors normally on the tested phone. Porthole cannot
 reconstruct UI that the iPhone does not send. With the absolute pointer, the
 mouse, wheel, and keyboard keep working on that picture: a click is that fraction
-of the phone screen. The relative pointer still pauses, and the window says
+of the phone screen. Drag that picture off the window and Porthole takes the file:
+the original when the Porthole app on the iPhone is open and one photo matches, and
+the screen picture otherwise. F1 shows the address and code that app uses. The relative pointer still pauses, and the window says
 "Return to phone view", because it has to see the AssistiveTouch dot. Returning
 to a matching phone view restores it without re-pairing. This shape check cannot
 detect separate content with the same aspect ratio, or establish the phone shape

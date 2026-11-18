@@ -52,6 +52,7 @@ static void print_usage(FILE *out, const char *argv0)
             "Ctrl on the PC acts as Command on the iPhone (Ctrl+C, Ctrl+V, ...).\n"
             "F1 help; F2 guided setup; F3 local timing diagnostics; F6 next device;\n"
             "F8 save a PNG; F9 start or stop an H.264 recording.\n"
+            "Drag a fullscreen photo off the window to take its file.\n"
             "A plugged-in iPhone becomes the picture after its first USB keyframe.\n"
             "Unplugging returns to Wi-Fi when a Wi-Fi frame arrived within 500 ms.\n",
             argv0, PORTHOLE_NAME);

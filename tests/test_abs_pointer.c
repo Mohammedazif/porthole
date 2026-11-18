@@ -253,6 +253,18 @@ int main(void)
     p = first_with_button();
     CHECK(p >= 0 && log_[p + 1].at - log_[p].at >= 1000);
 
+    /* A button left down with nobody holding it is lifted on the next tick. */
+    fresh(&a);
+    a.sent_valid = true;
+    a.buttons = 1;
+    a.x = .4;
+    a.y = .6;
+    ph_abs_tick(&a, now_);
+    CHECK(count_ == 1 && log_[0].buttons == 0 && log_[0].x == .4 && log_[0].y == .6);
+    ph_abs_button(&a, 1, true, .4, .6, now_);
+    run_until(&a, now_ + 500);
+    CHECK(log_[count_ - 1].buttons == 1);
+
     if (failures)
         return 1;
     puts("absolute pointer scripting passed");

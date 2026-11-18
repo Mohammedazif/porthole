@@ -1,6 +1,8 @@
 #include "media/shot.h"
 
+#include <stddef.h>
 #include <stdio.h>
+#include <string.h>
 
 #include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
@@ -103,4 +105,34 @@ done:
     av_frame_free(&rgb);
     avcodec_free_context(&ctx);
     return failed;
+}
+
+int ph_shot_write_png_rect(const struct AVFrame *frame, int x, int y, int w, int h,
+                           const char *path)
+{
+    AVFrame view;
+
+    if (!frame || x < 0 || y < 0 || w < 2 || h < 2)
+        return -1;
+    if (frame->format != AV_PIX_FMT_YUV420P && frame->format != AV_PIX_FMT_YUVJ420P)
+        return -1;
+    if (x + w > frame->width || y + h > frame->height)
+        return -1;
+    x &= ~1;
+    y &= ~1;
+    w &= ~1;
+    h &= ~1;
+    if (w < 2 || h < 2 || x + w > frame->width || y + h > frame->height)
+        return -1;
+    memset(&view, 0, sizeof view);
+    view.format = frame->format;
+    view.width = w;
+    view.height = h;
+    view.data[0] = frame->data[0] + (size_t)y * (size_t)frame->linesize[0] + (size_t)x;
+    view.data[1] = frame->data[1] + (size_t)(y / 2) * (size_t)frame->linesize[1] + (size_t)(x / 2);
+    view.data[2] = frame->data[2] + (size_t)(y / 2) * (size_t)frame->linesize[2] + (size_t)(x / 2);
+    view.linesize[0] = frame->linesize[0];
+    view.linesize[1] = frame->linesize[1];
+    view.linesize[2] = frame->linesize[2];
+    return ph_shot_write_png(&view, path);
 }

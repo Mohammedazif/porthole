@@ -25,6 +25,8 @@ add_library(porthole_core STATIC
     touch/wda.c
     ui/placement.c
     ui/tray.c
+    files/picture_hash.c
+    files/pull.c
     usb/packet.c
     usb/switch.c
     usb/winusb.c
@@ -72,6 +74,8 @@ if(PORTHOLE_WITH_AIRPLAY)
         video/decoder.c
         media/shot.c
         media/record.c
+        files/origin.c
+        files/xdnd.c
         control/paste_sdl.c
         touch/wda_net.c
         polish/runtime.c
@@ -86,6 +90,13 @@ if(PORTHOLE_WITH_AIRPLAY)
     )
     if(WIN32)
         target_link_libraries(porthole_app PUBLIC ws2_32)
+    endif()
+    if(UNIX AND NOT APPLE)
+        find_package(X11)
+        if(X11_FOUND)
+            target_compile_definitions(porthole_app PRIVATE PH_HAVE_X11=1)
+            target_link_libraries(porthole_app PUBLIC X11::X11)
+        endif()
     endif()
     porthole_set_warnings(porthole_app)
 

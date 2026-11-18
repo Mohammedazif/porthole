@@ -26,6 +26,12 @@ void ph_window_set_title(ph_window *w, const char *title);
 /* Local connection/setup guidance; this never sends input to the phone. */
 void ph_window_set_status(ph_window *w, bool mirroring, bool control_ready, const char *detail);
 
+/* Replaces the status line without changing whether the mirror or the controls are up. */
+void ph_window_set_detail(ph_window *w, const char *detail);
+
+/* Shown in help so the iPhone app can connect. Empty hides the line. */
+void ph_window_set_pull_hint(ph_window *w, const char *hint);
+
 /* F1 opens/closes local help. Picture coordinates are rejected while it is open. */
 void ph_window_toggle_help(ph_window *w);
 bool ph_window_help_visible(const ph_window *w);
@@ -57,6 +63,10 @@ void ph_window_clear(ph_window *w);
  * Returns false on the title bar, in letterbox bars, while local help is open, or when
  * controls are unavailable. */
 bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy);
+
+/* Same mapping without needing Bluetooth control: for reading the picture, such as
+ * dragging a photo out, never for sending input to the phone. */
+bool ph_window_picture_point(const ph_window *w, int x, int y, double *vx, double *vy);
 
 /* True when the event is on the title bar. The phone does not see those events. */
 bool ph_window_chrome_event(ph_window *w, const SDL_Event *event);

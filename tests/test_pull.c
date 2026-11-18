@@ -1,0 +1,127 @@
+#include <stdio.h>
+#include <string.h>
+
+#include "files/picture_hash.h"
+#include "files/pull.h"
+
+static int g_failures;
+
+#define CHECK(cond)                                                                                \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond);               \
+            g_failures++;                                                                          \
+        }                                                                                          \
+    } while (0)
+
+static void test_hash(void)
+{
+    uint8_t px[8][9];
+    uint64_t hashes[3];
+    double aspects[3];
+    int r, c;
+
+    memset(px, 10, sizeof px);
+    px[0][0] = 20;
+    CHECK(ph_picture_dhash(&px[0][0], 9, 8, 9) == ((uint64_t)1 << 63));
+
+    for (c = 0; c < 9; c++)
+        px[0][c] = (uint8_t)(90 - c * 10);
+    CHECK(ph_picture_dhash(&px[0][0], 9, 8, 9) == 0xFF00000000000000ull);
+
+    memset(px, 40, sizeof px);
+    CHECK(ph_picture_dhash(&px[0][0], 9, 8, 9) == 0);
+    CHECK(ph_picture_hamming(0xF0, 0x0F) == 8);
+    (void)r;
+
+    hashes[0] = 0;
+    hashes[1] = 0xFF;
+    hashes[2] = 0xFFFF;
+    aspects[0] = 0.5;
+    aspects[1] = 0.5;
+    aspects[2] = 2.0;
+    CHECK(ph_picture_pick(0, 0.5, hashes, aspects, 3) == 0);
+    CHECK(ph_picture_pick(0x7FF, 0.5, hashes, aspects, 1) == -1);
+    hashes[1] = 0x0F;
+    CHECK(ph_picture_pick(0, 0.5, hashes, aspects, 2) == -1);
+    CHECK(ph_picture_pick(0, 0.5, hashes, NULL, 1) == 0);
+}
+
+static void test_thumb(void)
+{
+    static uint8_t px[64 * 48];
+    uint8_t out[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
+    int x, y;
+
+    /* 48 wide, 64 tall: each cell is 1.5 columns by 2 rows; integer bounds give
+     * columns of width 1 and 2 alternating, exactly as the phone samples. */
+    for (y = 0; y < 64; y++)
+        for (x = 0; x < 48; x++)
+            px[y * 48 + x] = (uint8_t)(y < 32 ? 200 : 20);
+    CHECK(ph_picture_thumb(px, 48, 64, 48, out) == 1);
+    CHECK(out[0] == 200 && out[15 * 32 + 31] == 200);
+    CHECK(out[16 * 32] == 20 && out[31 * 32 + 31] == 20);
+
+    px[0] = 0;
+    px[1] = 100; /* cell 0 covers column 0 only; cell 1 covers column 1 */
+    px[48] = 0;
+    px[49] = 100;
+    CHECK(ph_picture_thumb(px, 48, 64, 48, out) == 1);
+    CHECK(out[0] == 0);
+    CHECK(out[1] == 150); /* columns 1 and 2: (100 + 200 + 100 + 200) / 4 */
+
+    /* Smaller than the grid: cells repeat the nearest pixel instead of dividing by zero. */
+    CHECK(ph_picture_thumb(px, 4, 4, 48, out) == 1);
+    CHECK(ph_picture_thumb(NULL, 4, 4, 4, out) == 0);
+}
+
+static void test_gesture(void)
+{
+    ph_pull pull;
+
+    ph_pull_reset(&pull);
+    ph_pull_press(&pull, false, true, 0, 0);
+    CHECK(!ph_pull_motion(&pull, false, 80, 0));
+
+    ph_pull_press(&pull, true, false, 0, 0);
+    CHECK(!ph_pull_motion(&pull, false, 80, 0));
+
+    ph_pull_press(&pull, true, true, 10, 10);
+    CHECK(!ph_pull_motion(&pull, true, 90, 10));
+    CHECK(!ph_pull_motion(&pull, false, 20, 10));
+    CHECK(ph_pull_motion(&pull, false, 10 + PH_PULL_TRAVEL_PX, 10));
+    CHECK(pull.pulling);
+    CHECK(!ph_pull_motion(&pull, false, 400, 10));
+    ph_pull_release(&pull);
+    CHECK(!pull.pulling && !pull.armed);
+}
+
+static void test_name(void)
+{
+    unsigned long long size = 0;
+    char name[96];
+
+    CHECK(ph_pull_parse_file("FILE 12 photo.HEIC", 1000, &size, name, sizeof name));
+    CHECK(size == 12 && strcmp(name, "photo.HEIC") == 0);
+    CHECK(!ph_pull_parse_file("FILE 0 photo.HEIC", 1000, &size, name, sizeof name));
+    CHECK(!ph_pull_parse_file("FILE 12 ../x.jpg", 1000, &size, name, sizeof name));
+    CHECK(!ph_pull_parse_file("FILE 5000 photo.HEIC", 1000, &size, name, sizeof name));
+    CHECK(!ph_pull_parse_file("MISS", 1000, &size, name, sizeof name));
+    CHECK(!ph_pull_parse_file("FILE 4 my photo.jpg", 1000, &size, name, sizeof name));
+    CHECK(ph_pull_parse_file("FILE 4 my_photo.jpg", 1000, &size, name, sizeof name));
+    CHECK(size == 4 && strcmp(name, "my_photo.jpg") == 0);
+}
+
+int main(void)
+{
+    test_hash();
+    test_thumb();
+    test_gesture();
+    test_name();
+    if (g_failures) {
+        fprintf(stderr, "%d pull checks failed\n", g_failures);
+        return 1;
+    }
+    puts("pull checks passed");
+    return 0;
+}

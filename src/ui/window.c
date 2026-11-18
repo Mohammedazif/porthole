@@ -37,6 +37,7 @@ struct ph_window {
     SDL_Texture *lockup;
     SDL_Texture *mark;
     char title[160];
+    char pull_hint[96];
     int chrome_hover;
     int chrome_press;
     bool chrome_down;
@@ -351,15 +352,21 @@ static void measure_help(int width, int scale, bool columns, const char *mouse, 
 
 static void draw_help(ph_window *w, int width, int height, int top)
 {
-    const char *mouse = "Move cursor to point.\n"
-                        "Left click: tap\n"
-                        "Right: secondary tap\n"
-                        "Drag: swipe\n"
-                        "Wheel: scroll\n"
-                        "Shift+wheel: sideways\n"
-                        "Middle click: action\n"
-                        "Side buttons: actions\n"
-                        "F4: feed wheel on/off";
+    char mouse[700];
+
+    snprintf(mouse, sizeof mouse,
+             "Move cursor to point.\n"
+             "Left click: tap\n"
+             "Right: secondary tap\n"
+             "Drag: swipe\n"
+             "Drag a photo off the window\n"
+             "to take its file.\n"
+             "Wheel: scroll\n"
+             "Shift+wheel: sideways\n"
+             "Middle click: action\n"
+             "Side buttons: actions\n"
+             "F4: feed wheel on/off%s%s",
+             w->pull_hint[0] ? "\n" : "", w->pull_hint);
     const char *keys = "Type directly.\n"
                        "Ctrl is Command.\n"
                        "Alt+H Home\n"
@@ -375,9 +382,14 @@ static void draw_help(ph_window *w, int width, int height, int top)
                        "Alt+D: double-tap\n"
                        "Alt+L: hold\n"
                        "Alt+U: bottom swipe\n"
+                       "Alt+K: on or off\n"
+                       "PC keys use Bluetooth\n"
                        "Esc cancels a hold\n"
                        "Media keys: playback";
-    const char *setup = "AssistiveTouch on. Dwell off.\n" PH_PAIR_LINE "\n"
+    const char *setup = "AssistiveTouch on. Dwell off.\n"
+                        "Alt+K shows or hides the iPhone keyboard.\n"
+                        "PC keys stay on Bluetooth.\n"
+                        PH_PAIR_LINE "\n"
                         "Buttons 3-6: Apps, Controls,\n"
                         "Notifications, Screenshot.";
     int content_h = height - top;
@@ -510,7 +522,10 @@ static void draw_setup(ph_window *w, int width, int height, int top)
     case PH_SETUP_PREPARE:
         title = "Prepare your iPhone";
         body = "Settings > Accessibility > Touch > AssistiveTouch.\n"
-               "Turn AssistiveTouch on.\nTurn Dwell Control off.\n\n"
+               "Turn AssistiveTouch on.\nTurn Dwell Control off.\n"
+               "Leave Show Onscreen Keyboard off.\n\n"
+               "Alt+K shows or hides the iPhone keyboard.\n"
+               "PC keys use Bluetooth.\n"
                "Leave Tracking Sensitivity as it is.\nPress Next when that is done.";
         break;
     case PH_SETUP_BLUETOOTH:
@@ -931,6 +946,22 @@ void ph_window_set_status(ph_window *w, bool mirroring, bool control_ready, cons
     ph_window_redraw(w);
 }
 
+void ph_window_set_detail(ph_window *w, const char *detail)
+{
+    if (!w)
+        return;
+    ph_window_set_status(w, w->mirroring, w->control_ready, detail);
+}
+
+void ph_window_set_pull_hint(ph_window *w, const char *hint)
+{
+    if (!w)
+        return;
+    snprintf(w->pull_hint, sizeof w->pull_hint, "%s", hint ? hint : "");
+    if (w->help_visible)
+        ph_window_redraw(w);
+}
+
 void ph_window_toggle_help(ph_window *w)
 {
     w->help_visible = !w->help_visible;
@@ -1180,10 +1211,17 @@ void ph_window_clear(ph_window *w)
 
 bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy)
 {
+    if (!w->control_ready)
+        return false;
+    return ph_window_picture_point(w, x, y, vx, vy);
+}
+
+bool ph_window_picture_point(const ph_window *w, int x, int y, double *vx, double *vy)
+{
     int win_w, win_h;
     SDL_Rect r;
 
-    if (!w->has_picture || w->help_visible || w->setup.visible || !w->control_ready)
+    if (!w->has_picture || w->help_visible || w->setup.visible)
         return false;
     if (y < PH_WINDOW_BAR_PX)
         return false;

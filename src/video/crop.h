@@ -29,6 +29,16 @@ typedef struct ph_yuv_planes {
  * from portrait frames; pass 0 if unknown and the bars are found by scanning instead. */
 ph_rect ph_video_content_rect(const ph_yuv_planes *p, double portrait_aspect);
 
+/* Bounds of the visible picture, including one that is not centred. Black
+ * margins under 8px stay, so a dark edge of the photo is kept. The whole frame
+ * when the picture fills it or the bright area is only a speck. */
+ph_rect ph_video_picture_rect(const ph_yuv_planes *p);
+
+/* The thumbnail or photo under a press. Empty when the point is on the page
+ * background, or the item is smaller than a photo. A one-pixel black gap, as
+ * in the Photos library, stops the item. */
+ph_rect ph_video_item_rect(const ph_yuv_planes *p, int x, int y);
+
 /* Retain a confirmed crop while a same-size frame is too dark to distinguish
  * the phone screen from its bars. Zero-initialize/reset for each video session.
  * A new frame size defaults to the whole frame when its pixels are ambiguous. */

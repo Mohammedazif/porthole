@@ -261,6 +261,13 @@ ph_window *ph_window_create(const char *title)
 }
 
 void ph_window_set_title(ph_window *w, const char *title) { (void)w, (void)title; }
+void ph_window_set_detail(ph_window *w, const char *detail) { (void)w, (void)detail; }
+void ph_window_set_pull_hint(ph_window *w, const char *hint) { (void)w, (void)hint; }
+bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy);
+bool ph_window_picture_point(const ph_window *w, int x, int y, double *vx, double *vy)
+{
+    return ph_window_to_video(w, x, y, vx, vy);
+}
 
 void ph_window_set_status(ph_window *w, bool mirror, bool ready, const char *detail)
 {

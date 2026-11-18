@@ -1,5 +1,6 @@
 #include "app.h"
 
+#include <errno.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <math.h>
@@ -7,10 +8,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
 
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include <libavutil/frame.h>
+#include <libavutil/pixfmt.h>
 
 #include "airplay/receiver.h"
 #include "audio/player.h"
@@ -23,6 +30,10 @@
 #include "control/setup.h"
 #include "core/config.h"
 #include "core/log.h"
+#include "files/origin.h"
+#include "files/picture_hash.h"
+#include "files/pull.h"
+#include "files/xdnd.h"
 #include "core/metrics.h"
 #include "core/version.h"
 #include "hid/link.h"
@@ -73,6 +84,7 @@ typedef struct app {
     bool absolute;
     SDL_Scancode abs_panel; /* Alt key whose panel is open (toggle closes it), or 0 */
     Uint64 abs_panel_at;
+    Uint64 keyboard_lift_at; /* non-zero: release the keyboard-toggle key at this time */
     ph_scroll wheel;
     ph_mouse_input mouse_input;
     bool wheel_point_valid;
@@ -82,6 +94,11 @@ typedef struct app {
     bool gesture_keys[256];
     Uint64 feed_wheel_at;
     AVFrame *view_frame, *pointer_baseline, *pointer_reference, *pointer_after;
+    /* The picture under the press. A drag inside the picture swipes the phone,
+     * so the frame on screen when the drag leaves can be a different photo. */
+    AVFrame *pull_frame;
+    int pull_px, pull_py;
+    bool pull_snap;
     ph_rect view_screen, baseline_screen, reference_screen;
     Uint64 reference_at;
     int picture_w, picture_h;
@@ -110,6 +127,13 @@ typedef struct app {
     pthread_t usb_thread;
     atomic_bool usb_stop;
     bool usb_started;
+    ph_pull pull;
+    ph_origin *origin;
+    char pull_dir[640];
+    char pull_path[768]; /* original file for this drag; empty while it is only the screen */
+    int pull_note;
+    bool pull_hold; /* button is up; wait for the phone before offering the file */
+    Uint64 pull_hold_at;
 } app;
 
 /* ------------------------------------------------------------ cross-thread notifications */
@@ -288,6 +312,7 @@ static bool start_control_gesture(app *a, ph_gesture_kind kind,
 static void handle_ble_status(app *a, const char *line)
 {
     const char *state = NULL;
+    bool was_on = !strcmp(a->ble_status, "on");
 
     if (!strcmp(line, "ready"))
 #ifdef _WIN32
@@ -338,6 +363,8 @@ static void handle_ble_status(app *a, const char *line)
     if (state && !(!strcmp(line, "connected") && !strcmp(a->ble_status, "on")))
         snprintf(a->ble_status, sizeof a->ble_status, "%s", state);
     ph_input_set_enabled(&a->input, !a->link_stopping && !strcmp(a->ble_status, "on"));
+    if (!strcmp(line, "subscribed") && !was_on && a->input.enabled)
+        PH_LOGI("Bluetooth keyboard ready. Alt+K shows or hides the iPhone keyboard");
     ph_pointer_set_enabled(&a->pointer, a->input.enabled && a->phone_name[0]
                             && !a->presentation_mode, SDL_GetTicks64());
     if (!a->input.enabled) {
@@ -345,6 +372,7 @@ static void handle_ble_status(app *a, const char *line)
         reset_mouse_input(a);
         ph_scroll_reset(&a->wheel);
         a->feed_mode = a->feed_have_wheel = false;
+        a->keyboard_lift_at = 0;
     }
     if (!strcmp(line, "exited")) {
         ph_hid_link_stop(a->link);
@@ -504,8 +532,314 @@ static bool abs_coordinates(app *a, int x, int y, double *nx, double *ny)
     return ph_window_to_video(a->win, x, y, nx, ny);
 }
 
+static bool on_picture(const app *a, int x, int y)
+{
+    double vx, vy;
+    return ph_window_picture_point(a->win, x, y, &vx, &vy);
+}
+
+static bool ensure_pull_dir(app *a)
+{
+    char root[480];
+
+    if (a->pull_dir[0])
+        return true;
+    if (!ph_config_dir(root, sizeof root))
+        return false;
+    if (snprintf(a->pull_dir, sizeof a->pull_dir, "%s/pull", root) >= (int)sizeof a->pull_dir)
+        return false;
+#ifdef _WIN32
+    if (_mkdir(a->pull_dir) != 0 && errno != EEXIST)
+        return false;
+#else
+    if (mkdir(a->pull_dir, 0700) != 0 && errno != EEXIST)
+        return false;
+#endif
+    return true;
+}
+
+static uint64_t hash_rect(const AVFrame *f, ph_rect s)
+{
+    const uint8_t *plane;
+
+    if (!f || !f->data[0] || s.w < 2 || s.h < 2)
+        return 0;
+    if (s.x < 0 || s.y < 0 || s.x + s.w > f->width || s.y + s.h > f->height)
+        return 0;
+    plane = f->data[0] + (size_t)s.y * (size_t)f->linesize[0] + (size_t)s.x;
+    return ph_picture_dhash(plane, s.w, s.h, f->linesize[0]);
+}
+
+static bool thumb_rect(const AVFrame *f, ph_rect s,
+                       uint8_t out[PH_PICTURE_THUMB * PH_PICTURE_THUMB])
+{
+    const uint8_t *plane;
+
+    if (!f || !f->data[0] || s.w < 2 || s.h < 2)
+        return false;
+    if (s.x < 0 || s.y < 0 || s.x + s.w > f->width || s.y + s.h > f->height)
+        return false;
+    plane = f->data[0] + (size_t)s.y * (size_t)f->linesize[0] + (size_t)s.x;
+    return ph_picture_thumb(plane, s.w, s.h, f->linesize[0], out) != 0;
+}
+
+static bool frame_planes(const AVFrame *f, ph_yuv_planes *planes)
+{
+    if (!f || !f->data[0] || !f->data[1] || !f->data[2])
+        return false;
+    if (f->format != AV_PIX_FMT_YUV420P && f->format != AV_PIX_FMT_YUVJ420P)
+        return false;
+    *planes = (ph_yuv_planes){f->data[0], f->data[1], f->data[2], f->linesize[0], f->linesize[1],
+                              f->width, f->height};
+    return true;
+}
+
+/* Window point of the press, in the decoded frame. */
+static bool press_video_pixel(const app *a, int *px, int *py)
+{
+    double vx, vy;
+    ph_rect s = a->view_screen;
+
+    if (!a->view_frame || s.w < 2 || s.h < 2)
+        return false;
+    if (!ph_window_picture_point(a->win, a->pull.press_x, a->pull.press_y, &vx, &vy))
+        return false;
+    *px = s.x + (int)(vx * (double)s.w);
+    *py = s.y + (int)(vy * (double)s.h);
+    if (*px < 0 || *py < 0 || *px >= a->view_frame->width || *py >= a->view_frame->height)
+        return false;
+    return true;
+}
+
+static void drop_pull_snapshot(app *a)
+{
+    a->pull_snap = false;
+    if (a->pull_frame)
+        av_frame_unref(a->pull_frame);
+}
+
+/* Keeps the frame and point under an armed press for begin_pull. */
+static void snap_pull(app *a)
+{
+    drop_pull_snapshot(a);
+    if (!a->pull.armed || !a->pull_frame || !a->view_frame || !a->view_frame->data[0]
+        || !press_video_pixel(a, &a->pull_px, &a->pull_py))
+        return;
+    a->pull_snap = av_frame_ref(a->pull_frame, a->view_frame) == 0;
+}
+
+static bool copy_file(const char *src, const char *dest)
+{
+    FILE *in = fopen(src, "rb");
+    FILE *out;
+    char buf[65536];
+    size_t n;
+
+    if (!in)
+        return false;
+    out = fopen(dest, "wb");
+    if (!out) {
+        fclose(in);
+        return false;
+    }
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            fclose(in);
+            fclose(out);
+            remove(dest);
+            return false;
+        }
+    }
+    fclose(in);
+    if (fclose(out) != 0) {
+        remove(dest);
+        return false;
+    }
+    return true;
+}
+
+static bool desktop_copy(const char *src)
+{
+    const char *home = getenv("HOME");
+    const char *base = strrchr(src, '/');
+    char dest[1024];
+
+    if (!home || !home[0] || !base || !base[1])
+        return false;
+    if (snprintf(dest, sizeof dest, "%s/Desktop/%s", home, base + 1) >= (int)sizeof dest)
+        return false;
+    if (!strcmp(src, dest))
+        return true;
+    return copy_file(src, dest);
+}
+
+static void end_pull(app *a)
+{
+    bool placed = false;
+    int note = a->pull_note;
+    char saved[768];
+
+    snprintf(saved, sizeof saved, "%s", a->pull_path);
+    if (ph_xdnd_busy())
+        placed = ph_xdnd_drop();
+    if (saved[0] && note == 3 && !placed) {
+        if (desktop_copy(saved))
+            PH_LOGI("photo pull: original on the Desktop (%s)", saved);
+        else
+            PH_LOGW("photo pull: original stayed at %s", saved);
+    }
+    ph_pull_release(&a->pull);
+    drop_pull_snapshot(a);
+    a->pull_note = 0;
+    a->pull_hold = false;
+    a->pull_path[0] = 0;
+    update_title(a);
+    if (note == 3)
+        ph_window_set_detail(a->win, placed ? "Pulled the original photo"
+                                            : "Original photo saved on the Desktop");
+    else if (note == 4)
+        ph_window_set_detail(a->win, "No original matched that photo");
+    else if (note == 1)
+        ph_window_set_detail(a->win, "Open Porthole on the iPhone, then drag the photo again");
+    else if (note == 5)
+        ph_window_set_detail(a->win, "Drag one photo, not the page around it");
+    else if (note == 2)
+        ph_window_set_detail(a->win, "iPhone did not answer");
+}
+
+static void note_origin(app *a)
+{
+    char path[768];
+    ph_origin_result result;
+
+    if (!a->pull.pulling)
+        return;
+    result = ph_origin_take(a->origin, path, sizeof path);
+    if (result == PH_ORIGIN_FILE) {
+        int gx, gy;
+
+        snprintf(a->pull_path, sizeof a->pull_path, "%s", path);
+        if (!ph_xdnd_busy()) {
+            SDL_GetGlobalMouseState(&gx, &gy);
+            if (ph_xdnd_begin(SDL_GetWindowFromID(ph_window_id(a->win)), path))
+                ph_xdnd_motion(gx, gy);
+        } else {
+            ph_xdnd_set_path(path);
+        }
+        if (a->pull_note != 3) {
+            a->pull_note = 3;
+            ph_window_set_detail(a->win, "Pulling the original photo");
+        }
+        if (a->pull_hold)
+            end_pull(a);
+    } else if (result == PH_ORIGIN_MISS && a->pull_note != 4) {
+        a->pull_note = 4;
+        ph_window_set_detail(a->win, "No original matched that photo");
+        if (a->pull_hold)
+            end_pull(a);
+    }
+}
+
+static void track_pull(app *a)
+{
+    int gx, gy;
+
+    if (!a->pull.pulling && !ph_xdnd_busy())
+        return;
+    SDL_GetGlobalMouseState(&gx, &gy);
+    ph_xdnd_motion(gx, gy);
+    note_origin(a);
+}
+
+static void begin_pull(app *a)
+{
+    ph_yuv_planes planes;
+    ph_rect picture;
+    uint64_t hash;
+    double aspect;
+    int px, py;
+    uint8_t thumb[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
+    bool have_thumb;
+
+    ph_abs_release_all(&a->abs, SDL_GetTicks64());
+    ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
+    SDL_CaptureMouse(SDL_TRUE);
+    a->pull_path[0] = 0;
+    a->pull_hold = false;
+    ph_origin_take(a->origin, NULL, 0); /* a late reply belongs to the previous drag */
+    if (!a->pull_snap || !frame_planes(a->pull_frame, &planes)) {
+        a->pull_note = 5;
+        ph_window_set_detail(a->win, "Drag one photo, not the page around it");
+        PH_LOGW("photo pull: drag was not on a photo (no picture under the press)");
+        return;
+    }
+    px = a->pull_px;
+    py = a->pull_py;
+    picture = ph_video_item_rect(&planes, px, py);
+    if (picture.w < 64 || picture.h < 64) {
+        a->pull_note = 5;
+        ph_window_set_detail(a->win, "Drag one photo, not the page around it");
+        PH_LOGW("photo pull: drag was not on a photo (no edges around %d,%d)", px, py);
+        return;
+    }
+    /* The phone hashes a 64-pixel copy, so a dHash of single video pixels is mostly
+     * texture noise. Hashing the averaged thumb samples what the phone samples. */
+    have_thumb = thumb_rect(a->pull_frame, picture, thumb);
+    hash = have_thumb ? ph_picture_dhash(thumb, PH_PICTURE_THUMB, PH_PICTURE_THUMB, PH_PICTURE_THUMB)
+                      : hash_rect(a->pull_frame, picture);
+    aspect = (double)picture.w / (double)picture.h;
+    if (!ensure_pull_dir(a)
+        || !ph_origin_ask(a->origin, hash, aspect, have_thumb ? thumb : NULL, a->pull_dir)) {
+        a->pull_note = 1;
+        ph_window_set_detail(a->win, "Open Porthole on the iPhone, then drag the photo again");
+        PH_LOGW("photo pull: iPhone is not connected");
+        return;
+    }
+    a->pull_note = 2;
+    ph_window_set_detail(a->win, "Asking the iPhone for this photo");
+    PH_LOGI("photo pull: item %dx%d aspect %.4f hash %016llx", picture.w, picture.h, aspect,
+            (unsigned long long)hash);
+}
+
+static void follow_pull(app *a)
+{
+    int x, y;
+
+    if (a->pull_hold && SDL_GetTicks64() - a->pull_hold_at > 60000) {
+        PH_LOGW("photo pull: iPhone did not answer");
+        end_pull(a);
+    }
+    if (a->pull.armed) {
+        SDL_GetMouseState(&x, &y);
+        if (ph_pull_motion(&a->pull, on_picture(a, x, y), x, y))
+            begin_pull(a);
+    }
+    if (a->pull.pulling || ph_xdnd_busy())
+        track_pull(a);
+    else if (!a->pull.armed)
+        SDL_EventState(SDL_SYSWMEVENT, SDL_DISABLE);
+}
+
+static void finish_pull(app *a)
+{
+    note_origin(a);
+    if (a->pull.pulling && a->pull_note == 2) {
+        a->pull_hold = true;
+        a->pull_hold_at = SDL_GetTicks64();
+        return;
+    }
+    end_pull(a);
+}
+
 static void mouse_motion(app *a, const SDL_MouseMotionEvent *event)
 {
+    if (a->pull.armed
+        && ph_pull_motion(&a->pull, on_picture(a, event->x, event->y), event->x, event->y))
+        begin_pull(a);
+    if (a->pull.pulling) {
+        track_pull(a);
+        return;
+    }
     if (a->absolute) {
         double x, y;
         if (abs_coordinates(a, event->x, event->y, &x, &y)) {
@@ -541,6 +875,21 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
     uint8_t button = ph_mouse_input_button(event->button);
     if (!button)
         return;
+    if (a->pull_hold)
+        return;
+    if (event->button == SDL_BUTTON_LEFT) {
+        if (event->type == SDL_MOUSEBUTTONDOWN) {
+            ph_pull_press(&a->pull, !a->setup.visible && !ph_window_help_visible(a->win),
+                          on_picture(a, event->x, event->y), event->x, event->y);
+            snap_pull(a);
+        } else if (a->pull.pulling) {
+            finish_pull(a);
+            return;
+        } else {
+            ph_pull_release(&a->pull);
+            drop_pull_snapshot(a);
+        }
+    }
     if (a->absolute) {
         bool down = event->type == SDL_MOUSEBUTTONDOWN;
         x = a->abs.want_x;
@@ -895,10 +1244,21 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         return;
     }
     if (down && sc == SDL_SCANCODE_ESCAPE && (ph_gesture_active(&a->gesture)
-        || a->pointer.buttons || a->pointer.requested_buttons || a->input.buttons)) {
+        || a->pointer.buttons || a->pointer.requested_buttons || a->input.buttons
+        || (a->absolute && (a->abs.held || a->abs.buttons || a->abs.pending)))) {
         cancel_control_intent(a, SDL_GetTicks64());
         ph_input_release_all(&a->input);
         SDL_CaptureMouse(SDL_FALSE);
+        a->gesture_keys[sc] = true;
+        return;
+    }
+    /* Eject toggles the iPhone keyboard, and iOS applies it while a text field is focused. */
+    if (down && !e->repeat && sc == SDL_SCANCODE_K && (e->keysym.mod & KMOD_LALT)) {
+        if (a->phone_name[0] && a->input.enabled && a->link && !a->keyboard_lift_at) {
+            send_consumer(a, PH_HID_CONSUMER_EJECT);
+            a->keyboard_lift_at = SDL_GetTicks64() + 50;
+            PH_LOGI("iPhone keyboard: toggled");
+        }
         a->gesture_keys[sc] = true;
         return;
     }
@@ -1461,7 +1821,11 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
 
     switch (e->type) {
     case SDL_QUIT:
+        ph_xdnd_cancel();
         return false;
+    case SDL_SYSWMEVENT:
+        ph_xdnd_syswm(e->syswm.msg);
+        break;
     case SDL_WINDOWEVENT:
         if (e->window.windowID != win_id)
             break;
@@ -1469,6 +1833,11 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
             e->window.event == SDL_WINDOWEVENT_EXPOSED)
             ph_window_redraw(a->win);
         else if (e->window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+            /* A file drag already let go of the phone; a press that is only armed
+             * is still a phone drag and must be released like one. */
+            if (a->pull.pulling)
+                break;
+            ph_pull_release(&a->pull);
             a->input_pending = false;
             PH_LOGD("pointer cancel: window focus lost");
             if (a->setup.calibrating) {
@@ -1481,6 +1850,8 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
             memset(a->gesture_keys, 0, sizeof a->gesture_keys);
             SDL_CaptureMouse(SDL_FALSE);
         } else if (e->window.event == SDL_WINDOWEVENT_LEAVE) {
+            if (a->pull.armed || a->pull.pulling)
+                break;
             PH_LOGD("pointer cancel: mouse left window");
             if (a->setup.calibrating)
                 break; /* calibration is autonomous; the mouse may be outside the picture */
@@ -1724,6 +2095,7 @@ int ph_app_run(const ph_app_options *opt)
     a.pointer_baseline = av_frame_alloc();
     a.pointer_reference = av_frame_alloc();
     a.pointer_after = av_frame_alloc();
+    a.pull_frame = av_frame_alloc();
     a.win = ph_window_create(PORTHOLE_NAME);
     a.dec = ph_decoder_start(on_frame, &a);
     if (opt->audio)
@@ -1742,6 +2114,12 @@ int ph_app_run(const ph_app_options *opt)
     if (a.polish)
         ph_polish_apply_saved(a.polish, SDL_GetWindowFromID(ph_window_id(a.win)));
     update_title(&a);
+    {
+        char hint[96];
+        a.origin = ph_origin_start(hint, sizeof hint);
+        if (a.origin && hint[0])
+            ph_window_set_pull_hint(a.win, hint);
+    }
     if (opt->diagnostics)
         ph_window_toggle_diagnostics(a.win);
     char setup_done[16];
@@ -1766,6 +2144,7 @@ int ph_app_run(const ph_app_options *opt)
          * often while input is on its way to the phone. */
         bool busy = a.pointer.phase != PH_POINTER_IDLE || a.pointer.count
                     || a.wheel.in_flight || a.wheel.waiting_frame || ph_gesture_active(&a.gesture)
+                    || a.keyboard_lift_at
                     || (a.absolute && (ph_abs_busy(&a.abs) || a.abs.wheel != 0
                                        || (a.abs.want_valid && (a.abs.x != a.abs.want_x
                                                                 || a.abs.y != a.abs.want_y))));
@@ -1775,6 +2154,11 @@ int ph_app_run(const ph_app_options *opt)
             } while (SDL_PollEvent(&e));
         }
         ph_window_tick(a.win);
+        follow_pull(&a);
+        if (a.keyboard_lift_at && SDL_GetTicks64() >= a.keyboard_lift_at) {
+            a.keyboard_lift_at = 0;
+            send_consumer(&a, 0);
+        }
         if (a.absolute)
             ph_abs_tick(&a.abs, SDL_GetTicks64());
         if (a.audio)
@@ -1816,6 +2200,8 @@ int ph_app_run(const ph_app_options *opt)
     rc = 0;
 
 done:
+    ph_xdnd_cancel();
+    ph_origin_stop(a.origin);
     if (a.usb_started) {
         atomic_store(&a.usb_stop, true);
         pthread_join(a.usb_thread, NULL);
@@ -1846,6 +2232,7 @@ done:
     av_frame_free(&a.pointer_baseline);
     av_frame_free(&a.pointer_reference);
     av_frame_free(&a.pointer_after);
+    av_frame_free(&a.pull_frame);
     SDL_Quit();
     return rc;
 }

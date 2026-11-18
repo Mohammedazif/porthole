@@ -3,6 +3,11 @@ target_link_libraries(test_hid_reports PRIVATE porthole_core)
 porthole_set_warnings(test_hid_reports)
 add_test(NAME hid_reports COMMAND test_hid_reports)
 
+add_executable(test_pull test_pull.c)
+target_link_libraries(test_pull PRIVATE porthole_core)
+porthole_set_warnings(test_pull)
+add_test(NAME pull COMMAND test_pull)
+
 add_executable(test_crop test_crop.c)
 target_link_libraries(test_crop PRIVATE porthole_core)
 porthole_set_warnings(test_crop)

@@ -279,6 +279,10 @@ void ph_abs_tick(ph_abs *a, uint64_t now_ms)
         a->count--;
         return;
     }
+    /* A script that lost its button-up would leave the finger down and every
+     * later move would drag. The user is not holding a button here. */
+    if (a->buttons && !a->held && !a->pending && a->count == 0)
+        send(a, 0, a->x, a->y, now_ms);
     if (a->wheel != 0 && !a->held) {
         if (now_ms >= a->wheel_ms && now_ms - a->wheel_ms > WHEEL_QUIET_MS)
             a->wheel = 0; /* the wheel stopped a while ago: don't keep scrolling */
