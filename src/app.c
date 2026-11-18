@@ -71,6 +71,8 @@ typedef struct app {
     ph_pointer pointer;
     ph_abs abs; /* used instead of `pointer` in absolute mode */
     bool absolute;
+    SDL_Scancode abs_panel; /* Alt key whose panel is open (toggle closes it), or 0 */
+    Uint64 abs_panel_at;
     ph_scroll wheel;
     ph_mouse_input mouse_input;
     bool wheel_point_valid;
@@ -544,6 +546,8 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
         if (!abs_coordinates(a, event->x, event->y, &x, &y) && down)
             return; /* a press outside the picture does nothing; a release always lifts */
         mark_input(a, event->timestamp);
+        if (down)
+            a->abs_panel = 0; /* clicking may have closed or left the panel */
         ph_abs_button(&a->abs, button, down, x, y, SDL_GetTicks64());
         SDL_CaptureMouse(a->abs.held ? SDL_TRUE : SDL_FALSE);
         return;
@@ -598,6 +602,7 @@ static void scroll(app *a, const SDL_MouseWheelEvent *event)
             notches = -notches;
         if (abs_coordinates(a, x, y, &nx, &ny) && notches != 0) {
             mark_input(a, event->timestamp);
+            a->abs_panel = 0;
             ph_abs_wheel(&a->abs, notches, nx, ny, a->feed_mode, SDL_GetTicks64());
         }
         return;
@@ -899,8 +904,22 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         Uint64 now = SDL_GetTicks64();
         double px = a->abs.want_x, py = a->abs.want_y;
         bool shift = (e->keysym.mod & KMOD_SHIFT) != 0, handled = true, sent = true;
+        bool panel = sc == SDL_SCANCODE_S || sc == SDL_SCANCODE_C || sc == SDL_SCANCODE_N;
+        bool close = panel && !e->repeat && a->abs_panel == sc && now - a->abs_panel_at < 60000;
+        if (!e->repeat && (sc == SDL_SCANCODE_H || close)) {
+            /* Home swipe; a second press of the same panel key closes that panel
+             * the same way. The consumer Home key cannot replace it: with the
+             * absolute map, iOS 26.6.1 opened Spotlight for it instead of Home. */
+            sent = ph_abs_home(&a->abs, now);
+            a->abs_panel = 0;
+            a->gesture_keys[sc] = true;
+            mark_input(a, e->timestamp);
+            if (!sent)
+                PH_LOGD("gesture skipped: a mouse button is held");
+            return;
+        }
         switch (sc) {
-        case SDL_SCANCODE_H: sent = ph_abs_home(&a->abs, now); break;
+        case SDL_SCANCODE_H: break; /* key repeat */
         case SDL_SCANCODE_S: sent = ph_abs_app_switcher(&a->abs, now); break;
         case SDL_SCANCODE_C: sent = ph_abs_control_center(&a->abs, now); break;
         case SDL_SCANCODE_N: sent = ph_abs_notification_center(&a->abs, now); break;
@@ -934,6 +953,12 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
             break;
         }
         default: handled = false; break;
+        }
+        /* Only a handled shortcut changes the open-panel record: Alt itself
+         * arrives here too, and clearing on it broke the second-press close. */
+        if (handled && !e->repeat) {
+            a->abs_panel = panel && sent ? sc : 0;
+            a->abs_panel_at = now;
         }
         if (handled) {
             a->gesture_keys[sc] = true;

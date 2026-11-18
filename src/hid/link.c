@@ -656,6 +656,7 @@ static bool send_frame(ph_hid_link *l, uint8_t type, const uint8_t *payload, siz
         PH_LOGD("hid -> %s: %s", type == PH_LINK_KEYBOARD   ? "keyboard"
                                  : type == PH_LINK_MOUSE    ? "mouse"
                                  : type == PH_LINK_CONSUMER ? "consumer"
+                                 : type == PH_LINK_ABS_MOUSE ? "absolute"
                                                             : "control",
                 hex);
     }

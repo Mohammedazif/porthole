@@ -166,6 +166,33 @@ int main(void)
     for (int i = 0; i < count_; i++)
         CHECK(log_[i].y <= .97 + 1e-9);
 
+    /* A fast wheel spin never leaves a queue of drags running after it stops:
+     * one drag in progress plus at most one more. */
+    fresh(&a);
+    ph_abs_move(&a, .5, .5, now_);
+    run_until(&a, now_ + 300);
+    for (int i = 0; i < 30; i++) {
+        ph_abs_wheel(&a, -1, .5, .5, false, now_);
+        run_until(&a, now_ + 10);
+    }
+    uint64_t wheel_stopped = now_;
+    run_until(&a, now_ + 3000);
+    int after_stop = 0;
+    for (int i = 1; i < count_; i++)
+        if ((log_[i].buttons & 1) && !(log_[i - 1].buttons & 1) && log_[i].at > wheel_stopped)
+            after_stop++;
+    CHECK(after_stop <= 1);
+    CHECK(log_[count_ - 1].buttons == 0);
+    /* Wheel under a resting pointer presses without the settle delay. */
+    fresh(&a);
+    ph_abs_move(&a, .5, .5, now_);
+    run_until(&a, now_ + 300);
+    uint64_t wheel_at = now_;
+    ph_abs_wheel(&a, -1, .5, .5, false, now_);
+    run_until(&a, now_ + 500);
+    p = first_with_button();
+    CHECK(p >= 0 && log_[p].at - wheel_at < 20);
+
     /* Feed mode: one long swipe per wheel burst. */
     fresh(&a);
     ph_abs_move(&a, .5, .5, now_);

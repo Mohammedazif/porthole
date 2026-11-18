@@ -48,6 +48,7 @@ typedef struct ph_abs {
     unsigned int head, count;
     double wheel;                /* unscrolled notches (positive: content down) */
     double wheel_x, wheel_y;
+    uint64_t wheel_ms;           /* last wheel notch */
     uint64_t feed_until_ms;      /* feed mode: ignore the rest of a wheel burst */
 } ph_abs;
 

@@ -8,6 +8,10 @@
 #define WHEEL_GLIDE_MS 150
 #define FEED_SWIPE 0.45
 #define FEED_BURST_MS 600
+/* A queued wheel drag is dropped once the wheel has been quiet this long, so a
+ * drag never "scrolls on its own" well after the user stopped (each drag takes
+ * ~370 ms, a fast spin sends a notch every ~10 ms). */
+#define WHEEL_QUIET_MS 250
 
 static double clamp01(double v)
 {
@@ -50,11 +54,13 @@ static bool push(ph_abs *a, uint64_t at_ms, uint8_t buttons, double x, double y)
 
 /* Builds a finger stroke after anything already queued. Returns its end time. */
 static uint64_t stroke(ph_abs *a, uint64_t start_ms, double x1, double y1, double x2, double y2,
-                       uint32_t glide_ms, uint32_t hold_ms)
+                       uint32_t glide_ms, uint32_t hold_ms, bool settled)
 {
     uint64_t t = start_ms;
-    push(a, t, 0, x1, y1);
-    t += PH_ABS_SETTLE_MS;
+    if (!settled) {
+        push(a, t, 0, x1, y1);
+        t += PH_ABS_SETTLE_MS;
+    }
     push(a, t, 1, x1, y1);
     int steps = (int)(glide_ms / PH_ABS_REPORT_MS);
     for (int i = 1; i <= steps; i++) {
@@ -80,8 +86,12 @@ static bool scripted(ph_abs *a, double x1, double y1, double x2, double y2, uint
     if (a->held || a->pending)
         return false; /* never script over a finger the user is holding */
     unsigned int before = a->count;
-    uint64_t end = stroke(a, script_start(a, now_ms), x1, y1, x2, y2, glide_ms, hold_ms);
-    if (a->count - before < 4) { /* queue full: drop the partial stroke */
+    /* Already resting at the start (e.g. the wheel under a still mouse): press now. */
+    bool settled = !a->count && a->sent_valid && !a->buttons && a->x == clamp01(x1)
+                   && a->y == clamp01(y1) && now_ms >= a->moved_ms
+                   && now_ms - a->moved_ms >= PH_ABS_SETTLE_MS;
+    uint64_t end = stroke(a, script_start(a, now_ms), x1, y1, x2, y2, glide_ms, hold_ms, settled);
+    if (a->count - before < 3) { /* queue full: drop the partial stroke */
         a->count = before;
         return false;
     }
@@ -115,7 +125,9 @@ bool ph_abs_tap(ph_abs *a, double x, double y, int count, uint32_t hold_ms, uint
 /* Edge gestures measured on iOS 26.6.1 (portrait picture fractions). */
 bool ph_abs_home(ph_abs *a, uint64_t now_ms)
 {
-    return scripted(a, .5, 1072.0 / 1080, .5, 600.0 / 1080, 120, 0, now_ms);
+    /* From the bottom pixel (the home-indicator zone): starting a few pixels
+     * higher, Control Center sometimes took the stroke as its own page swipe. */
+    return scripted(a, .5, 1, .5, 600.0 / 1080, 120, 0, now_ms);
 }
 
 bool ph_abs_app_switcher(ph_abs *a, uint64_t now_ms)
@@ -203,9 +215,18 @@ void ph_abs_wheel(ph_abs *a, double notches, double x, double y, bool feed_mode,
         scripted(a, .5, y1, .5, y1 + dy, 160, 0, now_ms);
         return;
     }
+    /* At most one drag's worth waits behind the running drag: a fast wheel spin
+     * otherwise left several drags queued that kept "scrolling" at a list's end
+     * after the wheel had stopped. */
+    double cap = WHEEL_MAX_DRAG / WHEEL_NOTCH;
     a->wheel += notches;
+    if (a->wheel > cap)
+        a->wheel = cap;
+    if (a->wheel < -cap)
+        a->wheel = -cap;
     a->wheel_x = a->want_x;
     a->wheel_y = a->want_y;
+    a->wheel_ms = now_ms;
     ph_abs_tick(a, now_ms);
 }
 
@@ -216,9 +237,7 @@ static void start_wheel_drag(ph_abs *a, uint64_t now_ms)
         drag = WHEEL_MAX_DRAG;
     if (drag < -WHEEL_MAX_DRAG)
         drag = -WHEEL_MAX_DRAG;
-    a->wheel -= drag / WHEEL_NOTCH;
-    if (fabs(a->wheel) < .01)
-        a->wheel = 0;
+    a->wheel = 0; /* one drag covers the backlog; anything beyond its cap is dropped */
     /* Scrolling down (negative notches) moves content up: the finger goes up. Keep
      * the stroke on screen by starting from the side it moves away from. */
     double y1 = a->wheel_y, y2 = a->wheel_y + drag;
@@ -256,8 +275,12 @@ void ph_abs_tick(ph_abs *a, uint64_t now_ms)
         return;
     }
     if (a->wheel != 0 && !a->held) {
-        start_wheel_drag(a, now_ms);
-        return;
+        if (now_ms >= a->wheel_ms && now_ms - a->wheel_ms > WHEEL_QUIET_MS)
+            a->wheel = 0; /* the wheel stopped a while ago: don't keep scrolling */
+        else {
+            start_wheel_drag(a, now_ms);
+            return;
+        }
     }
     if (a->want_valid && (!a->sent_valid || a->x != a->want_x || a->y != a->want_y)
         && (!a->sent_valid || now_ms - a->sent_ms >= PH_ABS_REPORT_MS))
