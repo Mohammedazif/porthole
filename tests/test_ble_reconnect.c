@@ -89,6 +89,13 @@ void ph_window_redraw(ph_window *w) { (void)w; }
 void ph_window_clear(ph_window *w) { (void)w; }
 unsigned int ph_window_id(const ph_window *w) { (void)w; return 1; }
 void ph_window_destroy(ph_window *w) { (void)w; }
+bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
+{
+    (void)w;
+    (void)event;
+    return false;
+}
+
 bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy)
 {
     (void)w;

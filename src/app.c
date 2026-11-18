@@ -222,9 +222,13 @@ static void update_title(app *a)
     char title[256];
     const char *control = a->opt->bluetooth && a->opt->ble_helper ? a->ble_status : "off";
 
+    /* The relative pointer has to see the AssistiveTouch dot, so a photo or
+     * video that is not the phone screen pauses it. The absolute pointer does
+     * not: a click is that spot on the phone. */
+    bool layout_pauses_pointer = a->presentation_mode && !a->absolute;
     if (a->phone_name[0])
         snprintf(title, sizeof title, "%s - %s  [Bluetooth control: %s]%s", PORTHOLE_NAME,
-                 a->phone_name, control, a->presentation_mode ? " [Different display layout]"
+                 a->phone_name, control, layout_pauses_pointer ? " [Different display layout]"
                                        : a->feed_mode ? " [Feed wheel]" : "");
     else
         snprintf(title, sizeof title,
@@ -238,8 +242,8 @@ static void update_title(app *a)
     }
     ph_window_set_title(a->win, title);
     ph_window_set_status(a->win, a->phone_name[0] != 0,
-                         !a->presentation_mode && !strcmp(control, "on"),
-                         a->presentation_mode ? "Return to phone view" : control);
+                         !layout_pauses_pointer && !strcmp(control, "on"),
+                         layout_pauses_pointer ? "Return to phone view" : control);
     ph_setup_update(&a->setup, a->input.enabled,
                      a->phone_name[0] && a->view_frame && a->view_frame->data[0]);
     ph_window_set_setup(a->win, &a->setup);
@@ -491,11 +495,11 @@ static bool current_pointer_coordinates(app *a, double *nx, double *ny, double *
     return pointer_coordinates(a, (int)local_x, (int)local_y, nx, ny, aspect);
 }
 
-/* Absolute mode: window position -> phone picture fraction. */
+/* Absolute mode: window position -> phone picture fraction, including a photo
+ * or video whose shape is not the phone screen. */
 static bool abs_coordinates(app *a, int x, int y, double *nx, double *ny)
 {
-    if (!a->link || !a->input.enabled || !a->phone_name[0] || a->presentation_mode
-        || a->setup.visible)
+    if (!a->link || !a->input.enabled || !a->phone_name[0] || a->setup.visible)
         return false;
     return ph_window_to_video(a->win, x, y, nx, ny);
 }
@@ -1321,8 +1325,10 @@ static void show_frame(app *a, const AVFrame *f)
                                 && !presentation, SDL_GetTicks64());
         SDL_CaptureMouse(SDL_FALSE);
         PH_LOGI("pointer mapping: %s (%dx%d, phone aspect %.4f)",
-                presentation ? "paused; display layout differs from phone"
-                             : "phone layout restored", screen.w, screen.h, a->portrait_aspect);
+                presentation ? (a->absolute ? "photo or video; absolute pointer still active"
+                                            : "paused; display layout differs from phone")
+                             : "phone layout restored",
+                screen.w, screen.h, a->portrait_aspect);
         update_title(a);
     }
     if (screen.w != a->picture_w || screen.h != a->picture_h) {
@@ -1494,12 +1500,14 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
             scroll(a, &e->wheel);
         break;
     case SDL_MOUSEMOTION:
-        if (e->motion.windowID == win_id)
+        if (e->motion.windowID == win_id && !ph_window_chrome_event(a->win, e))
             mouse_motion(a, &e->motion);
         break;
     case SDL_MOUSEBUTTONDOWN:
     case SDL_MOUSEBUTTONUP:
         if (e->button.windowID == win_id) {
+            if (ph_window_chrome_event(a->win, e))
+                break;
             if (a->setup.visible) {
                 if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT)
                     setup_action(a, ph_window_setup_click(a->win, e->button.x, e->button.y));

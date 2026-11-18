@@ -114,8 +114,8 @@ static unsigned int wheel_before_shift;
 static unsigned int control_mouse_reports;
 static int presentation_width = PHONE_WIDTH, presentation_height = PHONE_HEIGHT;
 static int presented_width, presented_height;
-static bool presentation_blocked, landscape_accepted;
-static unsigned int presentation_leaks;
+static bool presentation_blocked, landscape_accepted, absolute_presentation;
+static unsigned int presentation_leaks, abs_reports, abs_presses;
 #ifdef PH_TEST_WRAP_GLOBAL_MOUSE
 static SDL_Window *coordinate_window;
 static unsigned int desktop_queries;
@@ -320,6 +320,13 @@ void ph_window_video_size(const ph_window *w, int *width, int *height)
     *height = initial_frame ? (controls_mode == CONTROLS_PRESENTATION ? presented_height : PHONE_HEIGHT) : 0;
 }
 
+bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
+{
+    (void)w;
+    (void)event;
+    return false;
+}
+
 bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy)
 {
     (void)w;
@@ -370,6 +377,32 @@ static void push_presentation_inputs(void)
     push_key(SDL_SCANCODE_PAGEDOWN, true, KMOD_LALT);
     push_key(SDL_SCANCODE_PAGEDOWN, false, KMOD_LALT);
     push_key(SDL_SCANCODE_LALT, false, KMOD_NONE);
+}
+
+static void tick_absolute_presentation(void)
+{
+    Uint64 now = SDL_GetTicks64();
+    if (!mirroring || !initial_frame) return;
+    if (!controls_stage && control_ready && presented_width == PHONE_WIDTH
+        && presented_height == PHONE_HEIGHT) {
+        injected = true;
+        presentation_blocked = true;
+        presentation_width = 1920;
+        presentation_height = 1080;
+        controls_stage = 1;
+        publish_frame();
+    } else if (controls_stage == 1 && presented_width == 1920 && presented_height == 1080) {
+        controls_bad |= !control_ready;
+        push_motion(TARGET_X, TARGET_Y);
+        push_button(SDL_BUTTON_LEFT, true);
+        push_button(SDL_BUTTON_LEFT, false);
+        controls_stage = 2;
+        controls_at = now;
+    } else if (controls_stage == 2 && now - controls_at >= 400) {
+        controls_bad |= presentation_leaks != 0 || !control_ready || abs_presses < 1;
+        controls_done = true;
+        quit();
+    }
 }
 
 static void tick_presentation(void)
@@ -439,7 +472,11 @@ static void tick_presentation(void)
 static void tick_controls(void)
 {
     Uint64 now = SDL_GetTicks64();
-    if (controls_mode == CONTROLS_PRESENTATION) { tick_presentation(); return; }
+    if (controls_mode == CONTROLS_PRESENTATION) {
+        if (absolute_presentation) tick_absolute_presentation();
+        else tick_presentation();
+        return;
+    }
     if (!mirroring || !control_ready || !initial_frame) return;
     if (!controls_stage) {
         injected = true;
@@ -886,9 +923,15 @@ static unsigned int unexpected_abs_reports;
 bool ph_hid_link_abs_mouse(ph_hid_link *l, uint8_t buttons, double x, double y)
 {
     (void)l;
-    (void)buttons;
     (void)x;
     (void)y;
+    if (absolute_presentation) {
+        abs_reports++;
+        if (buttons & 1)
+            abs_presses++;
+        return true;
+    }
+    (void)buttons;
     unexpected_abs_reports++;
     return true;
 }
@@ -1075,6 +1118,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[1], "--controls-wheel")) controls_mode = CONTROLS_WHEEL;
         else if (!strcmp(argv[1], "--controls-feed")) controls_mode = CONTROLS_FEED;
         else if (!strcmp(argv[1], "--controls-presentation")) controls_mode = CONTROLS_PRESENTATION;
+        else if (!strcmp(argv[1], "--controls-presentation-absolute")) {
+            controls_mode = CONTROLS_PRESENTATION;
+            absolute_presentation = true;
+        }
 #ifdef PH_TEST_WRAP_GLOBAL_MOUSE
         else if (!strcmp(argv[1], "--controls-pointer-position")) controls_mode = CONTROLS_POINTER_POSITION;
 #endif
@@ -1132,7 +1179,8 @@ int main(int argc, char **argv)
 #endif
     SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
     ph_app_options options = {.name = "Idle-frame test", .bluetooth = true,
-                              .ble_helper = "unused fake helper"};
+                              .ble_helper = "unused fake helper",
+                              .absolute_pointer = absolute_presentation};
     int result = ph_app_run(&options);
     if (unexpected_abs_reports) {
         fprintf(stderr, "relative-mode run sent %u absolute reports\n", unexpected_abs_reports);
@@ -1160,6 +1208,11 @@ int main(int argc, char **argv)
                 && !presses && !releases;
         } else if (controls_mode == CONTROLS_WHEEL) {
             passed &= wheel_reports > 0 && pan_reports > 0 && !presses && !releases;
+        } else if (controls_mode == CONTROLS_PRESENTATION && absolute_presentation) {
+            passed &= abs_presses >= 1 && abs_reports >= 1 && !presentation_leaks && control_ready;
+            fprintf(passed ? stdout : stderr,
+                    "presentation absolute: pass=%d reports=%u presses=%u leaks=%u ready=%d\n",
+                    passed, abs_reports, abs_presses, presentation_leaks, control_ready);
         } else if (controls_mode == CONTROLS_PRESENTATION) {
             passed &= landscape_accepted && !presentation_leaks && presses == 1 && releases == 1
                 && release_synced && !wheel_reports && !pan_reports

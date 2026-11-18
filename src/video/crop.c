@@ -49,6 +49,53 @@ static ph_rect make_rect(int left, int right, int height)
     return r;
 }
 
+/* First index in [lo, hi] whose column is not black. */
+static int first_nonblack(const ph_yuv_planes *p, int lo, int hi)
+{
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (column_black(p, mid))
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+/* Last index in [lo, hi] whose column is not black. */
+static int last_nonblack(const ph_yuv_planes *p, int lo, int hi)
+{
+    while (lo < hi) {
+        int mid = lo + (hi - lo + 1) / 2;
+        if (column_black(p, mid))
+            hi = mid - 1;
+        else
+            lo = mid;
+    }
+    return lo;
+}
+
+/* A portrait picture centred between black side bars. Wider than the phone is
+ * still the picture the user is looking at; a landscape frame that fills the
+ * canvas is left whole. */
+static bool centred_portrait(const ph_yuv_planes *p, ph_rect *out)
+{
+    int W = p->width, H = p->height;
+    int left, right, cw;
+
+    if (W < 16 || !column_black(p, 0) || !column_black(p, W - 1))
+        return false;
+    left = first_nonblack(p, 0, W / 2);
+    right = last_nonblack(p, W / 2, W - 1);
+    if (left < 8 || W - 1 - right < 8 || abs(left - (W - 1 - right)) > 8)
+        return false;
+    cw = right - left + 1;
+    if (cw < 8 || cw >= H || (double)cw / H < 0.30)
+        return false;
+    *out = make_rect(left, right + 1, H);
+    return true;
+}
+
 static ph_rect content_rect(const ph_yuv_planes *p, double portrait_aspect, bool *ambiguous)
 {
     ph_rect full = {0, 0, p->width, p->height};
@@ -73,27 +120,19 @@ static ph_rect content_rect(const ph_yuv_planes *p, double portrait_aspect, bool
     if (known_aspect) {
         int content_w = (int)lround(H * portrait_aspect);
         int bar = (W - content_w) / 2;
-        if (bar < 8)
-            return full;
-        if (columns_black(p, 0, bar - EDGE_MARGIN) &&
+        if (bar >= 8 && columns_black(p, 0, bar - EDGE_MARGIN) &&
             columns_black(p, W - bar + EDGE_MARGIN, W))
             return make_rect(bar, W - bar, H);
-        return full;
     }
 
-    /* Unknown phone shape: scan in from both edges for the first non-black column. */
+    /* A photo or video can sit in the middle, wider than the phone, with black
+     * bars on both sides. Show that portrait picture instead of the landscape canvas. */
     {
-        int left = 0, right = W - 1;
-        while (left < W / 2 && column_black(p, left))
-            left++;
-        while (right > W / 2 && column_black(p, right))
-            right--;
-        if (left < 8 || W - 1 - right < 8 || abs(left - (W - 1 - right)) > 8)
-            return full; /* no bars, or not centred: real landscape content */
-        if ((double)(right - left + 1) / H < 0.35 || (double)(right - left + 1) / H > 0.75)
-            return full; /* not phone-shaped */
-        return make_rect(left, right + 1, H);
+        ph_rect portrait;
+        if (centred_portrait(p, &portrait))
+            return portrait;
     }
+    return full;
 }
 
 ph_rect ph_video_content_rect(const ph_yuv_planes *p, double portrait_aspect)

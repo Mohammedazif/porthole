@@ -121,11 +121,13 @@ forwarded, with release ownership retained if modifiers are released first.
 **Photos and external presentations:** a full-screen photo can send a separate
 landscape presentation to AirPlay while the iPhone keeps its portrait controls.
 The Photos library grid mirrors normally on the tested phone. Porthole cannot
-reconstruct UI that the iPhone does not send. When the displayed shape differs
-from the learned phone shape in either orientation, Porthole shows viewing-only
-guidance and pauses mouse targeting; returning to a matching phone view restores
-it without re-pairing. This shape check cannot detect separate content with the
-same aspect ratio, or establish the phone shape before a portrait frame arrives.
+reconstruct UI that the iPhone does not send. With the absolute pointer, the
+mouse, wheel, and keyboard keep working on that picture: a click is that fraction
+of the phone screen. The relative pointer still pauses, and the window says
+"Return to phone view", because it has to see the AssistiveTouch dot. Returning
+to a matching phone view restores it without re-pairing. This shape check cannot
+detect separate content with the same aspect ratio, or establish the phone shape
+before a portrait frame arrives.
 Photos double-tap zoom has **not** passed a live check. The timed two-press sequence
 passes transport tests, which do not prove iOS recognizes it as a native double-tap.
 Apps can choose separate content for an external display
@@ -259,14 +261,17 @@ Installer/uninstaller work remains with the separate polish workstream.
 ## Repository layout
 
 ```
-src/            Porthole's own code
+src/            one source tree for the Windows and Linux builds
   core/         logging, version info, local configuration
   control/      keyboard state, shortcuts, pointer actions and wheel routing
   hid/          HID reports and the framed Bluetooth helper connection
   airplay/      Wi-Fi receiver
   video/        decoding, phone-screen cropping, cursor and scroll-indicator detection
-  ui/           SDL mirror window, connection guidance and local help
-helpers/        platform-specific Bluetooth helper (BlueZ on Linux)
+  ui/           SDL mirror window, branded bar, help and setup, shared by both builds
+    generated/  embedded brand pixels, produced from branding/porthole
+helpers/        Bluetooth helpers; the window does not fork per platform
+  ble-bluez/    Linux helper
+  ble-winrt/    Windows helper
 tests/          unit tests (ctest)
 cmake/          build helpers (warnings, UxPlay integration)
 scripts/        dependency installers for Linux and Windows (MSYS2)

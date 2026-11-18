@@ -21,6 +21,7 @@
 #include "touch/wda.h"
 #include "touch/wda_net.h"
 #include "ui/chrome.h"
+#include "ui/window.h"
 #include "ui/tray.h"
 #include "video/codecs.h"
 
@@ -270,7 +271,7 @@ void ph_polish_layout(ph_polish *polish, SDL_Window *window, int video_w, int vi
             insets.right = right;
         }
         inner_w = bounds.w - insets.left - insets.right;
-        inner_h = bounds.h - insets.top - insets.bottom;
+        inner_h = bounds.h - insets.top - insets.bottom - PH_WINDOW_BAR_PX;
         if (inner_w < 1)
             inner_w = 1;
         if (inner_h < 1)
@@ -278,6 +279,7 @@ void ph_polish_layout(ph_polish *polish, SDL_Window *window, int video_w, int vi
         SDL_GetWindowPosition(window, &cur_x, &cur_y);
         SDL_GetWindowSize(window, &cur_w, &cur_h);
         ph_chrome_one_to_one(video_w, video_h, inner_w, inner_h, &polish->place.w, &polish->place.h);
+        polish->place.h += PH_WINDOW_BAR_PX;
         ph_chrome_place_client(polish->place.w, polish->place.h, bounds.x, bounds.y, bounds.w,
                                bounds.h, &insets, cur_x, cur_y, cur_w, cur_h, center,
                                &polish->place.x, &polish->place.y);

@@ -67,6 +67,7 @@ if(PORTHOLE_WITH_AIRPLAY)
         audio/player.c
         hid/link.c
         ui/window.c
+        ui/generated/brand_art.c
         ui/chrome.c
         video/decoder.c
         media/shot.c

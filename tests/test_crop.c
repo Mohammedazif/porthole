@@ -107,6 +107,18 @@ int main(void)
         CHECK(r.x == 710 && r.w == 500);
         free_frame(&f);
     }
+    /* A portrait photo wider than the phone, centred in a 1920x1080 canvas. */
+    {
+        frame f = make_frame(1920, 1080, 16);
+        int content_w = 808; /* about 3:4, still portrait */
+        int bar = (1920 - content_w) / 2;
+        paint(&f, bar, bar + content_w, 180);
+        ph_rect r = detect(&f, 0.463);
+        CHECK(r.x == bar && r.w == content_w && r.y == 0 && r.h == 1080);
+        r = detect(&f, 0);
+        CHECK(r.x == bar && r.w == content_w);
+        free_frame(&f);
+    }
     /* Real landscape content filling the frame: no crop. */
     {
         frame f = make_frame(1920, 1080, 90);

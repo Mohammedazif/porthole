@@ -9,6 +9,7 @@
 #include <libavutil/pixfmt.h>
 
 #include "core/log.h"
+#include "ui/brand_art.h"
 #include "ui/placement.h"
 
 #define RESIZE_SETTLE_MS 400 /* a new picture size must last this long before resizing */
@@ -33,6 +34,14 @@ struct ph_window {
     ph_metrics_snapshot metrics;
     unsigned int queued_packets;
     uint64_t discarded_packets, superseded_frames;
+    SDL_Texture *lockup;
+    SDL_Texture *mark;
+    char title[160];
+    int chrome_hover;
+    int chrome_press;
+    bool chrome_down;
+    bool chrome_drag;
+    int drag_dx, drag_dy;
 };
 
 static void place_window(ph_window *w, int pic_w, int pic_h, bool center);
@@ -107,6 +116,47 @@ static void draw_glyph(SDL_Renderer *renderer, char c, int x, int y, int scale)
     SDL_RenderFillRects(renderer, pixels, count);
 }
 
+/* Walk wrapped text the same way draw_text does. Returns the height in pixels. */
+static int text_height(const char *text, int width, int scale)
+{
+    int x = 0, y = 0, step, line;
+
+    if (scale < 1)
+        scale = 1;
+    step = 6 * scale;
+    line = 10 * scale;
+    if (!text || width < step)
+        return line;
+    while (*text) {
+        if (*text == '\n') {
+            x = 0;
+            y += line;
+            text++;
+            continue;
+        }
+        if (*text == ' ') {
+            if (x != 0)
+                x += step;
+            text++;
+            continue;
+        }
+        size_t word = strcspn(text, " \n");
+        if (x != 0 && x + (int)word * step > width) {
+            x = 0;
+            y += line;
+        }
+        for (size_t i = 0; i < word; i++) {
+            if (x + 5 * scale > width && x != 0) {
+                x = 0;
+                y += line;
+            }
+            x += step;
+        }
+        text += word;
+    }
+    return y + line;
+}
+
 /* Draw wrapped text without changing the renderer's scale or viewport; those are
  * shared with the video/coordinate mapping. Returns the next available line. */
 static int draw_text(SDL_Renderer *renderer, const char *text, int x, int y,
@@ -164,10 +214,11 @@ static bool wide_layout(int width, int height)
     return width > height + height / 5;
 }
 
-static const SDL_Color color_text = {232, 239, 246, 255};
-static const SDL_Color color_muted = {166, 182, 198, 255};
-static const SDL_Color color_accent = {89, 199, 255, 255};
-static const SDL_Color color_warn = {255, 186, 140, 255};
+static const SDL_Color color_text = {17, 17, 17, 255};
+static const SDL_Color color_muted = {104, 107, 112, 255};
+static const SDL_Color color_accent = {17, 17, 17, 255};
+static const SDL_Color color_warn = {154, 52, 18, 255};
+static const SDL_Color color_on_ink = {255, 255, 255, 255};
 
 #ifdef _WIN32
 #define PH_PAIR_LINE "Pair this PC's Bluetooth name."
@@ -191,11 +242,17 @@ static int draw_card(SDL_Renderer *renderer, SDL_Rect card, int scale, const cha
 
     if (inner < 6 * scale)
         return card.y;
-    paint(renderer, card, 16, 36, 52, 255);
-    SDL_Rect bar = {card.x, card.y, scale < 2 ? 2 : scale, card.h};
-    paint(renderer, bar, 89, 199, 255, 255);
-    int y = draw_text(renderer, title, card.x + pad, card.y + pad, inner, scale, color_accent);
-    return draw_text(renderer, body, card.x + pad, y, inner, scale, color_text);
+    paint(renderer, card, 255, 255, 255, 255);
+    SDL_SetRenderDrawColor(renderer, 222, 223, 220, 255);
+    SDL_RenderDrawRect(renderer, &card);
+    SDL_Rect old_clip;
+    SDL_bool clipped = SDL_RenderIsClipEnabled(renderer);
+    SDL_RenderGetClipRect(renderer, &old_clip);
+    SDL_RenderSetClipRect(renderer, &card);
+    int y = draw_text(renderer, title, card.x + pad, card.y + pad, inner, scale, color_text);
+    y = draw_text(renderer, body, card.x + pad, y, inner, scale, color_text);
+    SDL_RenderSetClipRect(renderer, clipped ? &old_clip : NULL);
+    return y;
 }
 
 static void draw_key_hints(SDL_Renderer *renderer, int x, int y, int width, int scale)
@@ -209,28 +266,29 @@ static void draw_key_hints(SDL_Renderer *renderer, int x, int y, int width, int 
     draw_text(renderer, line, x, y, width, use, color_muted);
 }
 
-static void draw_waiting(ph_window *w, int width, int height)
+static void draw_waiting(ph_window *w, int width, int height, int top)
 {
     int scale = text_scale(width, height);
     int margin = 14 * scale;
     int gap = 8 * scale;
     bool wide = wide_layout(width, height);
     int card_h = 7 * 10 * scale;
-    int stack_h = 2 * 10 * (scale + 1) + 10 * scale + gap + (wide ? card_h : card_h * 2 + gap) +
-                  gap + (wide ? 12 : 24) * scale;
-    int y = (height - stack_h) / 2;
+    int stack_h = 10 * (scale + 1) + gap + (wide ? card_h : card_h * 2 + gap) + gap +
+                  (wide ? 12 : 24) * scale;
+    int area = height - top;
+    int y = top + (area - stack_h) / 2;
     char status[160];
     SDL_Rect screen = {0, 0, width, height};
     const char *control = PH_PAIR_LINE "\nAssistiveTouch on.\nDwell Control off.";
     const char *mirror = "Same Wi-Fi as this PC.\nControl Center.\nScreen Mirroring > Porthole.";
 
-    paint(w->renderer, screen, 10, 18, 28, 255);
+    paint(w->renderer, screen, 245, 244, 241, 255);
     if (width < margin * 2 + 6 * scale)
         return;
-    if (y < margin)
-        y = margin;
-    y = draw_text(w->renderer, "Porthole", margin, y, width - 2 * margin, scale + 1, color_accent);
-    y = draw_text(w->renderer, "iPhone on this PC", margin, y, width - 2 * margin, scale, color_text);
+    if (y < top + margin)
+        y = top + margin;
+    y = draw_text(w->renderer, "iPhone on this PC", margin, y, width - 2 * margin, scale + 1,
+                  color_text);
     y += gap;
     if (wide) {
         int col = (width - 2 * margin - gap) / 2;
@@ -248,9 +306,9 @@ static void draw_waiting(ph_window *w, int width, int height)
             card_h = (height - margin - y - gap) / 2;
         if (card_h < 20 * scale)
             card_h = 20 * scale;
-        SDL_Rect top = {margin, y, width - 2 * margin, card_h};
+        SDL_Rect upper = {margin, y, width - 2 * margin, card_h};
         SDL_Rect bottom = {margin, y + card_h + gap, width - 2 * margin, card_h};
-        draw_card(w->renderer, top, scale, "Screen", mirror);
+        draw_card(w->renderer, upper, scale, "Screen", mirror);
         draw_card(w->renderer, bottom, scale, "Controls", control);
         y += card_h * 2 + gap * 2;
         snprintf(status, sizeof status, "Controls: %s",
@@ -261,76 +319,156 @@ static void draw_waiting(ph_window *w, int width, int height)
     }
 }
 
-static void draw_help(ph_window *w, int width, int height)
+static int card_height(const char *title, const char *body, int inner, int scale)
 {
-    int scale = text_scale(width, height);
-    int margin = 12 * scale;
-    int gap = 8 * scale;
-    bool wide = wide_layout(width, height);
-    SDL_Rect panel = {margin / 2, margin / 2, width - margin, height - margin};
+    int pad = 8 * scale;
+
+    return pad + text_height(title, inner, scale) + text_height(body, inner, scale) + pad;
+}
+
+static void measure_help(int width, int scale, bool columns, const char *mouse, const char *keys,
+                         const char *setup, int *margin, int *gap, int *mouse_h, int *keys_h,
+                         int *total)
+{
+    int inner, head, foot, block;
+
+    *margin = 12 * scale;
+    *gap = 8 * scale;
+    if (columns)
+        inner = (width - 2 * *margin - *gap) / 2 - 16 * scale;
+    else
+        inner = width - 2 * *margin - 16 * scale;
+    if (inner < 6 * scale)
+        inner = 6 * scale;
+    *mouse_h = card_height("Mouse", mouse, inner, scale);
+    *keys_h = card_height("Keyboard", keys, inner, scale);
+    head = *margin + text_height("Help", width - 2 * *margin, scale + 1) +
+           text_height("F1 closes", width - 2 * *margin, scale) + *gap;
+    foot = *gap + text_height(setup, width - 2 * *margin, scale) + *margin;
+    block = columns ? (*mouse_h > *keys_h ? *mouse_h : *keys_h) : (*mouse_h + *gap + *keys_h);
+    *total = head + block + foot;
+}
+
+static void draw_help(ph_window *w, int width, int height, int top)
+{
+    const char *mouse = "Move cursor to point.\n"
+                        "Left click: tap\n"
+                        "Right: secondary tap\n"
+                        "Drag: swipe\n"
+                        "Wheel: scroll\n"
+                        "Shift+wheel: sideways\n"
+                        "Middle click: action\n"
+                        "Side buttons: actions\n"
+                        "F4: feed wheel on/off";
+    const char *keys = "Type directly.\n"
+                       "Ctrl is Command.\n"
+                       "Alt+H Home\n"
+                       "Alt+F Search\n"
+                       "Alt+S Apps\n"
+                       "Alt+C Controls\n"
+                       "Alt+N Notifications\n"
+                       "Alt+P Screenshot\n"
+                       "Alt+Left: Back\n"
+                       "Alt+Up, Down: volume\n"
+                       "Alt+PgUp, PgDn: swipe\n"
+                       "Alt+Shift+arrow swipe\n"
+                       "Alt+D: double-tap\n"
+                       "Alt+L: hold\n"
+                       "Alt+U: bottom swipe\n"
+                       "Esc cancels a hold\n"
+                       "Media keys: playback";
+    const char *setup = "AssistiveTouch on. Dwell off.\n" PH_PAIR_LINE "\n"
+                        "Buttons 3-6: Apps, Controls,\n"
+                        "Notifications, Screenshot.";
+    int content_h = height - top;
+    int scale = text_scale(width, content_h);
+    bool columns = false;
+    int margin = 12, gap = 8;
+    int mouse_h = 0, keys_h = 0;
+    int chosen_scale = 1;
+    bool found = false;
+    SDL_Rect panel = {0, top, width, content_h};
     SDL_Rect old_clip;
     SDL_bool clipped;
-    const char *mouse = "Move over the picture to point.\n"
-                        "Left click: tap\nRight click: secondary click\n"
-                        "Hold and drag: swipe\nWheel: scroll\n"
-                        "Shift+wheel: horizontal\nMiddle/side: assigned iPhone actions\n"
-                        "F4: feed wheel on/off";
-    const char *keys = "Type directly. Ctrl is Command.\n"
-                       "Alt+H Home / Alt+F Search\nAlt+S Apps / Alt+C Controls\n"
-                       "Alt+N Notifications / Alt+P Shot\nAlt+Left Back / Alt+Up,Down Volume\n"
-                       "Alt+PgDn,PgUp: swipe up,down\nAlt+Shift+arrows: swipe\n"
-                       "Alt+D double-tap / Alt+L hold\nAlt+U bottom-up swipe\n"
-                       "Esc cancel/release held input\nMedia keys: phone playback/volume";
-    const char *setup = "AssistiveTouch on. Dwell Control off.\n" PH_PAIR_LINE "\n"
-                        "Buttons 3-6: App Switcher, Control Center, Notifications, Screenshot.";
 
-    if (panel.w < 8 * scale || panel.h < 8 * scale)
+    if (content_h < 8 || width < 8)
         return;
-    paint(w->renderer, panel, 10, 18, 28, 255);
+    paint(w->renderer, panel, 245, 244, 241, 255);
+    for (int s = scale; s >= 1 && !found; s--) {
+        int total;
+
+        measure_help(width, s, false, mouse, keys, setup, &margin, &gap, &mouse_h, &keys_h,
+                     &total);
+        if (total <= content_h) {
+            chosen_scale = s;
+            columns = false;
+            found = true;
+        }
+    }
+    if (!found) {
+        for (int s = scale; s >= 1 && !found; s--) {
+            int total, col_inner;
+
+            measure_help(width, s, true, mouse, keys, setup, &margin, &gap, &mouse_h, &keys_h,
+                         &total);
+            col_inner = (width - 2 * margin - gap) / 2 - 16 * s;
+            if (col_inner >= 21 * 6 * s && total <= content_h) {
+                chosen_scale = s;
+                columns = true;
+                found = true;
+            }
+        }
+    }
+    if (!found) {
+        int stack_m, stack_g, stack_mouse, stack_keys, stack_total;
+        int col_m, col_g, col_mouse, col_keys, col_total;
+
+        measure_help(width, 1, false, mouse, keys, setup, &stack_m, &stack_g, &stack_mouse,
+                     &stack_keys, &stack_total);
+        measure_help(width, 1, true, mouse, keys, setup, &col_m, &col_g, &col_mouse, &col_keys,
+                     &col_total);
+        chosen_scale = 1;
+        if (col_total < stack_total) {
+            columns = true;
+            margin = col_m;
+            gap = col_g;
+            mouse_h = col_mouse;
+            keys_h = col_keys;
+        } else {
+            columns = false;
+            margin = stack_m;
+            gap = stack_g;
+            mouse_h = stack_mouse;
+            keys_h = stack_keys;
+        }
+    }
+    scale = chosen_scale;
     SDL_RenderGetClipRect(w->renderer, &old_clip);
     clipped = SDL_RenderIsClipEnabled(w->renderer);
     SDL_RenderSetClipRect(w->renderer, &panel);
-    int y = draw_text(w->renderer, "Help", margin, margin, panel.w - 2 * margin, scale + 1,
+    int y = draw_text(w->renderer, "Help", margin, top + margin, width - 2 * margin, scale + 1,
                       color_accent);
-    y = draw_text(w->renderer, "F1 closes", margin, y, panel.w - 2 * margin, scale, color_muted);
+    y = draw_text(w->renderer, "F1 closes", margin, y, width - 2 * margin, scale, color_muted);
     y += gap;
-    {
-        int key_h = 15 * 10 * scale;
-        if (wide && panel.w > 80 * scale) {
-            int col = (panel.w - 2 * margin - gap) / 2;
-            int card_h = key_h;
-            SDL_Rect left = {margin, y, col, card_h};
-            SDL_Rect right = {margin + col + gap, y, panel.w - 2 * margin - col - gap, card_h};
-            if (left.y + card_h > panel.y + panel.h - margin)
-                left.h = right.h = panel.y + panel.h - margin - left.y;
-            draw_card(w->renderer, left, scale, "Mouse", mouse);
-            draw_card(w->renderer, right, scale, "Keyboard", keys);
-            y += left.h + gap;
-        } else {
-            SDL_Rect card = {margin, y, panel.w - 2 * margin, 11 * 10 * scale};
-            draw_card(w->renderer, card, scale, "Mouse", mouse);
-            y = card.y + card.h + gap;
-            card.y = y;
-            card.h = key_h;
-            draw_card(w->renderer, card, scale, "Keyboard", keys);
-            y = card.y + card.h + gap;
-        }
-        draw_text(w->renderer, setup, margin, y, panel.w - 2 * margin, scale, color_muted);
+    if (columns) {
+        int col = (width - 2 * margin - gap) / 2;
+        int card_h = mouse_h > keys_h ? mouse_h : keys_h;
+        SDL_Rect left = {margin, y, col, card_h};
+        SDL_Rect right = {margin + col + gap, y, width - 2 * margin - col - gap, card_h};
+        draw_card(w->renderer, left, scale, "Mouse", mouse);
+        draw_card(w->renderer, right, scale, "Keyboard", keys);
+        y += card_h + gap;
+    } else {
+        SDL_Rect card = {margin, y, width - 2 * margin, mouse_h};
+        draw_card(w->renderer, card, scale, "Mouse", mouse);
+        y += mouse_h + gap;
+        card.y = y;
+        card.h = keys_h;
+        draw_card(w->renderer, card, scale, "Keyboard", keys);
+        y += keys_h + gap;
     }
+    draw_text(w->renderer, setup, margin, y, width - 2 * margin, scale, color_muted);
     SDL_RenderSetClipRect(w->renderer, clipped ? &old_clip : NULL);
-}
-
-static void draw_control_status(ph_window *w, int width)
-{
-    int scale = text_scale(width, width);
-    int margin = 8 * scale;
-    SDL_Rect panel = {0, 0, width, 22 * scale};
-    char line[180];
-
-    paint(w->renderer, panel, 12, 23, 35, 235);
-    snprintf(line, sizeof line, "Viewing only. %s  F2 setup",
-             w->control_detail[0] ? w->control_detail : "Controls disconnected.");
-    draw_text(w->renderer, line, margin, 6 * scale, width - 2 * margin, scale, color_text);
 }
 
 static void setup_buttons(int width, int height, SDL_Rect buttons[3])
@@ -348,21 +486,24 @@ static void setup_buttons(int width, int height, SDL_Rect buttons[3])
                                 button_width, button_h};
 }
 
-static void draw_setup(ph_window *w, int width, int height)
+static void draw_setup(ph_window *w, int width, int height, int top)
 {
     const ph_setup *s = &w->setup;
     int scale = text_scale(width, height), margin = 12 * scale, content_width = width - 2 * margin;
     SDL_Rect panel = {0, 0, width, height};
-    paint(w->renderer, panel, 10, 18, 28, 255);
+    paint(w->renderer, panel, 245, 244, 241, 255);
     SDL_Rect buttons[3];
     setup_buttons(width, height, buttons);
-    SDL_Rect clip = {margin, margin, content_width, buttons[0].y - 2 * margin};
+    SDL_Rect clip = {margin, top + margin, content_width, buttons[0].y - top - 2 * margin};
+    if (clip.h < 1)
+        clip.h = 1;
     SDL_RenderSetClipRect(w->renderer, &clip);
     char heading[80];
     snprintf(heading, sizeof heading, "Step %d of %d", s->controls ? (int)s->step + 1
                                                                    : s->step == PH_SETUP_MIRROR ? 1 : 2,
              s->controls ? 5 : 2);
-    int y = draw_text(w->renderer, heading, margin, margin, content_width, scale + 1, color_accent);
+    int y = draw_text(w->renderer, heading, margin, top + margin, content_width, scale + 1,
+                      color_accent);
     y += 8 * scale;
     const char *title = "", *body = "";
     switch (s->step) {
@@ -435,15 +576,19 @@ static void draw_setup(ph_window *w, int width, int height)
     const char *labels[] = {"Close", "Back", next};
     for (int i = 0; i < 3; i++) {
         if (i == 2)
-            paint(w->renderer, buttons[i], 32, 110, 158, 255);
-        else
-            paint(w->renderer, buttons[i], 28, 48, 66, 255);
+            paint(w->renderer, buttons[i], 17, 17, 17, 255);
+        else {
+            paint(w->renderer, buttons[i], 255, 255, 255, 255);
+            SDL_SetRenderDrawColor(w->renderer, 222, 223, 220, 255);
+            SDL_RenderDrawRect(w->renderer, &buttons[i]);
+        }
         int text_width = (int)strlen(labels[i]) * 6 * scale;
         int text_x = buttons[i].x + (buttons[i].w - text_width) / 2;
         int text_y = buttons[i].y + (buttons[i].h - 7 * scale) / 2;
         if (text_x < buttons[i].x)
             text_x = buttons[i].x;
-        draw_text(w->renderer, labels[i], text_x, text_y, buttons[i].w, scale, color_text);
+        draw_text(w->renderer, labels[i], text_x, text_y, buttons[i].w, scale,
+                  i == 2 ? color_on_ink : color_text);
     }
 }
 
@@ -455,7 +600,7 @@ static void diagnostic_line(char out[160], const char *name, const ph_metric_sum
         snprintf(out, 160, "%s: --", name);
 }
 
-static void draw_diagnostics(ph_window *w, int width, int height)
+static void draw_diagnostics(ph_window *w, int width, int height, int top)
 {
     int scale = text_scale(width, height);
     int margin = 10 * scale;
@@ -467,10 +612,12 @@ static void draw_diagnostics(ph_window *w, int width, int height)
     SDL_Rect panel;
     int y, i;
 
-    if (panel_h > height)
-        panel_h = height;
-    panel = (SDL_Rect){0, 0, width, panel_h};
-    paint(w->renderer, panel, 10, 18, 28, 255);
+    if (panel_h > height - top)
+        panel_h = height - top;
+    if (panel_h < 1)
+        panel_h = 1;
+    panel = (SDL_Rect){0, top, width, panel_h};
+    paint(w->renderer, panel, 245, 244, 241, 255);
     if (w->metrics.fps_known)
         snprintf(lines[0], sizeof lines[0], "Video %.1f fps", w->metrics.fps);
     else
@@ -487,8 +634,8 @@ static void draw_diagnostics(ph_window *w, int width, int height)
              (unsigned long long)w->metrics.acks_expired);
     snprintf(lines[7], sizeof lines[7], "Queue %u, discarded %llu, replaced %llu", w->queued_packets,
              (unsigned long long)w->discarded_packets, (unsigned long long)w->superseded_frames);
-    y = draw_text(w->renderer, "Timings    F3 closes", margin, margin, width - 2 * margin, scale,
-                  color_accent);
+    y = draw_text(w->renderer, "Timings    F3 closes", margin, top + margin, width - 2 * margin,
+                  scale, color_accent);
     if (wide && width > 80 * scale) {
         int col = (width - 2 * margin) / 2;
         int left = y;
@@ -506,6 +653,211 @@ static void draw_diagnostics(ph_window *w, int width, int height)
     draw_text(w->renderer, note, margin, y, width - 2 * margin, scale, color_muted);
 }
 
+enum {
+    CHROME_NONE = 0,
+    CHROME_MIN = 1,
+    CHROME_MAX = 2,
+    CHROME_CLOSE = 3,
+    CHROME_DRAG = 4
+};
+
+static SDL_Texture *texture_from_rgba(SDL_Renderer *renderer, const unsigned char *pixels,
+                                      int width, int height)
+{
+    SDL_Surface *surface = SDL_CreateRGBSurfaceWithFormatFrom((void *)pixels, width, height, 32,
+                                                             width * 4, SDL_PIXELFORMAT_RGBA32);
+    SDL_Texture *texture;
+
+    if (!surface)
+        return NULL;
+    texture = SDL_CreateTextureFromSurface(renderer, surface);
+    SDL_FreeSurface(surface);
+    if (texture)
+        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+    return texture;
+}
+
+static int bar_output_px(const ph_window *w, int out_h)
+{
+    int win_w = 1, win_h = 1, bar;
+
+    SDL_GetWindowSize(w->window, &win_w, &win_h);
+    (void)win_w;
+    if (win_h < 1)
+        win_h = 1;
+    bar = PH_WINDOW_BAR_PX * out_h / win_h;
+    if (bar < 1)
+        bar = 1;
+    if (out_h > 4 && bar > out_h - 4)
+        bar = out_h / 4;
+    return bar;
+}
+
+static void chrome_buttons(int win_w, SDL_Rect buttons[3])
+{
+    int btn = 32, gap = 8, y = (PH_WINDOW_BAR_PX - btn) / 2, x = win_w - 10 - btn;
+
+    if (y < 0)
+        y = 0;
+    buttons[2] = (SDL_Rect){x, y, btn, btn};
+    x -= gap + btn;
+    buttons[1] = (SDL_Rect){x, y, btn, btn};
+    x -= gap + btn;
+    buttons[0] = (SDL_Rect){x, y, btn, btn};
+}
+
+static int chrome_at(int win_w, int x, int y)
+{
+    SDL_Rect buttons[3];
+    SDL_Point point = {x, y};
+
+    if (y < 0 || y >= PH_WINDOW_BAR_PX || x < 0 || x >= win_w)
+        return CHROME_NONE;
+    chrome_buttons(win_w, buttons);
+    if (SDL_PointInRect(&point, &buttons[0]))
+        return CHROME_MIN;
+    if (SDL_PointInRect(&point, &buttons[1]))
+        return CHROME_MAX;
+    if (SDL_PointInRect(&point, &buttons[2]))
+        return CHROME_CLOSE;
+    return CHROME_DRAG;
+}
+
+static void fill_px(SDL_Renderer *renderer, int x, int y, int w, int h)
+{
+    SDL_Rect rect;
+
+    if (w < 1)
+        w = 1;
+    if (h < 1)
+        h = 1;
+    rect = (SDL_Rect){x, y, w, h};
+    SDL_RenderFillRect(renderer, &rect);
+}
+
+static void draw_chrome_glyph(SDL_Renderer *renderer, int kind, SDL_Rect box, int thick, bool on_ink)
+{
+    int cx = box.x + box.w / 2, cy = box.y + box.h / 2, arm = box.w / 5, i;
+
+    if (arm < thick)
+        arm = thick;
+    SDL_SetRenderDrawColor(renderer, on_ink ? 255 : 17, on_ink ? 255 : 17, on_ink ? 255 : 17, 255);
+    if (kind == CHROME_MIN) {
+        fill_px(renderer, cx - arm, cy - thick / 2, arm * 2, thick);
+        return;
+    }
+    if (kind == CHROME_MAX) {
+        fill_px(renderer, cx - arm, cy - arm, arm * 2, thick);
+        fill_px(renderer, cx - arm, cy + arm - thick, arm * 2, thick);
+        fill_px(renderer, cx - arm, cy - arm, thick, arm * 2);
+        fill_px(renderer, cx + arm - thick, cy - arm, thick, arm * 2);
+        return;
+    }
+    for (i = -arm; i <= arm; i++) {
+        fill_px(renderer, cx + i, cy + i - thick / 2, thick, thick);
+        fill_px(renderer, cx + i, cy - i - thick / 2, thick, thick);
+    }
+}
+
+static SDL_Rect scale_rect(SDL_Rect rect, int win_w, int win_h, int out_w, int out_h)
+{
+    if (win_w < 1)
+        win_w = 1;
+    if (win_h < 1)
+        win_h = 1;
+    rect.x = rect.x * out_w / win_w;
+    rect.y = rect.y * out_h / win_h;
+    rect.w = rect.w * out_w / win_w;
+    if (rect.w < 1)
+        rect.w = 1;
+    rect.h = rect.h * out_h / win_h;
+    if (rect.h < 1)
+        rect.h = 1;
+    return rect;
+}
+
+static void draw_bar(ph_window *w, int out_w, int out_h)
+{
+    int win_w = 1, win_h = 1, bar = bar_output_px(w, out_h), thick, pad, logo_h, logo_w;
+    int buttons_w, room;
+    bool status = w->has_picture && !w->control_ready && !w->help_visible && !w->setup.visible;
+    SDL_Rect strip = {0, 0, out_w, bar}, hairline, buttons[3], logo;
+
+    SDL_GetWindowSize(w->window, &win_w, &win_h);
+    thick = win_h > 0 ? out_h / win_h : 1;
+    if (thick < 1)
+        thick = 1;
+    paint(w->renderer, strip, 255, 255, 255, 255);
+    hairline = (SDL_Rect){0, bar - thick, out_w, thick};
+    paint(w->renderer, hairline, 222, 223, 220, 255);
+    chrome_buttons(win_w, buttons);
+    pad = bar / 8;
+    if (pad < thick)
+        pad = thick;
+    buttons_w = out_w - buttons[0].x * out_w / (win_w < 1 ? 1 : win_w);
+    if (buttons_w < 0)
+        buttons_w = 0;
+    room = out_w - buttons_w - pad * 3;
+    logo_h = bar - pad * 2;
+    if (logo_h < 1)
+        logo_h = 1;
+    logo_w = logo_h * ph_brand_lockup_w / ph_brand_lockup_h;
+    if (logo_w > room)
+        logo_w = room;
+    if (logo_w < 1)
+        logo_w = 1;
+    logo_h = logo_w * ph_brand_lockup_h / ph_brand_lockup_w;
+    if (logo_h < 1)
+        logo_h = 1;
+    if (!status && w->lockup && logo_w >= 160 * thick) {
+        logo = (SDL_Rect){pad, (bar - logo_h) / 2, logo_w, logo_h};
+        SDL_RenderCopy(w->renderer, w->lockup, NULL, &logo);
+    } else {
+        int side = logo_h > 32 * thick ? 32 * thick : logo_h;
+        SDL_Rect icon = {pad, (bar - side) / 2, side, side};
+        char line[180];
+        int scale = 2 * thick, text_x, text_w;
+
+        if (side < thick)
+            side = thick;
+        icon.w = icon.h = side;
+        icon.y = (bar - side) / 2;
+        if (w->mark)
+            SDL_RenderCopy(w->renderer, w->mark, NULL, &icon);
+        if (status) {
+            text_x = icon.x + icon.w + pad;
+            text_w = out_w - buttons_w - text_x - pad;
+            while (scale > 1 && 8 * scale > bar - pad)
+                scale--;
+            snprintf(line, sizeof line, "Viewing only. %s  F2 setup",
+                     w->control_detail[0] ? w->control_detail : "Controls disconnected.");
+            if (text_w > 6 * scale)
+                draw_text(w->renderer, line, text_x, (bar - 7 * scale) / 2, text_w, scale,
+                          color_muted);
+        }
+    }
+    for (int i = 0; i < 3; i++) {
+        SDL_Rect box = scale_rect(buttons[i], win_w, win_h, out_w, out_h);
+        int kind = i + 1;
+        bool hot = w->chrome_hover == kind;
+
+        if (hot)
+            paint(w->renderer, box, kind == CHROME_CLOSE ? 17 : 239, kind == CHROME_CLOSE ? 17 : 239,
+                  kind == CHROME_CLOSE ? 17 : 236, 255);
+        draw_chrome_glyph(w->renderer, kind, box, thick, hot && kind == CHROME_CLOSE);
+    }
+}
+
+static void toggle_zoom(SDL_Window *window)
+{
+    Uint32 flags = SDL_GetWindowFlags(window);
+
+    if (flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN_DESKTOP))
+        SDL_RestoreWindow(window);
+    else
+        SDL_MaximizeWindow(window);
+}
+
 ph_window *ph_window_create(const char *title)
 {
     ph_window *w = calloc(1, sizeof *w);
@@ -513,7 +865,9 @@ ph_window *ph_window_create(const char *title)
     if (!w)
         return NULL;
     w->window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WAITING_W,
-                                 WAITING_H, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+                                 WAITING_H,
+                                 SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_BORDERLESS);
+    snprintf(w->title, sizeof w->title, "%s", title ? title : "Porthole");
     if (!w->window)
         goto fail;
     place_window(w, WAITING_W, WAITING_H, true);
@@ -539,6 +893,18 @@ ph_window *ph_window_create(const char *title)
             PH_LOGI("renderer %s (%s)", info.name,
                     (info.flags & SDL_RENDERER_ACCELERATED) ? "gpu" : "software");
     }
+    w->lockup = texture_from_rgba(w->renderer, ph_brand_lockup, ph_brand_lockup_w, ph_brand_lockup_h);
+    w->mark = texture_from_rgba(w->renderer, ph_brand_icon, ph_brand_icon_w, ph_brand_icon_h);
+    {
+        SDL_Surface *icon = SDL_CreateRGBSurfaceWithFormatFrom(
+            (void *)ph_brand_icon, ph_brand_icon_w, ph_brand_icon_h, 32, ph_brand_icon_w * 4,
+            SDL_PIXELFORMAT_RGBA32);
+        if (icon) {
+            SDL_SetWindowIcon(w->window, icon);
+            SDL_FreeSurface(icon);
+        }
+    }
+    SDL_SetWindowMinimumSize(w->window, 320, 480);
     ph_window_redraw(w);
     return w;
 
@@ -550,7 +916,8 @@ fail:
 
 void ph_window_set_title(ph_window *w, const char *title)
 {
-    SDL_SetWindowTitle(w->window, title);
+    snprintf(w->title, sizeof w->title, "%s", title ? title : "");
+    SDL_SetWindowTitle(w->window, w->title);
 }
 
 void ph_window_set_status(ph_window *w, bool mirroring, bool control_ready, const char *detail)
@@ -647,6 +1014,8 @@ static ph_window_insets frame_insets(SDL_Window *window)
     ph_window_insets insets = {0, 0, 0, 0};
     int top = 0, left = 0, bottom = 0, right = 0;
 
+    if (window && (SDL_GetWindowFlags(window) & SDL_WINDOW_BORDERLESS))
+        return insets;
     if (SDL_GetWindowBordersSize(window, &top, &left, &bottom, &right) == 0 && top >= 0 &&
         left >= 0 && bottom >= 0 && right >= 0 && (top | left | bottom | right) != 0) {
         insets.top = top;
@@ -688,7 +1057,13 @@ static void place_window(ph_window *w, int pic_w, int pic_h, bool center)
         return;
     usable_bounds(w->window, &usable);
     insets = frame_insets(w->window);
-    ph_chrome_fit_client(pic_w, pic_h, usable.w, usable.h, &insets, &client_w, &client_h);
+    {
+        int limit_h = usable.h - PH_WINDOW_BAR_PX;
+        if (limit_h < 1)
+            limit_h = 1;
+        ph_chrome_fit_client(pic_w, pic_h, usable.w, limit_h, &insets, &client_w, &client_h);
+    }
+    client_h += PH_WINDOW_BAR_PX;
     SDL_GetWindowPosition(w->window, &cur_x, &cur_y);
     SDL_GetWindowSize(w->window, &cur_w, &cur_h);
     ph_chrome_place_client(client_w, client_h, usable.x, usable.y, usable.w, usable.h, &insets,
@@ -771,26 +1146,29 @@ void ph_window_tick(ph_window *w)
 
 void ph_window_redraw(ph_window *w)
 {
-    int out_w, out_h;
+    int out_w, out_h, top;
 
-    SDL_SetRenderDrawColor(w->renderer, 0, 0, 0, 255);
+    SDL_SetRenderDrawColor(w->renderer, 245, 244, 241, 255);
     SDL_RenderClear(w->renderer);
     if (SDL_GetRendererOutputSize(w->renderer, &out_w, &out_h) != 0)
         return;
+    top = bar_output_px(w, out_h);
     if (w->has_picture && w->texture) {
-        SDL_Rect dst = fit_rect(out_w, out_h, w->screen.w, w->screen.h);
+        SDL_Rect content = {0, top, out_w, out_h - top};
+        SDL_Rect dst = fit_rect(out_w, content.h, w->screen.w, w->screen.h);
+        paint(w->renderer, content, 0, 0, 0, 255);
+        dst.y += top;
         SDL_RenderCopy(w->renderer, w->texture, &w->screen, &dst);
-        if (!w->control_ready)
-            draw_control_status(w, out_w);
     } else {
-        draw_waiting(w, out_w, out_h);
+        draw_waiting(w, out_w, out_h, top);
     }
     if (w->help_visible)
-        draw_help(w, out_w, out_h);
+        draw_help(w, out_w, out_h, top);
     if (w->diagnostics_visible && !w->help_visible && !w->setup.visible)
-        draw_diagnostics(w, out_w, out_h);
+        draw_diagnostics(w, out_w, out_h, top);
     if (w->setup.visible)
-        draw_setup(w, out_w, out_h);
+        draw_setup(w, out_w, out_h, top);
+    draw_bar(w, out_w, out_h);
     SDL_RenderPresent(w->renderer);
 }
 
@@ -807,8 +1185,13 @@ bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy
 
     if (!w->has_picture || w->help_visible || w->setup.visible || !w->control_ready)
         return false;
+    if (y < PH_WINDOW_BAR_PX)
+        return false;
     SDL_GetWindowSize(w->window, &win_w, &win_h);
-    r = fit_rect(win_w, win_h, w->screen.w, w->screen.h);
+    if (win_h - PH_WINDOW_BAR_PX < 1)
+        return false;
+    r = fit_rect(win_w, win_h - PH_WINDOW_BAR_PX, w->screen.w, w->screen.h);
+    r.y += PH_WINDOW_BAR_PX;
     if (r.w <= 0 || r.h <= 0 || x < r.x || y < r.y || x >= r.x + r.w || y >= r.y + r.h)
         return false;
     *vx = (x - r.x + 0.5) / r.w;
@@ -827,12 +1210,89 @@ unsigned int ph_window_id(const ph_window *w)
     return SDL_GetWindowID(w->window);
 }
 
+bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
+{
+    int win_w = 1, win_h = 1, x, y, hit;
+
+    if (!w || !event)
+        return false;
+    SDL_GetWindowSize(w->window, &win_w, &win_h);
+    if (event->type == SDL_MOUSEMOTION) {
+        Uint32 held;
+        x = event->motion.x;
+        y = event->motion.y;
+        if (w->chrome_drag) {
+            int gx, gy;
+            SDL_GetGlobalMouseState(&gx, &gy);
+            SDL_SetWindowPosition(w->window, gx - w->drag_dx, gy - w->drag_dy);
+            return true;
+        }
+        hit = chrome_at(win_w, x, y);
+        if (hit != w->chrome_hover) {
+            w->chrome_hover = hit;
+            ph_window_redraw(w);
+        }
+        held = SDL_GetMouseState(NULL, NULL);
+        if ((held & SDL_BUTTON_LMASK) && !w->chrome_down)
+            return false;
+        return hit != CHROME_NONE;
+    }
+    if (event->type != SDL_MOUSEBUTTONDOWN && event->type != SDL_MOUSEBUTTONUP)
+        return false;
+    x = event->button.x;
+    y = event->button.y;
+    hit = chrome_at(win_w, x, y);
+    if (event->button.button != SDL_BUTTON_LEFT)
+        return hit != CHROME_NONE;
+    if (event->type == SDL_MOUSEBUTTONDOWN) {
+        if (hit == CHROME_NONE)
+            return false;
+        w->chrome_down = true;
+        w->chrome_press = hit;
+        SDL_CaptureMouse(SDL_TRUE);
+        if (hit == CHROME_DRAG && event->button.clicks >= 2) {
+            w->chrome_drag = false;
+            toggle_zoom(w->window);
+        } else if (hit == CHROME_DRAG &&
+                   (SDL_GetWindowFlags(w->window) & SDL_WINDOW_MAXIMIZED) == 0) {
+            int gx, gy, wx, wy;
+            SDL_GetGlobalMouseState(&gx, &gy);
+            SDL_GetWindowPosition(w->window, &wx, &wy);
+            w->drag_dx = gx - wx;
+            w->drag_dy = gy - wy;
+            w->chrome_drag = true;
+        }
+        return true;
+    }
+    if (!w->chrome_down)
+        return false;
+    w->chrome_down = false;
+    w->chrome_drag = false;
+    SDL_CaptureMouse(SDL_FALSE);
+    if (hit == w->chrome_press) {
+        if (hit == CHROME_MIN)
+            SDL_MinimizeWindow(w->window);
+        else if (hit == CHROME_MAX)
+            toggle_zoom(w->window);
+        else if (hit == CHROME_CLOSE) {
+            SDL_Event quit = {.type = SDL_QUIT};
+            SDL_PushEvent(&quit);
+        }
+    }
+    w->chrome_press = CHROME_NONE;
+    return true;
+}
+
 void ph_window_destroy(ph_window *w)
 {
     if (!w)
         return;
     if (w->texture)
         SDL_DestroyTexture(w->texture);
+    if (w->lockup)
+        SDL_DestroyTexture(w->lockup);
+    if (w->mark)
+        SDL_DestroyTexture(w->mark);
     if (w->renderer)
         SDL_DestroyRenderer(w->renderer);
     if (w->window)

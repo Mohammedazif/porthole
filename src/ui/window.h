@@ -6,9 +6,14 @@
 
 #include <stdbool.h>
 
+#include <SDL.h>
+
 #include "video/crop.h"
 #include "control/setup.h"
 #include "core/metrics.h"
+
+/* Client pixels reserved above the picture for the branded title bar. */
+#define PH_WINDOW_BAR_PX 80
 
 struct AVFrame;
 
@@ -49,8 +54,12 @@ void ph_window_redraw(ph_window *w);
 void ph_window_clear(ph_window *w);
 
 /* Maps a point in window coordinates to the phone screen as fractions in [0,1].
- * Returns false in letterbox bars, while local help is open, or controls are unavailable. */
+ * Returns false on the title bar, in letterbox bars, while local help is open, or when
+ * controls are unavailable. */
 bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy);
+
+/* True when the event is on the title bar. The phone does not see those events. */
+bool ph_window_chrome_event(ph_window *w, const SDL_Event *event);
 
 /* Size of the phone screen in stream pixels (0x0 if none yet). */
 void ph_window_video_size(const ph_window *w, int *width, int *height);

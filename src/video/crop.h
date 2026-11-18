@@ -1,12 +1,12 @@
 #ifndef PORTHOLE_VIDEO_CROP_H
 #define PORTHOLE_VIDEO_CROP_H
 
-/* Finds the phone screen inside a decoded frame.
+/* Finds the portrait picture inside a decoded frame.
  *
- * Some iOS transitions send TV-shaped frames (e.g. 1920x1080) with the portrait
- * screen in the middle and black bars on both sides. The app shows and maps only
- * the screen part. A separate media presentation is not necessarily a phone
- * screen, even when it also has black bars. */
+ * Some iOS transitions send TV-shaped frames (e.g. 1920x1080) with a portrait
+ * phone screen or photo in the middle and black bars on both sides. The app
+ * shows and maps only that portrait part. A landscape picture that fills the
+ * frame is kept whole. */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -22,8 +22,8 @@ typedef struct ph_yuv_planes {
     int width, height;
 } ph_yuv_planes;
 
-/* Returns the rectangle holding the phone screen; the whole frame unless it is a
- * landscape-shaped frame with visible content and pure black bars on both sides.
+/* Returns the portrait picture; the whole frame unless it is a landscape-shaped
+ * frame with a centred portrait picture between pure black side bars.
  * A frame matching the phone's native rotated shape is always kept whole.
  * `portrait_aspect` is width/height of the phone screen held upright (e.g. 0.462), learned
  * from portrait frames; pass 0 if unknown and the bars are found by scanning instead. */
