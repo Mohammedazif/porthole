@@ -60,6 +60,23 @@ static void mixed_background(ph_rect screen, bool checker)
         }
 }
 
+static void title_background(ph_rect screen)
+{
+    static const char title[7][18] = {
+        "00100001000000000", "00100001000000000", "11111001011001110",
+        "00100001100110001", "00100001000110001", "00100001000110001",
+        "00011001000101110",
+    };
+    memset(image, 0, sizeof image);
+    for (int row = 0; row < 7; row++)
+        for (int col = 0; col < 17; col++)
+            if (title[row][col] == '1')
+                for (int dy = 0; dy < 3; dy++)
+                    for (int dx = 0; dx < 3; dx++)
+                        image[(screen.y + 125 + row * 3 + dy) * STRIDE
+                              + screen.x + 75 + col * 3 + dx] = 215;
+}
+
 int main(void)
 {
     ph_rect screen = {20, 10, 500, 1080};
@@ -163,6 +180,52 @@ int main(void)
     CHECK(ph_video_cursor_changed(&p, &screen, &before, &screen,
                                   253, 700, 40, &x, &y));
     CHECK(hypot(x - 253, y - 700) <= 2.5);
+
+    /* Bright title text on black already contains circular edges. A light
+     * translucent hover dot over the letters must not authorize one of those
+     * unchanged edges as its centre (observed in the native Notes title). */
+    title_background(screen);
+    memcpy(baseline, image, sizeof image);
+    dot(screen, 109, 138, 11, 255, .2);
+    CHECK(ph_video_cursor_changed(&p, &screen, &before, &screen,
+                                  100.5, 150.5, 40, &x, &y));
+    CHECK(hypot(x - 109, y - 138) <= 2.5);
+    /* Unchanged text, and the old dot disappearing, cannot confirm arrival. */
+    memcpy(image, baseline, sizeof image);
+    CHECK(!ph_video_cursor_changed(&p, &screen, &before, &screen,
+                                   100.5, 150.5, 40, &x, &y));
+    dot(screen, 109, 138, 11, 255, .2);
+    memcpy(baseline, image, sizeof image);
+    title_background(screen);
+    CHECK(!ph_video_cursor_changed(&p, &screen, &before, &screen,
+                                   100.5, 150.5, 40, &x, &y));
+
+    title_background(screen);
+    memcpy(baseline, image, sizeof image);
+    dot(screen, 103, 142, 11, 255, .2);
+    CHECK(ph_video_cursor_changed(&p, &screen, &before, &screen,
+                                  100.5, 150.5, 40, &x, &y));
+    CHECK(hypot(x - 103, y - 142) <= 2.5);
+
+    /* Small corrections and press contraction can leave most of the old dot
+     * visible. If change evidence is insufficient, fail safely; a nearby text
+     * ring must never replace the actual new centre. */
+    for (int press = 0; press < 2; press++) {
+        for (int distance = 1; distance <= 4; distance++) {
+            for (int axis = 0; axis < 2; axis++) {
+                title_background(screen);
+                dot(screen, 103, 142, 11, 255, .2);
+                memcpy(baseline, image, sizeof image);
+                title_background(screen);
+                double cx = 103 + (axis == 0 ? distance : 0);
+                double cy = 142 + (axis == 1 ? distance : 0);
+                dot(screen, cx, cy, press ? 9 : 11, 255, .2);
+                if (ph_video_cursor_changed(&p, &screen, &before, &screen,
+                                            cx, cy, 40, &x, &y))
+                    CHECK(hypot(x - cx, y - cy) <= 2.5);
+            }
+        }
+    }
 
     /* The visible alpha edge can end just inside the nominal 11px radius.
      * Looking only at that outer ring misses the movement even though the

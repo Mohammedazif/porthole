@@ -29,7 +29,8 @@ static void sample_offsets(cursor_samples *s, double r)
     }
 }
 
-static double score(const ph_yuv_planes *p, int x, int y, const cursor_samples *s)
+static double score(const ph_yuv_planes *p, int x, int y, const cursor_samples *s,
+                    bool require_coherent)
 {
     int positive = 0, negative = 0, total = 0;
     for (int i = 0; i < 16; i++) {
@@ -43,7 +44,7 @@ static double score(const ph_yuv_planes *p, int x, int y, const cursor_samples *
         total += abs(delta) < 64 ? abs(delta) : 64;
     }
     int coherent = positive > negative ? positive : negative;
-    return coherent >= 13 ? (double)total * coherent / 16 : 0;
+    return !require_coherent || coherent >= 13 ? (double)total * coherent / 16 : 0;
 }
 
 static bool valid(const ph_yuv_planes *p, const ph_rect *screen)
@@ -126,9 +127,14 @@ static double candidate(const ph_yuv_planes *p, const ph_rect *screen,
         if (!dirty)
             return 0;
     }
-    double result = score(p, screen->x + x, screen->y + y, s);
-    if (before)
+    double result = score(p, screen->x + x, screen->y + y, s, true);
+    if (before) {
+        /* Text can already form a stronger circular edge than the translucent
+         * pointer. A few changed pixels beside that edge do not establish its
+         * centre: count only the edge strength gained since the old frame. */
+        result -= score(before, bs->x + x, bs->y + y, s, false);
         result = fmax(result, changed_ring(p, screen, before, bs, x, y, s));
+    }
     if (result < 250 || (before && !changed(p, screen, before, bs, x, y, s)))
         return 0;
     return result - hypot(x - hx, y - hy) * 0.15;
