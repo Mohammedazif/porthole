@@ -37,6 +37,8 @@ ph_window *ph_window_create(const char *title)
 
 void ph_window_set_detail(ph_window *w, const char *detail) { (void)w, (void)detail; }
 void ph_window_set_pull_hint(ph_window *w, const char *hint) { (void)w, (void)hint; }
+void ph_window_set_backdrop(ph_window *w, const struct AVFrame *frame, const ph_rect *screen) { (void)w, (void)frame, (void)screen; }
+bool ph_window_has_backdrop(const ph_window *w) { (void)w; return false; }
 bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy);
 bool ph_window_picture_point(const ph_window *w, int x, int y, double *vx, double *vy)
 {

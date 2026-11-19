@@ -29,6 +29,7 @@
 #include "control/scroll.h"
 #include "control/setup.h"
 #include "core/config.h"
+#include "media/shot.h"
 #include "core/log.h"
 #include "files/origin.h"
 #include "files/picture_hash.h"
@@ -103,6 +104,23 @@ typedef struct app {
      * whole picture; edge finding is only for thumbnails on the phone layout. */
     bool pull_presentation;
     ph_rect pull_screen;
+    /* On the bare picture a press is held back from the phone: the phone screen
+     * there is Photos with hidden buttons, and a drag up opens its info panel. */
+    /* The last phone-screen frame. When iOS swaps Photos for the bare picture, it is
+     * normally Photos with its bars, shown for about 0.7 s before the switch. */
+    AVFrame *bars_frame;
+    ph_rect bars_screen;
+    Uint64 bars_at;
+    bool bars_view; /* F7: Photos bars around the picture, or the picture alone */
+    bool bars_tried; /* this TV session already decided whether its bars fit */
+    bool bars_on;    /* the bars are drawn for this TV session */
+    bool tv_session;
+    Uint64 tv_since; /* first landscape TV frame of this session */
+    double press_phone_x, press_phone_y; /* where the held left press began on the phone */
+    bool defer_press;
+    double defer_x, defer_y;
+    int defer_wx, defer_wy;
+    Uint64 defer_at;
     ph_rect view_screen, baseline_screen, reference_screen;
     Uint64 reference_at;
     int picture_w, picture_h;
@@ -771,7 +789,14 @@ static void begin_pull(app *a)
     uint8_t thumb[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
     bool have_thumb;
 
-    ph_abs_release_all(&a->abs, SDL_GetTicks64());
+    a->defer_press = false; /* a file drag never reaches the phone */
+    /* A press that already reached the phone is dragging something there, such as a
+     * photo being pulled closed. Lifting it at the window edge finishes that gesture;
+     * going back to where it began first cancels it. */
+    if (a->absolute && a->abs.buttons)
+        ph_abs_cancel_drag(&a->abs, a->press_phone_x, a->press_phone_y, SDL_GetTicks64());
+    else
+        ph_abs_release_all(&a->abs, SDL_GetTicks64());
     ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
     SDL_CaptureMouse(SDL_TRUE);
     a->pull_path[0] = 0;
@@ -857,6 +882,8 @@ static void mouse_motion(app *a, const SDL_MouseMotionEvent *event)
         track_pull(a);
         return;
     }
+    if (a->defer_press)
+        return; /* decided on release: a tap, a swipe, or a file drag */
     if (a->absolute) {
         double x, y;
         if (abs_coordinates(a, event->x, event->y, &x, &y)) {
@@ -886,6 +913,55 @@ static void mouse_motion(app *a, const SDL_MouseMotionEvent *event)
     }
 }
 
+#define DEFER_TAP_PX 8
+#define DEFER_TAP_MS 500
+
+/* A left press on the bare picture waits. Released in place it is one tap; moved and
+ * released on the picture it is the same swipe; carried off the window it was a file
+ * drag and never touched the phone. A long still press sends nothing, since Photos
+ * would open a menu the window cannot show. Returns true when the event is handled. */
+static bool finish_deferred_press(app *a, const SDL_MouseButtonEvent *event)
+{
+    Uint64 now = SDL_GetTicks64();
+    double x, y;
+
+    if (event->type == SDL_MOUSEBUTTONDOWN) {
+        if (!a->pull.armed || !a->pull_presentation || a->abs.held || a->abs.buttons)
+            return false;
+        if (!abs_coordinates(a, event->x, event->y, &a->defer_x, &a->defer_y))
+            return false;
+        a->defer_press = true;
+        a->defer_wx = event->x;
+        a->defer_wy = event->y;
+        a->defer_at = now;
+        mark_input(a, event->timestamp);
+        SDL_CaptureMouse(SDL_TRUE);
+        return true;
+    }
+    if (!a->defer_press)
+        return false;
+    a->defer_press = false;
+    SDL_CaptureMouse(SDL_FALSE);
+    mark_input(a, event->timestamp);
+    long dx = (long)event->x - a->defer_wx, dy = (long)event->y - a->defer_wy;
+    bool still = dx * dx + dy * dy <= (long)DEFER_TAP_PX * DEFER_TAP_PX;
+    if (still) {
+        /* With the bars drawn, a tap on the picture would hide the phone's bars
+         * behind the drawn ones; the drawn buttons are what to click. */
+        if (now - a->defer_at <= DEFER_TAP_MS && !ph_window_has_backdrop(a->win))
+            ph_abs_tap(&a->abs, a->defer_x, a->defer_y, 1, 60, now);
+        return true;
+    }
+    if (dy * dy > dx * dx)
+        return true; /* up opens the hidden info panel, down closes the photo: neither */
+    if (abs_coordinates(a, event->x, event->y, &x, &y)) {
+        Uint64 held = now - a->defer_at;
+        uint32_t glide = held < 120 ? 120 : held > 600 ? 600 : (uint32_t)held;
+        ph_abs_swipe(&a->abs, a->defer_x, a->defer_y, x, y, glide, 0, now);
+    }
+    return true;
+}
+
 static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
 {
     double x, y, aspect;
@@ -907,6 +983,8 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
             drop_pull_snapshot(a);
         }
     }
+    if (a->absolute && event->button == SDL_BUTTON_LEFT && finish_deferred_press(a, event))
+        return;
     if (a->absolute) {
         bool down = event->type == SDL_MOUSEBUTTONDOWN;
         x = a->abs.want_x;
@@ -918,6 +996,10 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
         mark_input(a, event->timestamp);
         if (down)
             a->abs_panel = 0; /* clicking may have closed or left the panel */
+        if (down && event->button == SDL_BUTTON_LEFT) {
+            a->press_phone_x = x;
+            a->press_phone_y = y;
+        }
         ph_abs_button(&a->abs, button, down, x, y, SDL_GetTicks64());
         SDL_CaptureMouse(a->abs.held ? SDL_TRUE : SDL_FALSE);
         return;
@@ -1189,6 +1271,8 @@ static uint8_t pc_modifiers(SDL_Keymod mods)
     return result;
 }
 
+static void apply_bars(app *a, const AVFrame *live, ph_rect live_screen);
+
 static void handle_key(app *a, const SDL_KeyboardEvent *e)
 {
     SDL_Scancode sc = e->keysym.scancode;
@@ -1207,6 +1291,17 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
                 setup_action(a, PH_SETUP_ACTION_CLOSE);
             else
                 open_setup(a);
+        }
+        return;
+    }
+    if (down && sc == SDL_SCANCODE_F7 && plain && !a->input.down[sc]) {
+        a->gesture_keys[sc] = true;
+        if (e->type == SDL_KEYDOWN && !e->repeat) {
+            a->bars_view = !a->bars_view;
+            a->bars_tried = false; /* decide again for the picture on screen */
+            if (a->view_frame && a->view_frame->data[0])
+                apply_bars(a, a->view_frame, a->view_screen);
+            PH_LOGI("photo view: F7 %s", a->bars_view ? "Photos bars" : "picture alone");
         }
         return;
     }
@@ -1681,6 +1776,182 @@ static void observe_pointer(app *a)
                         a->candidate_y / screen.h, now);
 }
 
+#define BARS_FRESH_MS 3000
+#define BARS_SETTLE_MS 300
+#define BARS_GIVE_UP_MS 2500
+#define BARS_SAME_MIN 0.75
+
+#define BARS_ROW_TOP 0.86
+#define BARS_ROW_BOTTOM 0.98
+#define BARS_FLAT_SPREAD 6.0
+#define BARS_SAME_ROW_BITS 12
+
+static double cells_correlation(const uint8_t *a, const uint8_t *b, int count)
+{
+    double ma = 0, mb = 0, ab = 0, aa = 0, bb = 0;
+    for (int i = 0; i < count; i++) {
+        ma += a[i];
+        mb += b[i];
+    }
+    ma /= count;
+    mb /= count;
+    for (int i = 0; i < count; i++) {
+        double x = a[i] - ma, y = b[i] - mb;
+        ab += x * y;
+        aa += x * x;
+        bb += y * y;
+    }
+    return aa > 0 && bb > 0 ? ab / sqrt(aa * bb) : 0;
+}
+
+static double cells_spread(const uint8_t *cells, int count)
+{
+    double mean = 0, var = 0;
+    for (int i = 0; i < count; i++)
+        mean += cells[i];
+    mean /= count;
+    for (int i = 0; i < count; i++)
+        var += (cells[i] - mean) * (cells[i] - mean);
+    return sqrt(var / count);
+}
+
+/* Photos may show the picture with its bars hidden. The strip of its bottom buttons
+ * must then hold something (not flat black) that is not the picture continuing there. */
+static bool bars_visible(const AVFrame *f, ph_rect s, ph_rect r, const AVFrame *live,
+                         ph_rect live_screen)
+{
+    uint8_t row[PH_PICTURE_THUMB * PH_PICTURE_THUMB], seen[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
+    ph_rect band = {s.x, s.y + (int)(s.h * BARS_ROW_TOP), s.w,
+                    (int)(s.h * (BARS_ROW_BOTTOM - BARS_ROW_TOP))};
+    int top, bottom;
+
+    if (!thumb_rect(f, band, row))
+        return false;
+    if (cells_spread(row, PH_PICTURE_THUMB * PH_PICTURE_THUMB) < BARS_FLAT_SPREAD) {
+        return false;
+    }
+    /* Where the picture reaches that strip, the strip must differ from the picture. */
+    top = band.y > r.y ? band.y : r.y;
+    bottom = band.y + band.h < r.y + r.h ? band.y + band.h : r.y + r.h;
+    if (r.w >= s.w - 4 && bottom - top >= band.h / 2) {
+        ph_rect in_live = {live_screen.x,
+                           live_screen.y + (int)((long long)(top - r.y) * live_screen.h / r.h),
+                           live_screen.w,
+                           (int)((long long)(bottom - top) * live_screen.h / r.h)};
+        ph_rect in_back = {s.x, top, s.w, bottom - top};
+        if (in_live.h >= 2 && thumb_rect(live, in_live, seen) && thumb_rect(f, in_back, row)
+            && ph_picture_hamming(
+                   ph_picture_dhash(row, PH_PICTURE_THUMB, PH_PICTURE_THUMB, PH_PICTURE_THUMB),
+                   ph_picture_dhash(seen, PH_PICTURE_THUMB, PH_PICTURE_THUMB, PH_PICTURE_THUMB))
+                   <= BARS_SAME_ROW_BITS) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Whether the saved phone frame is Photos showing this same picture: its middle, where
+ * Photos fits the picture, must look like the bare picture now on screen. */
+static bool bars_match(const app *a, const AVFrame *live, ph_rect live_screen)
+{
+    const AVFrame *f = a->bars_frame;
+    ph_rect s = a->bars_screen, r;
+    uint8_t live_thumb[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
+    uint8_t back_thumb[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
+
+    ph_yuv_planes planes;
+
+    if (!f || !f->data[0] || live_screen.w < 2 || live_screen.h < 2 || s.w < 2 || s.h < 2)
+        return false;
+    /* iOS often switches while the photo is still zooming up from its thumbnail, so
+     * find the picture where it is in the saved screen, at whatever size. */
+    if (frame_planes(f, &planes)) {
+        ph_rect found = ph_video_item_rect(&planes, s.x + s.w / 2, s.y + s.h / 2);
+        if (found.w >= 64 && found.h >= 64 && found.w < s.w * 9 / 10 + 8
+            && thumb_rect(f, found, back_thumb) && thumb_rect(live, live_screen, live_thumb)
+            && cells_correlation(back_thumb, live_thumb, PH_PICTURE_THUMB * PH_PICTURE_THUMB)
+                   >= BARS_SAME_MIN) {
+            return bars_visible(f, s, found, live, live_screen);
+        }
+    }
+    /* contain-fit the picture into the phone screen, as Photos does */
+    if ((long long)s.w * live_screen.h > (long long)s.h * live_screen.w) {
+        r.h = s.h;
+        r.w = (int)((long long)s.h * live_screen.w / live_screen.h);
+    } else {
+        r.w = s.w;
+        r.h = (int)((long long)s.w * live_screen.h / live_screen.w);
+    }
+    r.x = s.x + (s.w - r.w) / 2;
+    r.y = s.y + (s.h - r.h) / 2;
+    if (!thumb_rect(f, r, back_thumb) || !thumb_rect(live, live_screen, live_thumb))
+        return false;
+    /* Photos draws the picture smaller and a little off centre, which moves a dHash
+     * by 25 bits or so; a correlation of the small copies does not mind. */
+    double same = cells_correlation(back_thumb, live_thumb, PH_PICTURE_THUMB * PH_PICTURE_THUMB);
+    if (same < BARS_SAME_MIN) {
+        return false;
+    }
+    return bars_visible(f, s, r, live, live_screen);
+}
+
+/* While iOS sends the landscape TV stream, everything in it is media, whatever its
+ * shape. The bars are chosen once, as the session starts, from the Photos screen sent
+ * just before, and kept while the user swipes through photos. A portrait (phone screen)
+ * frame ends the session. */
+static void apply_bars(app *a, const AVFrame *live, ph_rect live_screen)
+{
+    bool tv = live && live->width > live->height;
+
+    if (!tv) {
+        a->tv_session = false;
+        a->bars_tried = false;
+        if (a->bars_on) {
+            a->bars_on = false;
+            ph_window_set_backdrop(a->win, NULL, NULL);
+        }
+        return;
+    }
+    if (!a->tv_session) {
+        a->tv_session = true;
+        a->tv_since = SDL_GetTicks64();
+    }
+    if (!a->bars_view) {
+        if (a->bars_on) {
+            a->bars_on = false;
+            ph_window_set_backdrop(a->win, NULL, NULL);
+            PH_LOGI("photo view: picture alone (F7)");
+        }
+        return;
+    }
+    if (a->bars_on || a->bars_tried)
+        return;
+    /* iOS fades and zooms the picture in; compare once it has settled. */
+    if (SDL_GetTicks64() - a->tv_since < BARS_SETTLE_MS)
+        return;
+    if (!a->bars_frame || !a->bars_frame->data[0] || a->tv_since - a->bars_at > BARS_FRESH_MS) {
+        a->bars_tried = true;
+        PH_LOGI("photo view: picture alone (no recent Photos screen)");
+        return;
+    }
+    /* Checked on every frame until the picture has zoomed into place and matches. */
+    a->bars_on = bars_match(a, live, live_screen);
+    if (!a->bars_on && SDL_GetTicks64() - a->tv_since < BARS_GIVE_UP_MS)
+        return;
+    a->bars_tried = true;
+    if (a->bars_on) {
+        ph_window_set_backdrop(a->win, a->bars_frame, &a->bars_screen);
+    } else {
+        char dir[512], path[640];
+        if (ph_config_dir(dir, sizeof dir)
+            && snprintf(path, sizeof path, "%s/pull/bars-candidate.png", dir) < (int)sizeof path)
+            ph_shot_write_png(a->bars_frame, path);
+    }
+    PH_LOGI("photo view: %s after %llu ms", a->bars_on ? "Photos bars around the picture"
+                                                      : "picture alone (no Photos screen with bars)",
+            (unsigned long long)(SDL_GetTicks64() - a->tv_since));
+}
+
 /* Shows a decoded frame, cropping the black side bars iOS adds to TV-shaped frames. */
 static void show_frame(app *a, const AVFrame *f)
 {
@@ -1694,6 +1965,15 @@ static void show_frame(app *a, const AVFrame *f)
     }
     ph_rect screen = ph_video_content_rect_stable(&planes, a->portrait_aspect, &a->crop);
     bool presentation = !ph_video_matches_phone_screen(screen, a->portrait_aspect);
+    /* Only the portrait stream is the phone screen. A phone-shaped picture in the
+     * landscape TV frame, such as a screenshot, is media and has no bars of its own. */
+    if (!presentation && a->bars_frame && f->width < f->height) {
+        av_frame_unref(a->bars_frame);
+        if (av_frame_ref(a->bars_frame, f) == 0) {
+            a->bars_screen = screen;
+            a->bars_at = SDL_GetTicks64();
+        }
+    }
     if (presentation != a->presentation_mode) {
         av_frame_unref(a->pointer_reference);
         a->presentation_mode = presentation;
@@ -1708,6 +1988,7 @@ static void show_frame(app *a, const AVFrame *f)
                 screen.w, screen.h, a->portrait_aspect);
         update_title(a);
     }
+    apply_bars(a, f, screen);
     if (screen.w != a->picture_w || screen.h != a->picture_h) {
         av_frame_unref(a->pointer_reference);
         ph_gesture_cancel(&a->gesture, SDL_GetTicks64());
@@ -1855,6 +2136,7 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
             if (a->pull.pulling)
                 break;
             ph_pull_release(&a->pull);
+            a->defer_press = false; /* nothing was sent to the phone yet */
             a->input_pending = false;
             PH_LOGD("pointer cancel: window focus lost");
             if (a->setup.calibrating) {
@@ -2113,6 +2395,8 @@ int ph_app_run(const ph_app_options *opt)
     a.pointer_reference = av_frame_alloc();
     a.pointer_after = av_frame_alloc();
     a.pull_frame = av_frame_alloc();
+    a.bars_frame = av_frame_alloc();
+    a.bars_view = true;
     a.win = ph_window_create(PORTHOLE_NAME);
     a.dec = ph_decoder_start(on_frame, &a);
     if (opt->audio)
@@ -2195,6 +2479,10 @@ int ph_app_run(const ph_app_options *opt)
         if (a.link)
             ph_hid_link_poll(a.link);
         tick_setup(&a);
+        /* A still photo stops the stream after a few frames: keep deciding on the bars
+         * with the last one. */
+        if (a.tv_session && !a.bars_tried && a.view_frame && a.view_frame->data[0])
+            apply_bars(&a, a.view_frame, a.view_screen);
         tick_metrics(&a);
         if (a.link && !a.link_stopping
             && (ph_pointer_transport_stalled(&a.pointer) || a.wheel.failed)) {
@@ -2250,6 +2538,7 @@ done:
     av_frame_free(&a.pointer_reference);
     av_frame_free(&a.pointer_after);
     av_frame_free(&a.pull_frame);
+    av_frame_free(&a.bars_frame);
     SDL_Quit();
     return rc;
 }

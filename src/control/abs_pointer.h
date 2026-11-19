@@ -73,6 +73,9 @@ bool ph_abs_leave_app_switcher(ph_abs *a, uint64_t now_ms);
 bool ph_abs_control_center(ph_abs *a, uint64_t now_ms);
 bool ph_abs_notification_center(ph_abs *a, uint64_t now_ms);
 bool ph_abs_busy(const ph_abs *a);
+/* Ends a held drag by gliding back to x0/y0 before lifting, so iOS cancels the
+ * gesture (a photo being dragged closed springs back) instead of completing it. */
+void ph_abs_cancel_drag(ph_abs *a, double x0, double y0, uint64_t now_ms);
 /* Sends whatever is due; call from the main loop. */
 void ph_abs_tick(ph_abs *a, uint64_t now_ms);
 /* Focus loss, leaving the picture or disconnect: drop scripts, lift the finger. */

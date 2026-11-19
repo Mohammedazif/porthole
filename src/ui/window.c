@@ -24,6 +24,12 @@ struct ph_window {
     SDL_YUV_CONVERSION_MODE yuv_mode;
     bool has_picture;
     SDL_Rect screen;          /* phone-screen part of the texture */
+    /* The Photos screen iOS sent just before it switched to the bare picture: its
+     * bars are drawn around the live picture, where they are on the phone. */
+    SDL_Texture *backdrop;
+    int back_w, back_h;
+    SDL_Rect back_screen;
+    bool has_backdrop;
     int fit_w, fit_h;         /* screen size the window was last fitted to */
     int pending_w, pending_h; /* a different size waiting to settle */
     Uint64 pending_since;
@@ -1136,6 +1142,65 @@ static void track_size(ph_window *w, int sw, int sh)
     }
 }
 
+/* Photos draws its top bar above this fraction of the screen and its controls,
+ * filmstrip and buttons below the other; the live picture shows between them. */
+#define BARS_TOP 0.13
+#define BARS_BOTTOM 0.78
+
+/* Window-space rectangles of the phone canvas, the picture in it, and the band
+ * between the bars. Only meaningful with a backdrop. */
+static void backdrop_layout(const ph_window *w, int area_w, int area_h, int top, SDL_Rect *canvas,
+                            SDL_Rect *picture, SDL_Rect *band)
+{
+    *canvas = fit_rect(area_w, area_h - top, w->back_screen.w, w->back_screen.h);
+    canvas->y += top;
+    *picture = fit_rect(canvas->w, canvas->h, w->screen.w, w->screen.h);
+    picture->x += canvas->x;
+    picture->y += canvas->y;
+    band->x = canvas->x;
+    band->w = canvas->w;
+    band->y = canvas->y + (int)(canvas->h * BARS_TOP);
+    band->h = canvas->y + (int)(canvas->h * BARS_BOTTOM) - band->y;
+}
+
+void ph_window_set_backdrop(ph_window *w, const AVFrame *f, const ph_rect *screen)
+{
+    if (!f || !screen || screen->w < 2 || screen->h < 2) {
+        if (w->has_backdrop) {
+            w->has_backdrop = false;
+            if (w->has_picture)
+                track_size(w, w->screen.w, w->screen.h);
+            ph_window_redraw(w);
+        }
+        return;
+    }
+    if (!w->backdrop || f->width != w->back_w || f->height != w->back_h) {
+        if (w->backdrop)
+            SDL_DestroyTexture(w->backdrop);
+        SDL_SetYUVConversionMode(yuv_mode_for(f));
+        w->backdrop = SDL_CreateTexture(w->renderer, SDL_PIXELFORMAT_IYUV,
+                                        SDL_TEXTUREACCESS_STREAMING, f->width, f->height);
+        if (!w->backdrop) {
+            w->back_w = w->back_h = 0;
+            w->has_backdrop = false;
+            return;
+        }
+        w->back_w = f->width;
+        w->back_h = f->height;
+    }
+    SDL_UpdateYUVTexture(w->backdrop, NULL, f->data[0], f->linesize[0], f->data[1], f->linesize[1],
+                         f->data[2], f->linesize[2]);
+    w->back_screen = (SDL_Rect){screen->x, screen->y, screen->w, screen->h};
+    w->has_backdrop = true;
+    track_size(w, screen->w, screen->h);
+    ph_window_redraw(w);
+}
+
+bool ph_window_has_backdrop(const ph_window *w)
+{
+    return w && w->has_backdrop;
+}
+
 void ph_window_present(ph_window *w, const AVFrame *f, const ph_rect *screen)
 {
     SDL_YUV_CONVERSION_MODE mode = yuv_mode_for(f);
@@ -1163,7 +1228,10 @@ void ph_window_present(ph_window *w, const AVFrame *f, const ph_rect *screen)
     w->screen.w = screen->w;
     w->screen.h = screen->h;
     w->has_picture = true;
-    track_size(w, screen->w, screen->h);
+    if (w->has_backdrop)
+        track_size(w, w->back_screen.w, w->back_screen.h); /* stays phone-shaped */
+    else
+        track_size(w, screen->w, screen->h);
     ph_window_redraw(w);
 }
 
@@ -1184,7 +1252,16 @@ void ph_window_redraw(ph_window *w)
     if (SDL_GetRendererOutputSize(w->renderer, &out_w, &out_h) != 0)
         return;
     top = bar_output_px(w, out_h);
-    if (w->has_picture && w->texture) {
+    if (w->has_picture && w->texture && w->has_backdrop && w->backdrop) {
+        SDL_Rect content = {0, top, out_w, out_h - top}, canvas, picture, band;
+        paint(w->renderer, content, 0, 0, 0, 255);
+        backdrop_layout(w, out_w, out_h, top, &canvas, &picture, &band);
+        SDL_RenderCopy(w->renderer, w->backdrop, &w->back_screen, &canvas);
+        SDL_RenderSetClipRect(w->renderer, &band);
+        paint(w->renderer, band, 0, 0, 0, 255);
+        SDL_RenderCopy(w->renderer, w->texture, &w->screen, &picture);
+        SDL_RenderSetClipRect(w->renderer, NULL);
+    } else if (w->has_picture && w->texture) {
         SDL_Rect content = {0, top, out_w, out_h - top};
         SDL_Rect dst = fit_rect(out_w, content.h, w->screen.w, w->screen.h);
         paint(w->renderer, content, 0, 0, 0, 255);
@@ -1213,6 +1290,23 @@ bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy
 {
     if (!w->control_ready)
         return false;
+    if (w->has_backdrop && w->has_picture && !w->help_visible && !w->setup.visible) {
+        /* With the bars drawn, the window is the phone screen: a click on a drawn
+         * button is that button on the phone. */
+        int win_w, win_h;
+        SDL_Rect canvas, picture, band;
+
+        SDL_GetWindowSize(w->window, &win_w, &win_h);
+        if (y < PH_WINDOW_BAR_PX)
+            return false;
+        backdrop_layout(w, win_w, win_h, PH_WINDOW_BAR_PX, &canvas, &picture, &band);
+        if (canvas.w <= 0 || canvas.h <= 0 || x < canvas.x || y < canvas.y
+            || x >= canvas.x + canvas.w || y >= canvas.y + canvas.h)
+            return false;
+        *vx = (x - canvas.x + 0.5) / canvas.w;
+        *vy = (y - canvas.y + 0.5) / canvas.h;
+        return true;
+    }
     return ph_window_picture_point(w, x, y, vx, vy);
 }
 
@@ -1228,8 +1322,17 @@ bool ph_window_picture_point(const ph_window *w, int x, int y, double *vx, doubl
     SDL_GetWindowSize(w->window, &win_w, &win_h);
     if (win_h - PH_WINDOW_BAR_PX < 1)
         return false;
-    r = fit_rect(win_w, win_h - PH_WINDOW_BAR_PX, w->screen.w, w->screen.h);
-    r.y += PH_WINDOW_BAR_PX;
+    if (w->has_backdrop) {
+        /* The picture between the bars; a press on a bar is not on the picture. */
+        SDL_Rect canvas, band;
+
+        backdrop_layout(w, win_w, win_h, PH_WINDOW_BAR_PX, &canvas, &r, &band);
+        if (y < band.y || y >= band.y + band.h)
+            return false;
+    } else {
+        r = fit_rect(win_w, win_h - PH_WINDOW_BAR_PX, w->screen.w, w->screen.h);
+        r.y += PH_WINDOW_BAR_PX;
+    }
     if (r.w <= 0 || r.h <= 0 || x < r.x || y < r.y || x >= r.x + r.w || y >= r.y + r.h)
         return false;
     *vx = (x - r.x + 0.5) / r.w;
@@ -1327,6 +1430,8 @@ void ph_window_destroy(ph_window *w)
         return;
     if (w->texture)
         SDL_DestroyTexture(w->texture);
+    if (w->backdrop)
+        SDL_DestroyTexture(w->backdrop);
     if (w->lockup)
         SDL_DestroyTexture(w->lockup);
     if (w->mark)

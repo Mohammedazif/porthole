@@ -68,6 +68,11 @@ bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy
  * dragging a photo out, never for sending input to the phone. */
 bool ph_window_picture_point(const ph_window *w, int x, int y, double *vx, double *vy);
 
+/* A phone-screen frame (Photos with its bars) drawn around the bare picture iOS sends
+ * in its place, so the window looks and clicks like the phone. NULL removes it. */
+void ph_window_set_backdrop(ph_window *w, const struct AVFrame *frame, const ph_rect *screen);
+bool ph_window_has_backdrop(const ph_window *w);
+
 /* True when the event is on the title bar. The phone does not see those events. */
 bool ph_window_chrome_event(ph_window *w, const SDL_Event *event);
 

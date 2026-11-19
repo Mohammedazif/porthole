@@ -296,6 +296,29 @@ void ph_abs_tick(ph_abs *a, uint64_t now_ms)
         send(a, a->buttons, a->want_x, a->want_y, now_ms); /* hover or held drag */
 }
 
+void ph_abs_cancel_drag(ph_abs *a, double x0, double y0, uint64_t now_ms)
+{
+    bool down = a->sent_valid && a->buttons;
+    uint8_t buttons = a->buttons;
+    double x1 = a->x, y1 = a->y, x2 = clamp01(x0), y2 = clamp01(y0);
+    uint64_t t = now_ms;
+
+    a->count = 0;
+    a->head = 0;
+    a->pending = 0;
+    a->release_after = 0;
+    a->held = 0;
+    a->wheel = 0;
+    if (!down)
+        return;
+    for (int i = 1; i <= 10; i++) {
+        double f = i / 10.0;
+        t += PH_ABS_REPORT_MS;
+        push(a, t, buttons, x1 + (x2 - x1) * f, y1 + (y2 - y1) * f);
+    }
+    push(a, t + 80, 0, x2, y2);
+}
+
 void ph_abs_release_all(ph_abs *a, uint64_t now_ms)
 {
     a->count = 0;
