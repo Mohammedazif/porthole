@@ -14,20 +14,35 @@ void ph_pull_press(ph_pull *p, bool presentation, bool on_picture, int x, int y)
 {
     if (!p || p->pulling)
         return;
+    p->lift = false;
     p->armed = presentation && on_picture;
     p->press_x = x;
     p->press_y = y;
 }
 
+void ph_pull_allow_inside(ph_pull *p)
+{
+    if (p && p->armed)
+        p->lift = true;
+}
+
+bool ph_pull_lifts(const ph_pull *p)
+{
+    return p && p->lift;
+}
+
 bool ph_pull_motion(ph_pull *p, bool on_picture, int x, int y)
 {
-    long dx, dy;
+    long dx, dy, need;
 
-    if (!p || !p->armed || p->pulling || on_picture)
+    if (!p || !p->armed || p->pulling)
+        return false;
+    if (on_picture && !p->lift)
         return false;
     dx = (long)x - p->press_x;
     dy = (long)y - p->press_y;
-    if (dx * dx + dy * dy < (long)PH_PULL_TRAVEL_PX * PH_PULL_TRAVEL_PX)
+    need = p->lift ? (long)PH_PULL_LIFT_PX : (long)PH_PULL_TRAVEL_PX;
+    if (dx * dx + dy * dy < need * need)
         return false;
     p->pulling = true;
     p->armed = false;
@@ -40,6 +55,7 @@ void ph_pull_release(ph_pull *p)
         return;
     p->armed = false;
     p->pulling = false;
+    p->lift = false;
 }
 
 bool ph_pull_parse_file(const char *line, unsigned long long max_bytes, unsigned long long *size,

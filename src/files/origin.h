@@ -29,6 +29,9 @@ void ph_origin_stop(ph_origin *origin);
 bool ph_origin_ask(ph_origin *origin, uint64_t hash, double aspect, const uint8_t *thumb,
                    const char *dir);
 
+/* IPv4 address of the phone that last gave the right code, kept after it disconnects. */
+bool ph_origin_peer(ph_origin *origin, char *address, size_t len);
+
 /* One result for the latest ask. FILE writes the received path. */
 ph_origin_result ph_origin_take(ph_origin *origin, char *path, size_t path_len);
 

@@ -27,6 +27,7 @@ add_library(porthole_core STATIC
     ui/tray.c
     files/picture_hash.c
     files/pull.c
+    broadcast/screen.c
     usb/packet.c
     usb/switch.c
     usb/winusb.c
@@ -38,7 +39,9 @@ target_include_directories(porthole_core PUBLIC
     ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 if(UNIX)
-    target_link_libraries(porthole_core PUBLIC m)
+    find_package(Threads REQUIRED)
+    # broadcast/screen.c: its listener thread, and Bonjour loaded at run time
+    target_link_libraries(porthole_core PUBLIC m Threads::Threads ${CMAKE_DL_LIBS})
 endif()
 porthole_set_warnings(porthole_core)
 
@@ -69,6 +72,7 @@ if(PORTHOLE_WITH_AIRPLAY)
         audio/player.c
         hid/link.c
         ui/window.c
+        ui/drag_ghost.c
         ui/generated/brand_art.c
         ui/chrome.c
         video/decoder.c
@@ -96,6 +100,10 @@ if(PORTHOLE_WITH_AIRPLAY)
         if(X11_FOUND)
             target_compile_definitions(porthole_app PRIVATE PH_HAVE_X11=1)
             target_link_libraries(porthole_app PUBLIC X11::X11)
+            if(TARGET X11::Xext)
+                target_compile_definitions(porthole_app PRIVATE PH_HAVE_XSHAPE=1)
+                target_link_libraries(porthole_app PUBLIC X11::Xext)
+            endif()
         endif()
     endif()
     porthole_set_warnings(porthole_app)

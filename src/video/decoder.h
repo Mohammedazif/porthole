@@ -35,6 +35,10 @@ ph_decoder *ph_decoder_start(void (*on_frame)(void *user), void *user);
 /* Copies one access unit and queues it. Safe to call from any thread. */
 void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len);
 
+/* Pictures whose longer side is above this are scaled down before display.
+ * 0 leaves the decoded size unchanged. Safe to call from any thread. */
+void ph_decoder_limit_edge(ph_decoder *d, int long_edge);
+
 /* Drops queued data and decoder state (use when a new stream starts). */
 void ph_decoder_reset(ph_decoder *d);
 

@@ -42,6 +42,8 @@ struct ph_origin {
     char dir[512];
     char path[768];
     char token[16];
+    char peer[64]; /* address of the connection being served */
+    char known[64]; /* last phone that gave the right code */
 };
 
 static bool token_ok(const char *s)
@@ -307,6 +309,7 @@ static void serve_client(ph_origin *o, int fd)
         goto done;
     pthread_mutex_lock(&o->lock);
     o->have_client = true;
+    snprintf(o->known, sizeof o->known, "%s", o->peer);
     pthread_mutex_unlock(&o->lock);
     PH_LOGI("photo pull: iPhone connected");
     while (!o->stop) {
@@ -415,6 +418,9 @@ static void *origin_main(void *arg)
         fd = accept(o->listen_fd, (struct sockaddr *)&peer, &peer_len);
         if (fd < 0)
             continue;
+        pthread_mutex_lock(&o->lock);
+        inet_ntop(AF_INET, &peer.sin_addr, o->peer, sizeof o->peer);
+        pthread_mutex_unlock(&o->lock);
         serve_client(o, fd);
         close(fd);
     }
@@ -491,6 +497,19 @@ void ph_origin_stop(ph_origin *o)
     free(o);
 }
 
+bool ph_origin_peer(ph_origin *o, char *address, size_t len)
+{
+    bool ok;
+
+    if (!o || !address || !len)
+        return false;
+    pthread_mutex_lock(&o->lock);
+    ok = o->known[0] != '\0';
+    snprintf(address, len, "%s", ok ? o->known : "");
+    pthread_mutex_unlock(&o->lock);
+    return ok;
+}
+
 bool ph_origin_ask(ph_origin *o, uint64_t hash, double aspect, const uint8_t *thumb,
                    const char *dir)
 {
@@ -564,6 +583,14 @@ bool ph_origin_ask(ph_origin *origin, uint64_t hash, double aspect, const uint8_
     (void)aspect;
     (void)thumb;
     (void)dir;
+    return false;
+}
+
+bool ph_origin_peer(ph_origin *origin, char *address, size_t len)
+{
+    (void)origin;
+    if (address && len)
+        address[0] = 0;
     return false;
 }
 

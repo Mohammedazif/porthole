@@ -10,6 +10,7 @@
 #include <SDL_syswm.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
+#include <X11/Xutil.h>
 
 static Display *display;
 static Window source;
@@ -22,6 +23,9 @@ static bool active;
 static bool settling;
 static bool accepted;
 static int xdnd_error_flag;
+static Atom atom_utf8, atom_wm_name;
+static SDL_Window *skip_sdl;
+static Window skip_xid;
 
 static int xdnd_error(Display *d, XErrorEvent *event)
 {
@@ -83,12 +87,119 @@ static void set_uri(const char *path)
     uri[o] = 0;
 }
 
+static Window ignored(void)
+{
+    SDL_SysWMinfo info;
+
+    if (skip_xid || !skip_sdl || !display)
+        return skip_xid;
+    SDL_VERSION(&info.version);
+    if (SDL_GetWindowWMInfo(skip_sdl, &info) && info.subsystem == SDL_SYSWM_X11)
+        skip_xid = info.info.x11.window;
+    return skip_xid;
+}
+
+static void copy_title(const char *text, int len, char *buf, size_t n)
+{
+    size_t o = 0;
+    int i;
+
+    buf[0] = 0;
+    if (!text || n < 2)
+        return;
+    if (len < 0)
+        len = (int)strlen(text);
+    for (i = 0; i < len && o + 1 < n && o < 72; i++) {
+        unsigned char c = (unsigned char)text[i];
+
+        if (c == '\n' || c == '\r' || c == '\t')
+            c = ' ';
+        if (c < 32 || c > 126)
+            continue;
+        if (c == ' ' && (o == 0 || buf[o - 1] == ' '))
+            continue;
+        buf[o++] = (char)c;
+    }
+    while (o > 0 && buf[o - 1] == ' ')
+        o--;
+    buf[o] = 0;
+}
+
+static bool read_title(Window w, char *buf, size_t n)
+{
+    Atom type = None;
+    int format = 0;
+    unsigned long count = 0, left = 0;
+    unsigned char *data = NULL;
+    XErrorHandler old;
+    bool ok = false;
+
+    buf[0] = 0;
+    if (!display || !w || !atom_utf8 || !atom_wm_name)
+        return false;
+    xdnd_error_flag = 0;
+    old = XSetErrorHandler(xdnd_error);
+    if (XGetWindowProperty(display, w, atom_wm_name, 0, 128, False, atom_utf8, &type, &format,
+                           &count, &left, &data)
+            == Success
+        && !xdnd_error_flag && data && type == atom_utf8 && format == 8 && count > 0) {
+        copy_title((const char *)data, (int)count, buf, n);
+        ok = buf[0] != 0;
+    }
+    if (data)
+        XFree(data);
+    if (!ok) {
+        XTextProperty prop;
+        char **list = NULL;
+        int nlist = 0;
+
+        memset(&prop, 0, sizeof prop);
+        xdnd_error_flag = 0;
+        if (XGetWMName(display, w, &prop) && !xdnd_error_flag && prop.value) {
+            if (XmbTextPropertyToTextList(display, &prop, &list, &nlist) == Success && nlist > 0
+                && list && list[0]) {
+                copy_title(list[0], -1, buf, n);
+                ok = buf[0] != 0;
+            }
+            if (list)
+                XFreeStringList(list);
+            XFree(prop.value);
+        }
+    }
+    XSetErrorHandler(old);
+    return ok;
+}
+
+static bool ensure_display(SDL_Window *window)
+{
+    SDL_SysWMinfo info;
+
+    if ((!display || !source) && window) {
+        SDL_VERSION(&info.version);
+        if (!SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_X11)
+            return false;
+        display = info.info.x11.display;
+        source = info.info.x11.window;
+    }
+    if (!display || !source)
+        return false;
+    if (!atom_aware)
+        atom_aware = XInternAtom(display, "XdndAware", False);
+    if (!atom_utf8)
+        atom_utf8 = XInternAtom(display, "UTF8_STRING", False);
+    if (!atom_wm_name)
+        atom_wm_name = XInternAtom(display, "_NET_WM_NAME", False);
+    return atom_aware != None;
+}
+
 static Window find_aware(int root_x, int root_y)
 {
     Window root = DefaultRootWindow(display);
     Window found = 0;
     Window win = root;
+    Window skip = ignored();
     int guard;
+    bool lowered = false;
 
     for (guard = 0; guard < 32; guard++) {
         Window child = 0;
@@ -104,7 +215,20 @@ static Window find_aware(int root_x, int root_y)
         XSetErrorHandler(old);
         if (!child || child == win)
             break;
+        if (skip && child == skip) {
+            if (lowered)
+                break;
+            /* The photo follows the cursor. Look through it once, then put it back. */
+            XLowerWindow(display, skip);
+            XFlush(display);
+            lowered = true;
+            continue;
+        }
         win = child;
+    }
+    if (lowered) {
+        XRaiseWindow(display, skip);
+        XFlush(display);
     }
     for (guard = 0; win && win != root && guard < 32; guard++) {
         Atom type = None;
@@ -193,6 +317,8 @@ bool ph_xdnd_begin(SDL_Window *window, const char *path)
     atom_uri = XInternAtom(display, "text/uri-list", False);
     atom_types = XInternAtom(display, "XdndTypeList", False);
     atom_targets = XInternAtom(display, "TARGETS", False);
+    atom_utf8 = XInternAtom(display, "UTF8_STRING", False);
+    atom_wm_name = XInternAtom(display, "_NET_WM_NAME", False);
     set_uri(path);
     XChangeProperty(display, source, atom_types, XA_ATOM, 32, PropModeReplace,
                     (unsigned char *)&atom_uri, 1);
@@ -275,6 +401,29 @@ bool ph_xdnd_busy(void)
     return active;
 }
 
+bool ph_xdnd_place(SDL_Window *window, int root_x, int root_y, char *buf, size_t n)
+{
+    Window hit;
+
+    if (!buf || n < 16)
+        return false;
+    buf[0] = 0;
+    if (!ensure_display(window))
+        return false;
+    hit = active ? target : find_aware(root_x, root_y);
+    if (!hit)
+        return false;
+    if (!read_title(hit, buf, n) || !buf[0])
+        snprintf(buf, n, "Desktop");
+    return true;
+}
+
+void ph_xdnd_skip(SDL_Window *window)
+{
+    skip_sdl = window;
+    skip_xid = 0;
+}
+
 void ph_xdnd_syswm(const void *msg_ptr)
 {
     const SDL_SysWMmsg *msg = msg_ptr;
@@ -344,6 +493,21 @@ bool ph_xdnd_busy(void)
 void ph_xdnd_syswm(const void *msg)
 {
     (void)msg;
+}
+
+bool ph_xdnd_place(SDL_Window *window, int root_x, int root_y, char *buf, size_t n)
+{
+    (void)window;
+    (void)root_x;
+    (void)root_y;
+    if (buf && n)
+        buf[0] = 0;
+    return false;
+}
+
+void ph_xdnd_skip(SDL_Window *window)
+{
+    (void)window;
 }
 
 #endif

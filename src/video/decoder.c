@@ -2,6 +2,7 @@
 
 #include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -41,6 +42,7 @@ struct ph_decoder {
 
     void (*on_frame)(void *user);
     void *user;
+    atomic_int max_edge; /* 0: keep the decoded size */
 };
 
 static void release_packet(packet *p)
@@ -96,21 +98,56 @@ static AVCodecContext *open_codec(enum AVCodecID codec_id)
     return ctx;
 }
 
-/* Converts unusual pixel formats to plain YUV 4:2:0 so the display path stays simple. */
-static AVFrame *to_yuv420p(const AVFrame *src, struct SwsContext **sws)
+/* Even size that fits in max_edge on the longer side, or the original size. */
+static void fit_edge(int width, int height, int max_edge, int *out_w, int *out_h)
+{
+    int long_edge = width > height ? width : height;
+    int w, h;
+
+    if (max_edge < 2 || long_edge <= max_edge || width < 2 || height < 2) {
+        *out_w = width;
+        *out_h = height;
+        return;
+    }
+    if (width >= height) {
+        w = max_edge & ~1;
+        h = (int)(((long long)height * w + width / 2) / width) & ~1;
+    } else {
+        h = max_edge & ~1;
+        w = (int)(((long long)width * h + height / 2) / height) & ~1;
+    }
+    if (w < 2)
+        w = 2;
+    if (h < 2)
+        h = 2;
+    *out_w = w;
+    *out_h = h;
+}
+
+/* Converts unusual pixel formats to plain YUV 4:2:0 so the display path stays simple.
+ * A max_edge above 0 also scales a larger picture down to that longer side. */
+static AVFrame *to_yuv420p(const AVFrame *src, struct SwsContext **sws, int max_edge)
 {
     AVFrame *dst;
+    int dw, dh;
 
-    if (src->format == AV_PIX_FMT_YUV420P || src->format == AV_PIX_FMT_YUVJ420P)
+    fit_edge(src->width, src->height, max_edge, &dw, &dh);
+    if ((src->format == AV_PIX_FMT_YUV420P || src->format == AV_PIX_FMT_YUVJ420P)
+        && dw == src->width && dh == src->height)
         return av_frame_clone(src);
-    *sws = sws_getCachedContext(*sws, src->width, src->height, src->format, src->width,
-                                src->height, AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL, NULL, NULL);
+    *sws = sws_getCachedContext(*sws, src->width, src->height, src->format, dw, dh,
+                                AV_PIX_FMT_YUV420P,
+                                dw == src->width && dh == src->height ? SWS_BILINEAR
+                                                                      : SWS_FAST_BILINEAR,
+                                NULL, NULL, NULL);
     dst = av_frame_alloc();
     if (!*sws || !dst)
         goto fail;
     dst->format = AV_PIX_FMT_YUV420P;
-    dst->width = src->width;
-    dst->height = src->height;
+    dst->width = dw;
+    dst->height = dh;
+    dst->color_range = src->color_range;
+    dst->colorspace = src->colorspace;
     if (av_frame_get_buffer(dst, 0) < 0)
         goto fail;
     sws_scale(*sws, (const uint8_t *const *)src->data, src->linesize, 0, src->height, dst->data,
@@ -221,7 +258,7 @@ static void *decode_thread(void *arg)
                 timing.received_ms = (uint64_t)frame->pts;
                 timing.valid = true;
             }
-            AVFrame *out = to_yuv420p(frame, &sws);
+            AVFrame *out = to_yuv420p(frame, &sws, atomic_load(&d->max_edge));
             av_frame_unref(frame);
             if (!out)
                 continue;
@@ -268,6 +305,7 @@ ph_decoder *ph_decoder_start(void (*on_frame)(void *user), void *user)
         return NULL;
     d->on_frame = on_frame;
     d->user = user;
+    atomic_init(&d->max_edge, 0);
     pthread_mutex_init(&d->lock, NULL);
     pthread_cond_init(&d->wake, NULL);
     if (pthread_create(&d->thread, NULL, decode_thread, d) != 0) {
@@ -277,6 +315,12 @@ ph_decoder *ph_decoder_start(void (*on_frame)(void *user), void *user)
         return NULL;
     }
     return d;
+}
+
+void ph_decoder_limit_edge(ph_decoder *d, int long_edge)
+{
+    if (d && long_edge >= 0)
+        atomic_store(&d->max_edge, long_edge);
 }
 
 void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len)

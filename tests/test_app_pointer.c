@@ -17,6 +17,7 @@
 #include "airplay/receiver.h"
 #include "hid/link.h"
 #include "ui/window.h"
+#include "ui/drag_ghost.h"
 #include "video/decoder.h"
 
 #define PHONE_WIDTH 500
@@ -263,8 +264,14 @@ ph_window *ph_window_create(const char *title)
 void ph_window_set_title(ph_window *w, const char *title) { (void)w, (void)title; }
 void ph_window_set_detail(ph_window *w, const char *detail) { (void)w, (void)detail; }
 void ph_window_set_pull_hint(ph_window *w, const char *hint) { (void)w, (void)hint; }
-void ph_window_set_backdrop(ph_window *w, const struct AVFrame *frame, const ph_rect *screen) { (void)w, (void)frame, (void)screen; }
-bool ph_window_has_backdrop(const ph_window *w) { (void)w; return false; }
+void ph_decoder_limit_edge(ph_decoder *d, int long_edge) { (void)d, (void)long_edge; }
+ph_drag_ghost *ph_drag_ghost_create(void) { return NULL; }
+void ph_drag_ghost_destroy(ph_drag_ghost *g) { (void)g; }
+bool ph_drag_ghost_show(ph_drag_ghost *g, const struct AVFrame *frame, ph_rect rect) { (void)g, (void)frame, (void)rect; return false; }
+void ph_drag_ghost_caption(ph_drag_ghost *g, const char *text, bool aimed) { (void)g, (void)text, (void)aimed; }
+void ph_drag_ghost_move(ph_drag_ghost *g, int root_x, int root_y) { (void)g, (void)root_x, (void)root_y; }
+void ph_drag_ghost_hide(ph_drag_ghost *g) { (void)g; }
+SDL_Window *ph_drag_ghost_window(const ph_drag_ghost *g) { (void)g; return NULL; }
 bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy);
 bool ph_window_picture_point(const ph_window *w, int x, int y, double *vx, double *vy)
 {

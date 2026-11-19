@@ -3,6 +3,7 @@
 
 #include "files/picture_hash.h"
 #include "files/pull.h"
+#include "broadcast/screen.h"
 
 static int g_failures;
 
@@ -75,6 +76,20 @@ static void test_thumb(void)
     CHECK(ph_picture_thumb(NULL, 4, 4, 4, out) == 0);
 }
 
+static void test_screen_header(void)
+{
+    const uint8_t video[5] = {0, 0, 1, 0, 1}, key[5] = {0, 0, 0, 9, 2};
+    const uint8_t empty[5] = {0, 0, 0, 0, 1}, odd[5] = {0, 0, 0, 9, 7};
+    const uint8_t huge[5] = {0x7f, 0, 0, 0, 1};
+    int type = 0;
+
+    CHECK(ph_screen_parse_header(video, PH_SCREEN_FRAME_MAX, &type) == 256 && type == 1);
+    CHECK(ph_screen_parse_header(key, PH_SCREEN_FRAME_MAX, &type) == 9 && type == 2);
+    CHECK(ph_screen_parse_header(empty, PH_SCREEN_FRAME_MAX, &type) == 0);
+    CHECK(ph_screen_parse_header(odd, PH_SCREEN_FRAME_MAX, &type) == 0);
+    CHECK(ph_screen_parse_header(huge, PH_SCREEN_FRAME_MAX, &type) == 0);
+}
+
 static void test_gesture(void)
 {
     ph_pull pull;
@@ -94,6 +109,19 @@ static void test_gesture(void)
     CHECK(!ph_pull_motion(&pull, false, 400, 10));
     ph_pull_release(&pull);
     CHECK(!pull.pulling && !pull.armed);
+
+    ph_pull_allow_inside(&pull);
+    CHECK(!ph_pull_lifts(&pull));
+    ph_pull_press(&pull, true, true, 10, 10);
+    ph_pull_allow_inside(&pull);
+    CHECK(ph_pull_lifts(&pull));
+    CHECK(!ph_pull_motion(&pull, true, 10 + 8, 10));
+    CHECK(ph_pull_motion(&pull, true, 10 + PH_PULL_LIFT_PX, 10));
+    CHECK(pull.pulling);
+    ph_pull_release(&pull);
+    ph_pull_press(&pull, true, true, 10, 10);
+    CHECK(!ph_pull_lifts(&pull));
+    CHECK(!ph_pull_motion(&pull, true, 10 + 40, 10));
 }
 
 static void test_name(void)
@@ -116,6 +144,7 @@ int main(void)
 {
     test_hash();
     test_thumb();
+    test_screen_header();
     test_gesture();
     test_name();
     if (g_failures) {
