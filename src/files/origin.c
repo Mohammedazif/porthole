@@ -290,6 +290,14 @@ static void save_comparison(const char *dir, const uint8_t *pc_thumb, bool have_
     PH_LOGI("photo pull: saved both copies as %s/compare-{pc,phone}.pgm", dir);
 }
 
+static double now_ms(void)
+{
+    struct timespec t;
+
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000.0 + t.tv_nsec / 1e6;
+}
+
 static void serve_client(ph_origin *o, int fd)
 {
     char line[2048 + 2 * PH_PICTURE_THUMB * PH_PICTURE_THUMB];
@@ -331,6 +339,7 @@ static void serve_client(ph_origin *o, int fd)
         uint8_t detail[PH_PICTURE_DETAIL * PH_PICTURE_DETAIL];
         ph_origin_screen screen;
         bool asked, have_thumb, have_detail, have_screen;
+        double sent_at, answer_at;
         size_t used, i;
 
         pthread_mutex_lock(&o->lock);
@@ -385,6 +394,7 @@ static void serve_client(ph_origin *o, int fd)
             }
         }
         ask_line[used++] = '\n';
+        sent_at = now_ms();
         if (!send_all(fd, ask_line, used) || !read_line(fd, line, sizeof line)) {
             PH_LOGW("photo pull: iPhone did not send the file");
             pthread_mutex_lock(&o->lock);
@@ -393,7 +403,9 @@ static void serve_client(ph_origin *o, int fd)
             pthread_mutex_unlock(&o->lock);
             break;
         }
+        answer_at = now_ms();
         if (strncmp(line, "MISS", 4) == 0 && (line[4] == '\0' || line[4] == ' ')) {
+            PH_LOGI("photo pull: iPhone searched %.1f s", (answer_at - sent_at) / 1000);
             save_comparison(dir, thumb, have_thumb, line);
             PH_LOGI("photo pull: no original matched (aspect %.4f%s)", aspect, line + 4);
             pthread_mutex_lock(&o->lock);
@@ -409,6 +421,7 @@ static void serve_client(ph_origin *o, int fd)
 
             if (!ph_pull_parse_file(line, PH_PULL_MAX_BYTES, &size, name, sizeof name)
                 || !save_body(fd, dir, name, size, path, sizeof path)) {
+                PH_LOGW("photo pull: the iPhone's file did not arrive");
                 pthread_mutex_lock(&o->lock);
                 o->ready = PH_ORIGIN_MISS;
                 o->ready_id = id;
@@ -428,6 +441,8 @@ static void serve_client(ph_origin *o, int fd)
             why = why ? strchr(why + 1, ' ') : NULL;
             PH_LOGI("photo pull: original %s%s%s%s", path, why ? " (scores " : "", why ? why + 1 : "",
                     why ? ")" : "");
+            PH_LOGI("photo pull: iPhone searched %.1f s, sent the file in %.1f s",
+                    (answer_at - sent_at) / 1000, (now_ms() - answer_at) / 1000);
         }
     }
 done:
