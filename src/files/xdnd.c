@@ -17,7 +17,7 @@ static Window source;
 static Window target;
 static Atom atom_aware, atom_enter, atom_position, atom_status, atom_leave, atom_drop;
 static Atom atom_finished, atom_selection, atom_action, atom_uri, atom_types, atom_targets;
-static char uri[1024];
+static char uri[1 << 17];
 static unsigned long x_time;
 static bool active;
 static bool settling;
@@ -60,18 +60,32 @@ static void send_client(Window window, Atom type, long a, long b, long c, long d
     XSetErrorHandler(old);
 }
 
+/* path may hold several files, one per line; text/uri-list carries each on its own
+ * CRLF-ended line, so a whole batch from the phone drops in one go. */
 static void set_uri(const char *path)
 {
     size_t i, o = 0;
     const char *prefix = "file://";
+    bool line_start = true;
 
     if (!path)
         return;
-    for (i = 0; prefix[i] && o + 1 < sizeof uri; i++)
-        uri[o++] = prefix[i];
-    for (i = 0; path[i] && o + 4 < sizeof uri; i++) {
+    for (i = 0; path[i] && o + 16 < sizeof uri; i++) {
         unsigned char c = (unsigned char)path[i];
 
+        if (c == '\n') {
+            if (!line_start) {
+                uri[o++] = '\r';
+                uri[o++] = '\n';
+            }
+            line_start = true;
+            continue;
+        }
+        if (line_start) {
+            for (size_t k = 0; prefix[k]; k++)
+                uri[o++] = prefix[k];
+            line_start = false;
+        }
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
             || c == '/' || c == '.' || c == '_' || c == '-') {
             uri[o++] = (char)c;
@@ -80,7 +94,7 @@ static void set_uri(const char *path)
             o += 3;
         }
     }
-    if (o + 2 < sizeof uri) {
+    if (!line_start && o + 2 < sizeof uri) {
         uri[o++] = '\r';
         uri[o++] = '\n';
     }

@@ -4,6 +4,7 @@ configure_file(core/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/core/vers
 add_library(porthole_core STATIC
     core/config.c
     core/metrics.c
+    core/bonjour.c
     control/keyboard.c
     control/input.c
     control/mouse_input.c
@@ -28,6 +29,7 @@ add_library(porthole_core STATIC
     files/picture_hash.c
     files/pull.c
     broadcast/screen.c
+    files/inbox.c
     usb/packet.c
     usb/switch.c
     usb/winusb.c

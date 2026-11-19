@@ -1,5 +1,6 @@
 #include "broadcast/screen.h"
 
+#include "core/bonjour.h"
 #include "core/log.h"
 
 #include <stdio.h>
@@ -23,7 +24,6 @@ uint32_t ph_screen_parse_header(const uint8_t header[5], uint32_t max_len, int *
 #if defined(__linux__)
 
 #include <arpa/inet.h>
-#include <dlfcn.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -32,23 +32,12 @@ uint32_t ph_screen_parse_header(const uint8_t header[5], uint32_t max_len, int *
 #include <sys/socket.h>
 #include <unistd.h>
 
-/* Bonjour through the Avahi compatibility library, loaded at run time the same way
- * UxPlay loads it, so the build needs no extra dependency. */
-typedef void *dns_ref;
-typedef int (*register_fn)(dns_ref *ref, uint32_t flags, uint32_t interface, const char *name,
-                           const char *type, const char *domain, const char *host,
-                           uint16_t port_be, uint16_t txt_len, const void *txt, void *reply,
-                           void *context);
-typedef void (*deallocate_fn)(dns_ref ref);
-
 struct ph_screen {
     ph_screen_callbacks cb;
     int listen_fd;
     pthread_t thread;
     atomic_bool stop;
-    void *dns_module;
-    dns_ref dns;
-    deallocate_fn dns_free;
+    ph_bonjour *bonjour;
 };
 
 static bool read_all(ph_screen *s, int fd, void *buf, size_t len)
@@ -170,27 +159,6 @@ static void *screen_main(void *arg)
     return NULL;
 }
 
-static void advertise(ph_screen *s)
-{
-    static const char *const names[] = {"libdns_sd.so.1", "libdns_sd.so"};
-    register_fn reg = NULL;
-
-    for (size_t i = 0; i < sizeof names / sizeof names[0] && !s->dns_module; i++)
-        s->dns_module = dlopen(names[i], RTLD_LAZY);
-    if (!s->dns_module) {
-        PH_LOGW("screen broadcast: Bonjour library not found; the iPhone cannot find this PC");
-        return;
-    }
-    reg = (register_fn)dlsym(s->dns_module, "DNSServiceRegister");
-    s->dns_free = (deallocate_fn)dlsym(s->dns_module, "DNSServiceRefDeallocate");
-    if (!reg || !s->dns_free
-        || reg(&s->dns, 0, 0, "Porthole", PH_SCREEN_SERVICE, NULL, NULL, htons(PH_SCREEN_PORT), 0,
-               NULL, NULL, NULL) != 0) {
-        PH_LOGW("screen broadcast: could not advertise %s", PH_SCREEN_SERVICE);
-        s->dns = NULL;
-    }
-}
-
 ph_screen *ph_screen_start(const ph_screen_callbacks *callbacks)
 {
     ph_screen *s = calloc(1, sizeof *s);
@@ -219,7 +187,7 @@ ph_screen *ph_screen_start(const ph_screen_callbacks *callbacks)
         close(s->listen_fd);
         goto fail;
     }
-    advertise(s);
+    s->bonjour = ph_bonjour_advertise("Porthole", PH_SCREEN_SERVICE, PH_SCREEN_PORT);
     PH_LOGI("screen broadcast: listening on port %d", PH_SCREEN_PORT);
     return s;
 fail:
@@ -235,10 +203,7 @@ void ph_screen_stop(ph_screen *s)
     shutdown(s->listen_fd, SHUT_RDWR);
     pthread_join(s->thread, NULL);
     close(s->listen_fd);
-    if (s->dns && s->dns_free)
-        s->dns_free(s->dns);
-    if (s->dns_module)
-        dlclose(s->dns_module);
+    ph_bonjour_stop(s->bonjour);
     free(s);
 }
 

@@ -30,6 +30,7 @@
 #include "control/setup.h"
 #include "core/config.h"
 #include "core/log.h"
+#include "files/inbox.h"
 #include "files/origin.h"
 #include "files/picture_hash.h"
 #include "broadcast/screen.h"
@@ -61,7 +62,7 @@ static void request_stop(int sig)
     stop_requested = 1;
 }
 
-enum { EV_FRAME, EV_CONNECTED, EV_DISCONNECTED, EV_BLE, EV_COUNT };
+enum { EV_FRAME, EV_CONNECTED, EV_DISCONNECTED, EV_BLE, EV_INBOX, EV_INBOX_NOTE, EV_COUNT };
 
 typedef struct app {
     const ph_app_options *opt;
@@ -151,7 +152,14 @@ typedef struct app {
     Uint64 place_at;
     ph_origin *origin;
     char pull_dir[640];
-    char pull_path[768]; /* original file for this drag; empty while it is only the screen */
+    /* Original file(s) for this drag, one per line; empty while the phone is looking. */
+    char pull_path[1 << 16];
+    /* Files the phone sent from its Share sheet, one per line, until a Ctrl+drag places
+     * them. pull_inbox marks a drag that carries them. */
+    ph_inbox *inbox;
+    char *inbox_paths;
+    int inbox_count;
+    bool pull_inbox;
     int pull_note;
     bool pull_hold; /* button is up; wait for the phone before offering the file */
     Uint64 pull_hold_at;
@@ -269,6 +277,22 @@ static bool screen_allow(void *user, const char *address)
     app *a = user;
     char phone[64];
     return ph_origin_peer(a->origin, phone, sizeof phone) && strcmp(phone, address) == 0;
+}
+
+static void inbox_progress(void *user, int done, int total)
+{
+    char line[96];
+
+    snprintf(line, sizeof line, done < total ? "Receiving %d of %d from the iPhone"
+                                             : "Received %d of %d from the iPhone",
+             done, total);
+    push_event(user, EV_INBOX_NOTE, strdup(line));
+}
+
+static void inbox_received(void *user, const char *paths, int count)
+{
+    (void)count;
+    push_event(user, EV_INBOX, strdup(paths));
 }
 
 static void screen_connected(void *user, const char *address)
@@ -879,20 +903,58 @@ static bool desktop_copy(const char *src)
     return copy_file(src, dest);
 }
 
+/* Copies each file, one per line, to the Desktop. Returns how many arrived there. */
+static int desktop_copy_all(char *paths)
+{
+    int copied = 0;
+
+    for (char *line = paths, *next; line && *line; line = next) {
+        next = strchr(line, '\n');
+        if (next)
+            *next++ = 0;
+        if (desktop_copy(line)) {
+            copied++;
+            PH_LOGI("photo pull: original on the Desktop (%s)", line);
+        } else {
+            PH_LOGW("photo pull: original stayed at %s", line);
+        }
+    }
+    return copied;
+}
+
 static void end_pull(app *a)
 {
     bool placed = false;
     int note = a->pull_note;
-    char saved[768];
+    bool inbox = a->pull_inbox;
+    static char saved[sizeof ((app *)0)->pull_path];
 
     snprintf(saved, sizeof saved, "%s", a->pull_path);
     if (ph_xdnd_busy())
         placed = ph_xdnd_drop();
-    if (saved[0] && note == 3 && !placed) {
-        if (desktop_copy(saved))
-            PH_LOGI("photo pull: original on the Desktop (%s)", saved);
-        else
-            PH_LOGW("photo pull: original stayed at %s", saved);
+    if (saved[0] && note == 3 && !placed)
+        desktop_copy_all(saved);
+    a->pull_inbox = false;
+    if (inbox && note == 3) {
+        /* Placed or saved on the Desktop: the batch is used up either way. */
+        int count = a->inbox_count;
+        char line[96];
+
+        free(a->inbox_paths);
+        a->inbox_paths = NULL;
+        a->inbox_count = 0;
+        ph_pull_release(&a->pull);
+        drop_pull_snapshot(a);
+        hide_ghost(a);
+        a->pull_note = 0;
+        a->pull_hold = false;
+        a->pull_path[0] = 0;
+        update_title(a);
+        snprintf(line, sizeof line, placed ? "Placed %d item%s from the iPhone"
+                                           : "Saved %d item%s from the iPhone on the Desktop",
+                 count, count == 1 ? "" : "s");
+        ph_window_set_detail(a->win, line);
+        return;
     }
     ph_pull_release(&a->pull);
     drop_pull_snapshot(a);
@@ -998,6 +1060,21 @@ static void ask_pull(app *a)
     a->pull_path[0] = 0;
     a->pull_hold = false;
     a->pull_picture = (ph_rect){0};
+    a->pull_inbox = false;
+    if (a->inbox_paths && a->pull_snap) {
+        /* Items sent from the phone's Share sheet go first: this drag carries them all. */
+        char line[96];
+
+        snprintf(a->pull_path, sizeof a->pull_path, "%s", a->inbox_paths);
+        a->pull_inbox = true;
+        a->pull_note = 3;
+        a->pull_picture = a->pull_screen;
+        snprintf(line, sizeof line, "Drag out to place %d item%s from the iPhone",
+                 a->inbox_count, a->inbox_count == 1 ? "" : "s");
+        ph_window_set_detail(a->win, line);
+        PH_LOGI("photo pull: carrying %d shared item(s)", a->inbox_count);
+        return;
+    }
     ph_origin_take(a->origin, NULL, 0); /* a late reply belongs to the previous press */
     if (!a->pull_snap || !frame_planes(a->pull_frame, &planes) || !pull_item(a, &picture)) {
         a->pull_note = 5;
@@ -1173,6 +1250,7 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
             SDL_CaptureMouse(SDL_FALSE);
             a->pull_note = 0;
             a->pull_path[0] = 0;
+            a->pull_inbox = false;
             return;
         } else {
             ph_pull_release(&a->pull);
@@ -1548,6 +1626,7 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         a->pull_hold = false;
         a->pull_note = 0;
         a->pull_path[0] = 0;
+        a->pull_inbox = false; /* the shared items wait for the next Ctrl+drag */
         ph_input_release_all(&a->input);
         SDL_CaptureMouse(SDL_FALSE);
         a->gesture_keys[sc] = true;
@@ -2093,6 +2172,40 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
         handle_ble_status(a, (const char *)e->user.data1);
         free(e->user.data1);
         break;
+    case EV_INBOX_NOTE:
+        ph_window_set_detail(a->win, (const char *)e->user.data1);
+        free(e->user.data1);
+        break;
+    case EV_INBOX: {
+        char line[128];
+        int count = 0;
+
+        if (!e->user.data1)
+            break;
+        for (const char *c = e->user.data1; *c; c++)
+            count += *c == '\n';
+        count++;
+        if (a->pull_inbox) { /* a drag of the previous batch is under way; keep both */
+            size_t len = strlen(a->inbox_paths) + strlen(e->user.data1) + 2;
+            char *both = malloc(len);
+            if (both)
+                snprintf(both, len, "%s\n%s", a->inbox_paths, (char *)e->user.data1);
+            free(e->user.data1);
+            if (!both)
+                break;
+            free(a->inbox_paths);
+            a->inbox_paths = both;
+            a->inbox_count += count;
+        } else {
+            free(a->inbox_paths);
+            a->inbox_paths = e->user.data1;
+            a->inbox_count = count;
+        }
+        snprintf(line, sizeof line, "%d item%s from the iPhone: hold Ctrl and drag out of the window",
+                 a->inbox_count, a->inbox_count == 1 ? "" : "s");
+        ph_window_set_detail(a->win, line);
+        break;
+    }
     default:
         break;
     }
@@ -2451,6 +2564,15 @@ int ph_app_run(const ph_app_options *opt)
         atomic_init(&a.airplay_on, false);
         a.screen = ph_screen_start(&screen_cb);
     }
+    if (ensure_pull_dir(&a)) {
+        ph_inbox_callbacks inbox_cb = {
+            .user = &a,
+            .allow = screen_allow, /* only the phone whose photo link gave the code */
+            .progress = inbox_progress,
+            .received = inbox_received,
+        };
+        a.inbox = ph_inbox_start(a.pull_dir, &inbox_cb);
+    }
     if (opt->diagnostics)
         ph_window_toggle_diagnostics(a.win);
     char setup_done[16];
@@ -2536,6 +2658,8 @@ done:
     ph_drag_ghost_destroy(a.ghost);
     a.ghost = NULL;
     ph_screen_stop(a.screen); /* before the origin its allow callback reads */
+    ph_inbox_stop(a.inbox);
+    free(a.inbox_paths);
     ph_origin_stop(a.origin);
     if (a.usb_started) {
         atomic_store(&a.usb_stop, true);

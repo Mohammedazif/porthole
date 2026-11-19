@@ -6,8 +6,9 @@
 
 #include <SDL.h>
 
-/* Offers one local file to the window under the cursor. The path can be replaced
- * until the button goes up, which is when the other window reads it. */
+/* Offers local files to the window under the cursor: one path, or several, one per
+ * line. The path can be replaced until the button goes up, which is when the other
+ * window reads it. */
 bool ph_xdnd_begin(SDL_Window *window, const char *path);
 void ph_xdnd_set_path(const char *path);
 void ph_xdnd_motion(int root_x, int root_y);
