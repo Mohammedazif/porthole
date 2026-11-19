@@ -684,11 +684,13 @@ ph_rect ph_grid_cell(const ph_grid *g, int x, int y, int width, int height)
     row = floor((y - g->row_start + 0.5) / g->pitch);
     x0 = col * g->pitch;
     y0 = g->row_start + row * g->pitch;
-    /* One pixel in from each side keeps the blurred gap out of the thumbnail. */
-    r.x = (int)ceil(x0) + 1;
-    r.y = (int)ceil(y0) + 1;
-    r.w = (int)floor(x0 + g->pitch - g->gap) - 1 - r.x;
-    r.h = (int)floor(y0 + g->pitch - g->gap) - 1 - r.y;
+    /* Every whole pixel of the thumbnail and no more: the gap sits just before x0.
+     * Cutting further in looks like a zoom to the phone, and a 3% zoom alone costs
+     * the right photo most of its lead over the others. */
+    r.x = (int)ceil(x0 - 0.01);
+    r.y = (int)ceil(y0 - 0.01);
+    r.w = (int)floor(x0 + g->pitch - g->gap + 0.01) - r.x;
+    r.h = (int)floor(y0 + g->pitch - g->gap + 0.01) - r.y;
     if (r.x < 0) {
         r.w += r.x;
         r.x = 0;
@@ -724,9 +726,10 @@ static bool badge_white(const ph_yuv_planes *p, int x, int y)
 
 #define BADGE_CELLS_MAX 2048 /* the largest blob followed, in chroma cells */
 
-int ph_video_selected_items(const ph_yuv_planes *p, const ph_grid *grid, ph_rect *out, int max)
+/* Selection badges whose blue disc starts inside area: each one's disc, in luma pixels. */
+static int find_badges(const ph_yuv_planes *p, ph_rect area, ph_rect *out, int max)
 {
-    int cw, ch, found = 0;
+    int cw, ch, found = 0, ax0, ay0, ax1, ay1;
     unsigned char *seen;
     int *stack;
 
@@ -734,6 +737,10 @@ int ph_video_selected_items(const ph_yuv_planes *p, const ph_grid *grid, ph_rect
         return 0;
     cw = p->width / 2;
     ch = p->height / 2;
+    ax0 = area.x / 2 > 0 ? area.x / 2 : 0;
+    ay0 = area.y / 2 > 0 ? area.y / 2 : 0;
+    ax1 = (area.x + area.w + 1) / 2 < cw ? (area.x + area.w + 1) / 2 : cw;
+    ay1 = (area.y + area.h + 1) / 2 < ch ? (area.y + area.h + 1) / 2 : ch;
     seen = calloc((size_t)cw * ch, 1);
     stack = malloc(sizeof *stack * BADGE_CELLS_MAX);
     if (!seen || !stack) {
@@ -741,11 +748,10 @@ int ph_video_selected_items(const ph_yuv_planes *p, const ph_grid *grid, ph_rect
         free(stack);
         return 0;
     }
-    for (int cy = 0; cy < ch && found < max; cy++) {
-        for (int cx = 0; cx < cw && found < max; cx++) {
-            int top = 0, cells = 0, x0 = cx, x1 = cx, y0 = cy, y1 = cy, white = 0, area;
+    for (int cy = ay0; cy < ay1 && found < max; cy++) {
+        for (int cx = ax0; cx < ax1 && found < max; cx++) {
+            int top = 0, cells = 0, x0 = cx, x1 = cx, y0 = cy, y1 = cy, white = 0, area_cells;
             bool overflow = false;
-            ph_rect item;
 
             if (seen[cy * cw + cx] || !badge_blue(p, cx, cy))
                 continue;
@@ -777,35 +783,72 @@ int ph_video_selected_items(const ph_yuv_planes *p, const ph_grid *grid, ph_rect
             if (overflow || bw < 8 || bh < 8 || bw > 48 || bh > 48 || bw * 4 < bh * 3
                 || bh * 4 < bw * 3)
                 continue;
-            area = (x1 - x0 + 1) * (y1 - y0 + 1);
-            if (cells * 100 < area * 40 || cells * 100 > area * 92)
+            area_cells = (x1 - x0 + 1) * (y1 - y0 + 1);
+            if (cells * 100 < area_cells * 40 || cells * 100 > area_cells * 92)
                 continue;
             for (int y = y0 * 2; y <= y1 * 2 + 1 && y < p->height; y++)
                 for (int x = x0 * 2; x <= x1 * 2 + 1 && x < p->width; x++)
                     white += badge_white(p, x, y);
             if (white * 100 < bw * bh * 4)
                 continue; /* no white tick: blue in a photo, not a badge */
-            /* The badge sits in the thumbnail's bottom-right corner. */
-            if (grid) {
-                item = ph_grid_cell(grid, x0 + x1, y0 + y1, p->width, p->height);
-                if (item.w < 16 || item.h < 16)
-                    continue;
-            } else {
-                item = ph_video_item_rect(p, x0 * 2 - 4 > 0 ? x0 * 2 - 4 : 0,
-                                          y0 * 2 - 4 > 0 ? y0 * 2 - 4 : 0);
-                if (item.w < ITEM_MIN_PX || item.h < ITEM_MIN_PX || item.w > p->width * 3 / 4)
-                    continue;
-            }
-            bool again = false;
-            for (int i = 0; i < found; i++)
-                again |= out[i].x == item.x && out[i].y == item.y;
-            if (!again)
-                out[found++] = item;
+            out[found++] = (ph_rect){x0 * 2, y0 * 2, bw, bh};
         }
     }
     free(seen);
     free(stack);
     return found;
+}
+
+int ph_video_selected_items(const ph_yuv_planes *p, const ph_grid *grid, ph_rect *out, int max)
+{
+    ph_rect discs[64];
+    int n, found = 0;
+
+    if (!p || !out || max < 1)
+        return 0;
+    n = find_badges(p, (ph_rect){0, 0, p->width, p->height}, discs, 64);
+    for (int i = 0; i < n && found < max; i++) {
+        int x0 = discs[i].x / 2, y0 = discs[i].y / 2;
+        int x1 = x0 + discs[i].w / 2 - 1, y1 = y0 + discs[i].h / 2 - 1;
+        ph_rect item;
+
+        /* The badge sits in the thumbnail's bottom-right corner. */
+        if (grid) {
+            item = ph_grid_cell(grid, x0 + x1, y0 + y1, p->width, p->height);
+            if (item.w < 16 || item.h < 16)
+                continue;
+        } else {
+            item = ph_video_item_rect(p, x0 * 2 - 4 > 0 ? x0 * 2 - 4 : 0,
+                                      y0 * 2 - 4 > 0 ? y0 * 2 - 4 : 0);
+            if (item.w < ITEM_MIN_PX || item.h < ITEM_MIN_PX || item.w > p->width * 3 / 4)
+                continue;
+        }
+        bool again = false;
+        for (int i2 = 0; i2 < found; i2++)
+            again |= out[i2].x == item.x && out[i2].y == item.y;
+        if (!again)
+            out[found++] = item;
+    }
+    return found;
+}
+
+int ph_video_badges_in(const ph_yuv_planes *p, ph_rect area, ph_rect *out, int max)
+{
+    int n = find_badges(p, area, out, max);
+
+    /* Grow each disc over its white ring and soft shadow, kept inside the area. */
+    for (int i = 0; i < n; i++) {
+        int grow = out[i].w / 4 + 2;
+        int x0 = out[i].x - grow, y0 = out[i].y - grow;
+        int x1 = out[i].x + out[i].w + grow, y1 = out[i].y + out[i].h + grow;
+
+        x0 = x0 > area.x ? x0 : area.x;
+        y0 = y0 > area.y ? y0 : area.y;
+        x1 = x1 < area.x + area.w ? x1 : area.x + area.w;
+        y1 = y1 < area.y + area.h ? y1 : area.y + area.h;
+        out[i] = (ph_rect){x0, y0, x1 - x0, y1 - y0};
+    }
+    return n;
 }
 
 ph_rect ph_video_content_rect(const ph_yuv_planes *p, double portrait_aspect)

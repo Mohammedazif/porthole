@@ -728,6 +728,66 @@ static bool frame_planes(const AVFrame *f, ph_yuv_planes *planes)
     return true;
 }
 
+/* Paints a rect out of a luma picture: each pixel takes the picture just outside the
+ * rect, from every side that has some, weighted by nearness. */
+static void paint_out(uint8_t *px, int w, int h, ph_rect b)
+{
+    for (int y = b.y; y < b.y + b.h; y++) {
+        for (int x = b.x; x < b.x + b.w; x++) {
+            double sum = 0, weight = 0;
+
+            if (b.y > 0)
+                sum += px[(b.y - 1) * w + x] / (double)(y - b.y + 1), weight += 1.0 / (y - b.y + 1);
+            if (b.y + b.h < h)
+                sum += px[(b.y + b.h) * w + x] / (double)(b.y + b.h - y),
+                    weight += 1.0 / (b.y + b.h - y);
+            if (b.x > 0)
+                sum += px[y * w + b.x - 1] / (double)(x - b.x + 1), weight += 1.0 / (x - b.x + 1);
+            if (b.x + b.w < w)
+                sum += px[y * w + b.x + b.w] / (double)(b.x + b.w - x),
+                    weight += 1.0 / (b.x + b.w - x);
+            if (weight > 0)
+                px[y * w + x] = (uint8_t)(sum / weight + .5);
+        }
+    }
+}
+
+/* The thumb and detail cells of a picture on screen. Select mode's checkmark is not
+ * part of the picture, so it is painted out first: left in, it alone can make the
+ * right photo lose to a different one. */
+static bool picture_samples(const AVFrame *f, ph_rect s, uint8_t thumb[PH_PICTURE_THUMB * PH_PICTURE_THUMB],
+                            uint8_t detail[PH_PICTURE_DETAIL * PH_PICTURE_DETAIL], bool *have_detail)
+{
+    ph_yuv_planes planes;
+    ph_rect badges[4];
+    uint8_t *copy;
+    int n;
+    bool ok;
+
+    *have_detail = false;
+    if (!f || !f->data[0] || s.w < 2 || s.h < 2 || s.x < 0 || s.y < 0
+        || s.x + s.w > f->width || s.y + s.h > f->height)
+        return false;
+    n = frame_planes(f, &planes) ? ph_video_badges_in(&planes, s, badges, 4) : 0;
+    if (n == 0 || !(copy = malloc((size_t)s.w * (size_t)s.h))) {
+        ok = thumb_rect(f, s, thumb);
+        *have_detail = ok && detail_rect(f, s, detail);
+        return ok;
+    }
+    for (int y = 0; y < s.h; y++)
+        memcpy(copy + (size_t)y * s.w, f->data[0] + (size_t)(s.y + y) * f->linesize[0] + s.x, (size_t)s.w);
+    for (int i = 0; i < n; i++) {
+        badges[i].x -= s.x;
+        badges[i].y -= s.y;
+        paint_out(copy, s.w, s.h, badges[i]);
+    }
+    ok = ph_picture_thumb(copy, s.w, s.h, s.w, thumb) != 0;
+    *have_detail = ok && ph_picture_cells(copy, s.w, s.h, s.w, PH_PICTURE_DETAIL, detail) != 0;
+    free(copy);
+    PH_LOGD("photo pull: painted out %d checkmark%s", n, n == 1 ? "" : "s");
+    return ok;
+}
+
 /* Window point of the press, in the decoded frame. */
 static bool press_video_pixel(const app *a, int *px, int *py)
 {
@@ -1097,8 +1157,7 @@ static bool ask_rect(app *a, ph_rect picture, bool with_screen)
 
     /* The phone hashes a 64-pixel copy, so a dHash of single video pixels is mostly
      * texture noise. Hashing the averaged thumb samples what the phone samples. */
-    have_thumb = thumb_rect(a->pull_frame, picture, thumb);
-    have_detail = have_thumb && detail_rect(a->pull_frame, picture, detail);
+    have_thumb = picture_samples(a->pull_frame, picture, thumb, detail, &have_detail);
     hash = have_thumb ? ph_picture_dhash(thumb, PH_PICTURE_THUMB, PH_PICTURE_THUMB, PH_PICTURE_THUMB)
                       : hash_rect(a->pull_frame, picture);
     aspect = (double)picture.w / (double)picture.h;

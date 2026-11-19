@@ -558,7 +558,9 @@ bool ph_origin_ask(ph_origin *o, uint64_t hash, double aspect, const uint8_t *th
     if (!o || !dir || !dir[0])
         return false;
     pthread_mutex_lock(&o->lock);
-    if (o->have_client && !o->ask) {
+    /* An ask the link has not sent yet is replaced: the newest press is the one that
+     * counts, and refusing it would read as a lost iPhone. */
+    if (o->have_client) {
         o->hash = hash;
         o->aspect = aspect;
         o->have_thumb = thumb != NULL;

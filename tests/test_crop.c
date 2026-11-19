@@ -481,7 +481,8 @@ int main(void)
                     int row = (int)floor((540 - scroll) / pitch);
                     CHECK(abs(cell.x - (int)ceil(col * pitch)) <= 2);
                     CHECK(abs(cell.y - (int)ceil(scroll + row * pitch)) <= 2);
-                    CHECK(abs(cell.w - (int)(pitch - 2)) <= 3 && abs(cell.h - (int)(pitch - 2)) <= 3);
+                    /* The whole thumbnail: a cut further in reads as a zoom to the phone. */
+                    CHECK(abs(cell.w - (int)(pitch - 2)) <= 1 && abs(cell.h - (int)(pitch - 2)) <= 1);
                 }
                 free_frame(&f);
             }
@@ -526,6 +527,19 @@ int main(void)
             CHECK(n == 2);
             CHECK(n == 2 && abs(sel[0].x - (int)ceil(pitch)) <= 2 && abs(sel[0].y - (int)ceil(4 * pitch)) <= 2);
             CHECK(n == 2 && abs(sel[1].x - (int)ceil(3 * pitch)) <= 2 && abs(sel[1].y - (int)ceil(6 * pitch)) <= 2);
+            /* The badge to paint out: the disc, its ring and shadow, inside the cell only. */
+            if (n == 2) {
+                ph_rect b[4];
+                int nb = ph_video_badges_in(&(ph_yuv_planes){f.y, f.u, f.v, 500, 250, 500, 1080}, sel[0], b, 4);
+                int cx = (int)(pitch + pitch - 16), cy = (int)(4 * pitch + pitch - 16);
+                CHECK(nb == 1);
+                CHECK(nb == 1 && b[0].x <= cx - 11 && b[0].y <= cy - 11 && b[0].x + b[0].w >= cx + 11
+                      && b[0].y + b[0].h >= cy + 11);
+                CHECK(nb == 1 && b[0].x >= sel[0].x && b[0].y >= sel[0].y
+                      && b[0].x + b[0].w <= sel[0].x + sel[0].w && b[0].y + b[0].h <= sel[0].y + sel[0].h);
+                CHECK(ph_video_badges_in(&(ph_yuv_planes){f.y, f.u, f.v, 500, 250, 500, 1080},
+                                         ph_grid_cell(&g, 250, 50, 500, 1080), b, 4) == 0);
+            }
             free_frame(&f);
         }
     }

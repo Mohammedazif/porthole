@@ -60,6 +60,11 @@ ph_rect ph_grid_cell(const ph_grid *g, int x, int y, int width, int height);
  * returns how many. */
 int ph_video_selected_items(const ph_yuv_planes *p, const ph_grid *grid, ph_rect *out, int max);
 
+/* Selection badges inside area, each grown over its white ring and shadow and kept
+ * inside area: what to paint out of a checkmarked thumbnail before matching it.
+ * Writes up to max rects and returns how many. */
+int ph_video_badges_in(const ph_yuv_planes *p, ph_rect area, ph_rect *out, int max);
+
 /* Retain a confirmed crop while a same-size frame is too dark to distinguish
  * the phone screen from its bars. Zero-initialize/reset for each video session.
  * A new frame size defaults to the whole frame when its pixels are ambiguous. */
