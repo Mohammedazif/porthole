@@ -1081,13 +1081,14 @@ static void finish_pull(app *a)
 {
     note_origin(a);
     if (a->pull.pulling && a->pull_note == 2) {
-        /* Dropped before the phone answered. The card stays where it was dropped and
-         * says so; the file lands there when it arrives. Escape gives up. */
+        /* Dropped before the phone answered. The card goes at once, since most of these
+         * are the home screen or a page the phone will refuse; a file that does come
+         * lands where it was dropped. Escape gives up. */
         a->pull_hold = true;
         a->pull_hold_at = SDL_GetTicks64();
         SDL_GetGlobalMouseState(&a->hold_gx, &a->hold_gy);
-        ph_drag_ghost_caption(a->ghost, "Getting it from the iPhone... (Esc cancels)", true);
-        ph_window_set_detail(a->win, "Getting the original from the iPhone (Esc cancels)");
+        hide_ghost(a);
+        ph_window_set_detail(a->win, "Checking with the iPhone... (Esc cancels)");
         return;
     }
     end_pull(a);
