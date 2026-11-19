@@ -7,7 +7,8 @@
 
 /* The phone app connects here and answers a picture hash with the original file. */
 #define PH_PULL_PORT 47731
-#define PH_PULL_MAX_BYTES (200ull * 1024ull * 1024ull)
+/* A long 4K video can be several gigabytes. */
+#define PH_PULL_MAX_BYTES (16ull * 1024ull * 1024ull * 1024ull)
 
 typedef struct ph_origin ph_origin;
 

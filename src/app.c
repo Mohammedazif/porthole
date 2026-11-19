@@ -99,6 +99,10 @@ typedef struct app {
     AVFrame *pull_frame;
     int pull_px, pull_py;
     bool pull_snap;
+    /* A bare photo or video that iOS sends instead of the phone screen is already the
+     * whole picture; edge finding is only for thumbnails on the phone layout. */
+    bool pull_presentation;
+    ph_rect pull_screen;
     ph_rect view_screen, baseline_screen, reference_screen;
     Uint64 reference_at;
     int picture_w, picture_h;
@@ -626,6 +630,12 @@ static void snap_pull(app *a)
         || !press_video_pixel(a, &a->pull_px, &a->pull_py))
         return;
     a->pull_snap = av_frame_ref(a->pull_frame, a->view_frame) == 0;
+    /* iOS sends the live screen as a portrait stream. A picture centred in a landscape
+     * TV frame is media even when it has the phone's shape, such as a screenshot. */
+    a->pull_presentation = a->presentation_mode
+                           || (a->view_frame->width > a->view_frame->height
+                               && a->view_screen.w + 16 < a->view_frame->width);
+    a->pull_screen = a->view_screen;
 }
 
 static bool copy_file(const char *src, const char *dest)
@@ -775,7 +785,14 @@ static void begin_pull(app *a)
     }
     px = a->pull_px;
     py = a->pull_py;
-    picture = ph_video_item_rect(&planes, px, py);
+    /* A dark photo has black areas that edge finding takes for gaps, so a press on
+     * them found nothing or a strip. The bare picture needs no edges found. */
+    if (a->pull_presentation && a->pull_screen.x >= 0 && a->pull_screen.y >= 0
+        && a->pull_screen.x + a->pull_screen.w <= a->pull_frame->width
+        && a->pull_screen.y + a->pull_screen.h <= a->pull_frame->height)
+        picture = a->pull_screen;
+    else
+        picture = ph_video_item_rect(&planes, px, py);
     if (picture.w < 64 || picture.h < 64) {
         a->pull_note = 5;
         ph_window_set_detail(a->win, "Drag one photo, not the page around it");
@@ -805,7 +822,7 @@ static void follow_pull(app *a)
 {
     int x, y;
 
-    if (a->pull_hold && SDL_GetTicks64() - a->pull_hold_at > 60000) {
+    if (a->pull_hold && SDL_GetTicks64() - a->pull_hold_at > 300000) {
         PH_LOGW("photo pull: iPhone did not answer");
         end_pull(a);
     }

@@ -284,7 +284,8 @@ static void save_comparison(const char *dir, const uint8_t *pc_thumb, bool have_
 static void serve_client(ph_origin *o, int fd)
 {
     char line[96 + 2 * PH_PICTURE_THUMB * PH_PICTURE_THUMB];
-    struct timeval tv = {.tv_sec = 60, .tv_usec = 0};
+    /* The phone may first download a video from iCloud before it answers. */
+    struct timeval tv = {.tv_sec = 300, .tv_usec = 0};
     int on = 1, idle = 15, interval = 5, count = 3;
 
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
