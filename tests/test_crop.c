@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "video/crop.h"
+#include "video/photos_ui.h"
 
 static int g_failures;
 
@@ -542,6 +543,61 @@ int main(void)
             }
             free_frame(&f);
         }
+    }
+
+    {
+        /* Photos' Share button: a round button bottom left (Select mode), not the end
+         * of the library's tab bar there. */
+        ph_rect screen = {0, 0, 500, 1080};
+        int x, y;
+
+        for (int bar = 0; bar < 2; bar++) {
+            frame f = make_frame(500, 1080, 0);
+            for (int py = 960; py < 1080; py++)
+                for (int px = 0; px < 500; px++) {
+                    bool inside;
+                    if (bar) { /* a capsule from x 25 to 245 */
+                        int cx = px < 53 ? 53 : px > 217 ? 217 : px;
+                        inside = (px - cx) * (px - cx) + (py - 1020) * (py - 1020) <= 28 * 28;
+                    } else {
+                        inside = (px - 60) * (px - 60) + (py - 1020) * (py - 1020) <= 28 * 28;
+                    }
+                    if (inside)
+                        f.y[py * 500 + px] = 26;
+                }
+            for (int py = 1010; py < 1030; py++) /* the glyph */
+                for (int px = 52; px < 68; px++)
+                    f.y[py * 500 + px] = 240;
+            bool found = ph_photos_share_button(&(ph_yuv_planes){f.y, f.u, f.v, 500, 250, 500, 1080},
+                                                screen, &x, &y);
+            CHECK(found == !bar);
+            CHECK(bar || (abs(x - 60) <= 2 && abs(y - 1020) <= 2));
+            free_frame(&f);
+        }
+    }
+
+    {
+        /* Porthole's purple icon in a Share sheet row; a purple-ish photo is not it. */
+        frame f = make_frame(500, 1080, 200);
+        int x = 0, y = 0;
+        for (int i = 0; i < 2; i++) {
+            int x0 = 40 + i * 110;
+            for (int py = 700; py < 776; py++)
+                for (int px = x0; px < x0 + 76; px++) {
+                    f.y[py * 500 + px] = 87;
+                    f.u[(py / 2) * 250 + px / 2] = i ? 223 : 177;
+                    f.v[(py / 2) * 250 + px / 2] = i ? 203 : 155;
+                }
+        }
+        for (int py = 725; py < 751; py++) /* the white ring's middle */
+            for (int px = 175; px < 201; px++) {
+                f.u[(py / 2) * 250 + px / 2] = 128;
+                f.v[(py / 2) * 250 + px / 2] = 128;
+            }
+        CHECK(ph_photos_porthole_icon(&(ph_yuv_planes){f.y, f.u, f.v, 500, 250, 500, 1080},
+                                      (ph_rect){0, 0, 500, 1080}, &x, &y));
+        CHECK(abs(x - 188) <= 2 && abs(y - 738) <= 2);
+        free_frame(&f);
     }
 
     if (g_failures) {

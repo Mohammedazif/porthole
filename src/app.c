@@ -48,6 +48,7 @@
 #include "usb/switch.h"
 #include "video/codecs.h"
 #include "video/crop.h"
+#include "video/photos_ui.h"
 #include "video/cursor.h"
 #include "video/decoder.h"
 #include "video/scrollbar.h"
@@ -167,6 +168,13 @@ typedef struct app {
     bool pull_hold; /* button is up; wait for the phone before offering the file */
     Uint64 pull_hold_at;
     int hold_gx, hold_gy; /* where a file drag was let go before the file came */
+    /* Photos' Share sheet pressed for the user (run_share): Photos itself sends the
+     * exact originals of what is selected, so nothing is matched. */
+    int share_step;
+    Uint64 share_at;
+    double share_cell_x, share_cell_y; /* thumbnail to tick, phone fractions */
+    bool share_leave;                  /* Porthole opened Select mode; close it after */
+    int share_seen, share_icon_x, share_icon_y;
 } app;
 
 /* ------------------------------------------------------------ cross-thread notifications */
@@ -1141,9 +1149,6 @@ static void track_pull(app *a)
     note_origin(a);
 }
 
-/* Asks the phone about the picture under a Ctrl press at once, before any drag, so
- * the card only appears for something the phone has: the home screen or an app page
- * never shows one. Nothing here reaches the phone's screen. */
 /* Asks the phone about one picture in the pull frame. with_screen also sends the
  * whole phone screen, for a picture whose edges may be wrong or missing. */
 static bool ask_rect(app *a, ph_rect picture, bool with_screen)
@@ -1178,6 +1183,205 @@ static bool ask_rect(app *a, ph_rect picture, bool with_screen)
     return true;
 }
 
+/* ------------------------------------------------------------ Photos' Share sheet */
+
+enum {
+    SHARE_IDLE,
+    SHARE_SELECT, /* tapped Select; waiting for Select mode's Share button */
+    SHARE_TICK,   /* tapped the thumbnail; waiting before tapping Share */
+    SHARE_SHEET,  /* tapped Share; looking for Porthole among the apps */
+    SHARE_SEND,   /* tapped Porthole; waiting for the files */
+    SHARE_CLOSE,  /* files here; leaving the Select mode Porthole opened */
+};
+
+/* Photos' Select button at the top right of the library, and Select mode's close
+ * button in the same corner (phone fractions, iOS 26). */
+#define SHARE_SELECT_X 0.86
+#define SHARE_SELECT_Y 0.074
+#define SHARE_CLOSE_X 0.90
+
+static bool share_tap(app *a, double fx, double fy)
+{
+    if (!a->absolute || !a->link || ph_abs_busy(&a->abs))
+        return false;
+    return ph_abs_tap(&a->abs, fx, fy, 1, 60, SDL_GetTicks64());
+}
+
+/* Frame pixel -> phone fraction. */
+static bool share_point(const app *a, int px, int py, double *fx, double *fy)
+{
+    ph_rect s = a->view_screen;
+
+    if (s.w < 2 || s.h < 2)
+        return false;
+    *fx = (px + .5 - s.x) / s.w;
+    *fy = (py + .5 - s.y) / s.h;
+    return *fx > 0 && *fx < 1 && *fy > 0 && *fy < 1;
+}
+
+/* Gives up, saying why. The drag waiting for the files ends. */
+static void share_stop(app *a, const char *why)
+{
+    int step = a->share_step;
+
+    a->share_step = SHARE_IDLE;
+    PH_LOGW("photo share: %s (step %d)", why, step);
+    if (a->pull_note == 2) {
+        if (a->pull_hold) {
+            a->pull_note = 0;
+            end_pull(a);
+        } else {
+            a->pull_note = 4;
+            hide_ghost(a);
+        }
+    }
+    ph_window_set_detail(a->win, why);
+}
+
+/* A Ctrl press in Photos takes what is selected, or the thumbnail under the press,
+ * through Photos' own Share sheet: Porthole taps Share and then Porthole, and Photos
+ * sends the exact originals, even of items scrolled off screen. False leaves the
+ * press to picture matching. */
+static bool start_share(app *a)
+{
+    ph_yuv_planes planes;
+    ph_grid grid;
+    int bx, by;
+    double fx, fy;
+
+    if (!a->absolute || !a->link || !a->inbox || !a->pull_snap
+        || !frame_planes(a->pull_frame, &planes))
+        return false;
+    a->share_leave = false;
+    a->share_seen = 0;
+    if (ph_photos_share_button(&planes, a->pull_screen, &bx, &by)
+        && share_point(a, bx, by, &fx, &fy)) {
+        /* Select mode, or one photo or video: Share takes exactly that. */
+        if (!share_tap(a, fx, fy))
+            return false;
+        a->share_step = SHARE_SHEET;
+        PH_LOGI("photo share: tapping Share");
+    } else if (!a->pull_presentation && ph_video_grid(&planes, a->pull_px, a->pull_py, &grid)) {
+        /* The library grid: Select, tick this thumbnail, Share, and close Select. */
+        ph_rect cell = ph_grid_cell(&grid, a->pull_px, a->pull_py, a->pull_frame->width,
+                                    a->pull_frame->height);
+
+        if (cell.w < 8
+            || !share_point(a, cell.x + cell.w / 2, cell.y + cell.h / 2, &a->share_cell_x,
+                            &a->share_cell_y)
+            || !share_tap(a, SHARE_SELECT_X, SHARE_SELECT_Y))
+            return false;
+        a->pull_picture = cell;
+        a->share_leave = true;
+        a->share_step = SHARE_SELECT;
+        PH_LOGI("photo share: tapping Select for one thumbnail");
+    } else {
+        return false;
+    }
+    if (!a->pull_picture.w)
+        a->pull_picture = a->pull_screen;
+    a->share_at = SDL_GetTicks64();
+    a->pull_note = 2;
+    ph_window_set_detail(a->win, "Getting it from Photos...");
+    return true;
+}
+
+/* Moves the Share run on from the latest picture. Called from the main loop. */
+static void run_share(app *a)
+{
+    ph_yuv_planes planes;
+    Uint64 now = SDL_GetTicks64(), since = now - a->share_at;
+    int x, y;
+    double fx, fy;
+
+    if (a->share_step == SHARE_IDLE || ph_abs_busy(&a->abs))
+        return;
+    if (a->share_step == SHARE_CLOSE) {
+        /* The sheet closes itself just after sending. */
+        if (since >= 1800) {
+            share_tap(a, SHARE_CLOSE_X, SHARE_SELECT_Y);
+            a->share_step = SHARE_IDLE;
+            PH_LOGI("photo share: closing Select");
+        }
+        return;
+    }
+    if (a->share_step == SHARE_SEND) {
+        if (since > 180000)
+            share_stop(a, "Photos did not send the files");
+        return;
+    }
+    if (!a->view_frame || !frame_planes(a->view_frame, &planes))
+        return;
+    switch (a->share_step) {
+    case SHARE_SELECT:
+        if (since >= 500 && ph_photos_share_button(&planes, a->view_screen, &x, &y)) {
+            if (share_tap(a, a->share_cell_x, a->share_cell_y)) {
+                a->share_step = SHARE_TICK;
+                a->share_at = now;
+                PH_LOGI("photo share: ticking the thumbnail");
+            }
+        } else if (since > 3000) {
+            share_stop(a, "Could not open Select in Photos");
+        }
+        break;
+    case SHARE_TICK:
+        if (since >= 450 && ph_photos_share_button(&planes, a->view_screen, &x, &y)
+            && share_point(a, x, y, &fx, &fy) && share_tap(a, fx, fy)) {
+            a->share_step = SHARE_SHEET;
+            a->share_at = now;
+            PH_LOGI("photo share: tapping Share");
+        } else if (since > 3000) {
+            share_stop(a, "Photos' Share button did not appear");
+        }
+        break;
+    case SHARE_SHEET:
+        /* The sheet slides up: tap the icon once it has stayed put for three looks. */
+        if (since >= 300 && ph_photos_porthole_icon(&planes, a->view_screen, &x, &y)) {
+            if (a->share_seen && abs(x - a->share_icon_x) <= 2 && abs(y - a->share_icon_y) <= 2)
+                a->share_seen++;
+            else
+                a->share_seen = 1;
+            a->share_icon_x = x;
+            a->share_icon_y = y;
+            if (a->share_seen >= 3 && share_point(a, x, y, &fx, &fy) && share_tap(a, fx, fy)) {
+                a->share_step = SHARE_SEND;
+                a->share_at = now;
+                PH_LOGI("photo share: tapping Porthole in the Share sheet");
+                ph_window_set_detail(a->win, "Photos is sending it...");
+            }
+        } else if (since > 6000) {
+            share_stop(a, "Porthole is not in the iPhone's Share sheet: scroll its apps to More, "
+                          "tap Edit, and move Porthole to the front");
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+/* Files from Photos' Share sheet arrived while a Ctrl+drag waits for them. */
+static void share_delivered(app *a)
+{
+    if (a->share_step != SHARE_SEND && a->share_step != SHARE_SHEET)
+        return;
+    a->share_step = a->share_leave ? SHARE_CLOSE : SHARE_IDLE;
+    a->share_at = SDL_GetTicks64();
+    if (!a->inbox_paths || a->pull_note != 2
+        || !(a->pull.armed || a->pull.pulling || a->pull_hold))
+        return; /* they wait for the next Ctrl+drag */
+    snprintf(a->pull_path, sizeof a->pull_path, "%s", a->inbox_paths);
+    a->pull_inbox = true;
+    a->pull_note = 3;
+    PH_LOGI("photo share: %d item(s) from Photos", a->inbox_count);
+    if (!a->pull.pulling && !a->pull_hold) {
+        ph_window_set_detail(a->win, "Got it. Drag it out of the window");
+        return;
+    }
+    start_file_drag(a);
+    if (a->pull_hold)
+        end_pull(a);
+}
+
 /* Asks the phone about the picture under a Ctrl press at once, before any drag, so
  * the card only appears for something the phone has: the home screen or an app page
  * never shows one. A press on a checkmarked thumbnail in Select mode takes every
@@ -1206,6 +1410,8 @@ static void ask_pull(app *a)
         return;
     }
     ph_origin_take(a->origin, NULL, 0); /* a late reply belongs to the previous press */
+    if (start_share(a))
+        return;
     bool on_grid = false;
     ph_grid grid;
 
@@ -1266,7 +1472,8 @@ static void ask_pull(app *a)
  * looking or has the file; after a refusal there is nothing to carry. */
 static void begin_pull(app *a)
 {
-    ph_abs_release_all(&a->abs, SDL_GetTicks64());
+    if (!a->share_step) /* the Share run's taps are under way */
+        ph_abs_release_all(&a->abs, SDL_GetTicks64());
     ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
     SDL_CaptureMouse(SDL_TRUE);
     note_origin(a);
@@ -1274,7 +1481,8 @@ static void begin_pull(app *a)
         return;
     carry_ghost(a, a->pull_picture);
     if (a->pull_note == 2)
-        ph_drag_ghost_caption(a->ghost, "Finding it on the iPhone...", false);
+        ph_drag_ghost_caption(a->ghost, a->share_step ? "Getting it from Photos..."
+                                                      : "Finding it on the iPhone...", false);
     else
         start_file_drag(a);
 }
@@ -1316,7 +1524,8 @@ static void finish_pull(app *a)
         a->pull_hold_at = SDL_GetTicks64();
         SDL_GetGlobalMouseState(&a->hold_gx, &a->hold_gy);
         hide_ghost(a);
-        ph_window_set_detail(a->win, "Checking with the iPhone... (Esc cancels)");
+        ph_window_set_detail(a->win, a->share_step ? "Photos is sending it... (Esc cancels)"
+                                                    : "Checking with the iPhone... (Esc cancels)");
         return;
     }
     end_pull(a);
@@ -1332,6 +1541,8 @@ static void mouse_motion(app *a, const SDL_MouseMotionEvent *event)
     }
     if (a->pull.armed)
         return; /* a Ctrl press waits for its drag and never reaches the phone */
+    if (a->share_step && a->share_step != SHARE_CLOSE)
+        return; /* Porthole is pressing Photos' buttons */
     if (a->absolute) {
         double x, y;
         if (abs_coordinates(a, event->x, event->y, &x, &y)) {
@@ -1778,6 +1989,7 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         a->pull_note = 0;
         a->pull_path[0] = 0;
         a->pull_inbox = false; /* the shared items wait for the next Ctrl+drag */
+        a->share_step = 0;
         ph_input_release_all(&a->input);
         SDL_CaptureMouse(SDL_FALSE);
         a->gesture_keys[sc] = true;
@@ -2355,6 +2567,7 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
         snprintf(line, sizeof line, "%d item%s from the iPhone: hold Ctrl and drag out of the window",
                  a->inbox_count, a->inbox_count == 1 ? "" : "s");
         ph_window_set_detail(a->win, line);
+        share_delivered(a);
         break;
     }
     default:
@@ -2759,6 +2972,7 @@ int ph_app_run(const ph_app_options *opt)
         }
         ph_window_tick(a.win);
         follow_pull(&a);
+        run_share(&a);
         if (a.keyboard_lift_at && SDL_GetTicks64() >= a.keyboard_lift_at) {
             a.keyboard_lift_at = 0;
             send_consumer(&a, 0);

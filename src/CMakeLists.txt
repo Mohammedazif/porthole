@@ -16,6 +16,7 @@ add_library(porthole_core STATIC
     core/log.c
     hid/hid_reports.c
     video/crop.c
+    video/photos_ui.c
     video/scrollbar.c
     video/cursor.c
     video/codecs.c
