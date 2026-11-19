@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "files/picture_hash.h"
+
 /* The phone app connects here and answers a picture hash with the original file. */
 #define PH_PULL_PORT 47731
 /* A long 4K video can be several gigabytes. */
@@ -28,8 +30,17 @@ void ph_origin_stop(ph_origin *origin);
  * detail is PH_PICTURE_DETAIL squared cells of the same picture, or NULL. It is sent
  * as a fifth PULL field, which phones before 2.5 refuse.
  * False when no phone is connected. */
+/* The whole phone screen under a drag, for a picture whose edges cannot be seen,
+ * such as a black screenshot on Photos' black. The phone places each library item
+ * on it the way Photos shows one item, fitted to the screen. Phones from 2.6. */
+typedef struct ph_origin_screen {
+    double aspect;
+    uint8_t thumb[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
+    uint8_t detail[PH_PICTURE_DETAIL * PH_PICTURE_DETAIL];
+} ph_origin_screen;
+
 bool ph_origin_ask(ph_origin *origin, uint64_t hash, double aspect, const uint8_t *thumb,
-                   const uint8_t *detail, const char *dir);
+                   const uint8_t *detail, const ph_origin_screen *screen, const char *dir);
 
 /* IPv4 address of the phone that last gave the right code, kept after it disconnects. */
 bool ph_origin_peer(ph_origin *origin, char *address, size_t len);

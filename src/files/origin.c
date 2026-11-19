@@ -38,6 +38,8 @@ struct ph_origin {
     bool have_thumb;
     uint8_t detail[PH_PICTURE_DETAIL * PH_PICTURE_DETAIL];
     bool have_detail;
+    ph_origin_screen screen;
+    bool have_screen;
     unsigned ask_id;
     unsigned ready_id;
     ph_origin_result ready;
@@ -322,12 +324,13 @@ static void serve_client(ph_origin *o, int fd)
         double aspect;
         unsigned id;
         char dir[512], path[768];
-        char ask_line[64 + 2 * PH_PICTURE_THUMB * PH_PICTURE_THUMB
-                             + 2 * PH_PICTURE_DETAIL * PH_PICTURE_DETAIL];
+        char ask_line[128 + 4 * PH_PICTURE_THUMB * PH_PICTURE_THUMB
+                      + 4 * PH_PICTURE_DETAIL * PH_PICTURE_DETAIL];
         static const char hex[] = "0123456789abcdef";
         uint8_t thumb[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
         uint8_t detail[PH_PICTURE_DETAIL * PH_PICTURE_DETAIL];
-        bool asked, have_thumb, have_detail;
+        ph_origin_screen screen;
+        bool asked, have_thumb, have_detail, have_screen;
         size_t used, i;
 
         pthread_mutex_lock(&o->lock);
@@ -342,6 +345,8 @@ static void serve_client(ph_origin *o, int fd)
         memcpy(thumb, o->thumb, sizeof thumb);
         have_detail = have_thumb && o->have_detail;
         memcpy(detail, o->detail, sizeof detail);
+        have_screen = have_detail && o->have_screen;
+        screen = o->screen;
         id = o->ask_id;
         snprintf(dir, sizeof dir, "%s", o->dir);
         o->ask = false;
@@ -363,6 +368,20 @@ static void serve_client(ph_origin *o, int fd)
             for (i = 0; i < sizeof detail; i++) {
                 ask_line[used++] = hex[detail[i] >> 4];
                 ask_line[used++] = hex[detail[i] & 15];
+            }
+        }
+        /* Sixth field: S<aspect>:<32-cell hex>:<64-cell hex> of the whole screen. */
+        if (have_screen) {
+            used += (size_t)snprintf(ask_line + used, sizeof ask_line - used, " S%.4f:",
+                                     screen.aspect);
+            for (i = 0; i < sizeof screen.thumb; i++) {
+                ask_line[used++] = hex[screen.thumb[i] >> 4];
+                ask_line[used++] = hex[screen.thumb[i] & 15];
+            }
+            ask_line[used++] = ':';
+            for (i = 0; i < sizeof screen.detail; i++) {
+                ask_line[used++] = hex[screen.detail[i] >> 4];
+                ask_line[used++] = hex[screen.detail[i] & 15];
             }
         }
         ask_line[used++] = '\n';
@@ -525,7 +544,7 @@ bool ph_origin_peer(ph_origin *o, char *address, size_t len)
 }
 
 bool ph_origin_ask(ph_origin *o, uint64_t hash, double aspect, const uint8_t *thumb,
-                   const uint8_t *detail, const char *dir)
+                   const uint8_t *detail, const ph_origin_screen *screen, const char *dir)
 {
     bool ok = false;
 
@@ -541,6 +560,9 @@ bool ph_origin_ask(ph_origin *o, uint64_t hash, double aspect, const uint8_t *th
         o->have_detail = detail != NULL;
         if (detail)
             memcpy(o->detail, detail, sizeof o->detail);
+        o->have_screen = screen != NULL;
+        if (screen)
+            o->screen = *screen;
         snprintf(o->dir, sizeof o->dir, "%s", dir);
         o->ask_id++;
         o->ready = PH_ORIGIN_PENDING;
@@ -593,8 +615,9 @@ void ph_origin_stop(ph_origin *origin)
 }
 
 bool ph_origin_ask(ph_origin *origin, uint64_t hash, double aspect, const uint8_t *thumb,
-                   const uint8_t *detail, const char *dir)
+                   const uint8_t *detail, const ph_origin_screen *screen, const char *dir)
 {
+    (void)screen;
     (void)origin;
     (void)hash;
     (void)aspect;

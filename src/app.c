@@ -1009,7 +1009,8 @@ static void begin_pull(app *a)
     int px, py;
     uint8_t thumb[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
     uint8_t detail[PH_PICTURE_DETAIL * PH_PICTURE_DETAIL];
-    bool have_thumb, have_detail;
+    static ph_origin_screen screen;
+    bool have_thumb, have_detail, have_screen;
 
     /* A press that already reached the phone is dragging something there, such as a
      * photo being pulled closed. Lifting it at the window edge finishes that gesture;
@@ -1050,9 +1051,16 @@ static void begin_pull(app *a)
     hash = have_thumb ? ph_picture_dhash(thumb, PH_PICTURE_THUMB, PH_PICTURE_THUMB, PH_PICTURE_THUMB)
                       : hash_rect(a->pull_frame, picture);
     aspect = (double)picture.w / (double)picture.h;
+    /* On the phone's own portrait screen, also send the whole screen: the phone can
+     * place each library item the way Photos shows it, which needs no edges at all. */
+    have_screen = have_detail && a->pull_screen.w > 1 && a->pull_screen.h > a->pull_screen.w
+                  && thumb_rect(a->pull_frame, a->pull_screen, screen.thumb)
+                  && detail_rect(a->pull_frame, a->pull_screen, screen.detail);
+    screen.aspect = have_screen ? (double)a->pull_screen.w / (double)a->pull_screen.h : 0;
     if (!ensure_pull_dir(a)
         || !ph_origin_ask(a->origin, hash, aspect, have_thumb ? thumb : NULL,
-                          have_detail ? detail : NULL, a->pull_dir)) {
+                          have_detail ? detail : NULL, have_screen ? &screen : NULL,
+                          a->pull_dir)) {
         a->pull_note = 1;
         ph_window_set_detail(a->win, "Open Porthole on the iPhone, then drag the photo again");
         PH_LOGW("photo pull: iPhone is not connected");
@@ -1060,8 +1068,8 @@ static void begin_pull(app *a)
     }
     a->pull_note = 2;
     ph_window_set_detail(a->win, "Asking the iPhone for this photo");
-    PH_LOGI("photo pull: item %dx%d aspect %.4f hash %016llx", picture.w, picture.h, aspect,
-            (unsigned long long)hash);
+    PH_LOGI("photo pull: item %dx%d aspect %.4f hash %016llx%s", picture.w, picture.h, aspect,
+            (unsigned long long)hash, have_screen ? " (and the whole screen)" : "");
 }
 
 /* True on the motion that turns a Ctrl press into a file drag. */
