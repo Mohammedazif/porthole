@@ -101,7 +101,6 @@ typedef struct app {
     AVFrame *pull_frame;
     int pull_px, pull_py;
     bool pull_snap;
-    bool pull_whole_hint; /* this press found no photo edges and went to the phone */
     /* A bare photo or video that iOS sends instead of the phone screen is already the
      * whole picture; edge finding is only for thumbnails on the phone layout. */
     bool pull_presentation;
@@ -117,11 +116,6 @@ typedef struct app {
      * that photo onto the PC. The finger stays up until then, so Photos cannot
      * shrink the picture and leave it in a corner. */
     double press_phone_x, press_phone_y; /* where the held left press began on the phone */
-    bool defer_press;
-    bool defer_slide; /* early motion: only a quick in-photo gesture may reach the phone */
-    double defer_x, defer_y;
-    int defer_wx, defer_wy;
-    Uint64 defer_at;
     ph_rect view_screen, baseline_screen, reference_screen;
     Uint64 reference_at;
     int picture_w, picture_h;
@@ -160,6 +154,7 @@ typedef struct app {
     int pull_note;
     bool pull_hold; /* button is up; wait for the phone before offering the file */
     Uint64 pull_hold_at;
+    int hold_gx, hold_gy; /* where a file drag was let go before the file came */
 } app;
 
 /* ------------------------------------------------------------ cross-thread notifications */
@@ -802,49 +797,38 @@ static void hide_ghost(app *a)
     ph_xdnd_skip(NULL);
 }
 
-/* Keeps the frame and point under an armed press for begin_pull. */
+/* Keeps the frame and point under a Ctrl press for begin_pull. The photo under the
+ * pointer is taken when its edges can be found. Otherwise it is the whole picture:
+ * a screenshot, a photo or video filling the screen, or the bare picture AirPlay sends. */
 static void snap_pull(app *a)
 {
     ph_rect item;
 
     drop_pull_snapshot(a);
-    a->pull_whole_hint = false;
-    if (!a->pull.armed || !a->pull_frame || !a->view_frame || !a->view_frame->data[0]
-        || !press_video_pixel(a, &a->pull_px, &a->pull_py))
+    if (!a->pull.armed)
         return;
-    a->pull_snap = av_frame_ref(a->pull_frame, a->view_frame) == 0;
+    if (!a->pull_frame || !a->view_frame || !a->view_frame->data[0]
+        || !press_video_pixel(a, &a->pull_px, &a->pull_py)
+        || av_frame_ref(a->pull_frame, a->view_frame) != 0) {
+        a->pull.armed = false;
+        return;
+    }
+    a->pull_snap = true;
     /* iOS sends the live screen as a portrait stream. A picture centred in a landscape
      * TV frame is media even when it has the phone's shape, such as a screenshot. */
     a->pull_presentation = a->presentation_mode
                            || (a->view_frame->width > a->view_frame->height
                                && a->view_screen.w + 16 < a->view_frame->width);
     a->pull_screen = a->view_screen;
-    if (!a->pull_snap)
-        return;
-    /* A bare picture can lift after a hold. On the phone screen, only a photo
-     * with its own edges can. The home screen and the page around it stay put,
-     * including when the pointer leaves the window. */
-    if (a->pull_presentation) {
-        ph_pull_allow_inside(&a->pull);
-        PH_LOGD("photo pull: hold, then drag, lifts this picture");
-        return;
-    }
-    if (!pull_item(a, &item) || fills_frame(item, a->pull_frame->width, a->pull_frame->height)) {
-        /* A screenshot, or a photo zoomed to fill the screen, has no edges of its
-         * own, just like the home screen. Ctrl asks for the whole screen picture. */
-        if (SDL_GetModState() & KMOD_CTRL) {
-            a->pull_presentation = true;
-            ph_pull_allow_inside(&a->pull);
-            PH_LOGD("photo pull: Ctrl lifts the whole screen picture");
-            return;
-        }
-        a->pull.armed = false;
-        a->pull_whole_hint = true;
-        PH_LOGD("photo pull: this press stays on the phone");
-        return;
-    }
     ph_pull_allow_inside(&a->pull);
-    PH_LOGD("photo pull: hold, then drag, lifts this picture");
+    if (!a->pull_presentation
+        && (!pull_item(a, &item)
+            || fills_frame(item, a->pull_frame->width, a->pull_frame->height))) {
+        a->pull_presentation = true;
+        PH_LOGD("photo pull: Ctrl+drag takes the whole screen picture");
+        return;
+    }
+    PH_LOGD("photo pull: Ctrl+drag takes this picture");
 }
 
 static bool copy_file(const char *src, const char *dest)
@@ -941,6 +925,10 @@ static void note_origin(app *a)
         snprintf(a->pull_path, sizeof a->pull_path, "%s", path);
         if (!ph_xdnd_busy()) {
             SDL_GetGlobalMouseState(&gx, &gy);
+            if (a->pull_hold) { /* it lands where it was dropped */
+                gx = a->hold_gx;
+                gy = a->hold_gy;
+            }
             if (ph_xdnd_begin(SDL_GetWindowFromID(ph_window_id(a->win)), path))
                 ph_xdnd_motion(gx, gy);
         } else {
@@ -966,6 +954,11 @@ static void track_pull(app *a)
 
     if (!a->pull.pulling && !ph_xdnd_busy())
         return;
+    if (a->pull_hold) {
+        /* Dropped already: the card and the drop target stay where it was let go. */
+        note_origin(a);
+        return;
+    }
     SDL_GetGlobalMouseState(&gx, &gy);
     ph_xdnd_motion(gx, gy);
     place_ghost(a, gx, gy);
@@ -974,7 +967,7 @@ static void track_pull(app *a)
     note_origin(a);
 }
 
-/* A press that never reached the phone left the screen as it was, so the newest
+/* A Ctrl press never reaches the phone, so the screen stays as it was and the newest
  * frame shows the same photo, after any zoom or open animation has finished. The
  * frame under the press can be mid-zoom, and its picture then has the wrong shape. */
 static void settle_pull_snapshot(app *a)
@@ -1017,10 +1010,7 @@ static void begin_pull(app *a)
     uint8_t thumb[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
     uint8_t detail[PH_PICTURE_DETAIL * PH_PICTURE_DETAIL];
     bool have_thumb, have_detail;
-    bool untouched = a->defer_press;
 
-    a->defer_press = false; /* a file drag never reaches the phone */
-    a->defer_slide = false;
     /* A press that already reached the phone is dragging something there, such as a
      * photo being pulled closed. Lifting it at the window edge finishes that gesture;
      * going back to where it began first cancels it. */
@@ -1033,8 +1023,7 @@ static void begin_pull(app *a)
     a->pull_path[0] = 0;
     a->pull_hold = false;
     ph_origin_take(a->origin, NULL, 0); /* a late reply belongs to the previous drag */
-    if (untouched)
-        settle_pull_snapshot(a);
+    settle_pull_snapshot(a); /* a Ctrl press never reached the phone */
     if (!a->pull_snap || !frame_planes(a->pull_frame, &planes)) {
         a->pull_note = 5;
         ph_window_set_detail(a->win, "Drag one photo, not the page around it");
@@ -1075,57 +1064,10 @@ static void begin_pull(app *a)
             (unsigned long long)hash);
 }
 
-/* A move this soon is a swipe or a slide. Past this, the press can lift a file. */
-#define PULL_HOLD_MS 400
-/* Movement under this, before the hold, stays a possible file drag. */
-#define PULL_SLIDE_PX 8
-
-/* Remember early motion while leaving the phone finger up. A later drag out of
- * the item may still become a file; a quick release inside may become a swipe. */
-static void note_slide(app *a, int x, int y)
-{
-    long dx, dy;
-
-    if (!a->defer_press || a->defer_slide || !ph_pull_lifts(&a->pull))
-        return;
-    if (SDL_GetTicks64() - a->defer_at >= PULL_HOLD_MS)
-        return;
-    dx = (long)x - a->defer_wx;
-    dy = (long)y - a->defer_wy;
-    if (dx * dx + dy * dy >= (long)PULL_SLIDE_PX * PULL_SLIDE_PX)
-        a->defer_slide = true;
-}
-
-static bool inside_pull_item(const app *a, int x, int y)
-{
-    double vx, vy;
-    ph_rect item;
-    int px, py;
-
-    if (!pull_item(a, &item) || !ph_window_picture_point(a->win, x, y, &vx, &vy))
-        return false;
-    px = a->pull_screen.x + (int)(vx * a->pull_screen.w);
-    py = a->pull_screen.y + (int)(vy * a->pull_screen.h);
-    return px >= item.x && py >= item.y && px < item.x + item.w && py < item.y + item.h;
-}
-
-/* True when this armed press has waited long enough to become a file. */
+/* True on the motion that turns a Ctrl press into a file drag. */
 static bool file_pull_ready(app *a, int x, int y)
 {
-    if (!a->pull.armed)
-        return false;
-    if (a->defer_slide) {
-        /* Early motion does not turn a drag onto the desktop into a phone
-         * swipe. Nothing has reached the phone yet. A quick flick that leaves
-         * the photo is a file drag at once: waiting for the hold made fast
-         * drags out of the window do nothing at all. */
-        if (inside_pull_item(a, x, y))
-            return false;
-        return ph_pull_motion(&a->pull, on_picture(a, x, y), x, y);
-    }
-    if (ph_pull_lifts(&a->pull) && SDL_GetTicks64() - a->defer_at < PULL_HOLD_MS)
-        return false;
-    return ph_pull_motion(&a->pull, on_picture(a, x, y), x, y);
+    return a->pull.armed && ph_pull_motion(&a->pull, on_picture(a, x, y), x, y);
 }
 
 static void follow_pull(app *a)
@@ -1136,9 +1078,8 @@ static void follow_pull(app *a)
         PH_LOGW("photo pull: iPhone did not answer");
         end_pull(a);
     }
-    if (a->pull.armed || a->defer_press) {
+    if (a->pull.armed) {
         SDL_GetMouseState(&x, &y);
-        note_slide(a, x, y);
         if (file_pull_ready(a, x, y))
             begin_pull(a);
     }
@@ -1152,8 +1093,13 @@ static void finish_pull(app *a)
 {
     note_origin(a);
     if (a->pull.pulling && a->pull_note == 2) {
+        /* Dropped before the phone answered. The card stays where it was dropped and
+         * says so; the file lands there when it arrives. Escape gives up. */
         a->pull_hold = true;
         a->pull_hold_at = SDL_GetTicks64();
+        SDL_GetGlobalMouseState(&a->hold_gx, &a->hold_gy);
+        ph_drag_ghost_caption(a->ghost, "Getting it from the iPhone... (Esc cancels)", true);
+        ph_window_set_detail(a->win, "Getting the original from the iPhone (Esc cancels)");
         return;
     }
     end_pull(a);
@@ -1161,15 +1107,14 @@ static void finish_pull(app *a)
 
 static void mouse_motion(app *a, const SDL_MouseMotionEvent *event)
 {
-    note_slide(a, event->x, event->y);
     if (file_pull_ready(a, event->x, event->y))
         begin_pull(a);
     if (a->pull.pulling) {
         track_pull(a);
         return;
     }
-    if (a->defer_press)
-        return; /* still waiting: a tap, a slide, or a held photo drag */
+    if (a->pull.armed)
+        return; /* a Ctrl press waits for its drag and never reaches the phone */
     if (a->absolute) {
         double x, y;
         if (abs_coordinates(a, event->x, event->y, &x, &y)) {
@@ -1199,73 +1144,6 @@ static void mouse_motion(app *a, const SDL_MouseMotionEvent *event)
     }
 }
 
-#define DEFER_TAP_MS 500
-
-/* A left press on one photo waits. A quick release is a tap. A quick swipe kept
- * inside the item slides the phone. Held, then dragged out, it lifts the file. A long
- * still press sends nothing, since Photos would open a menu the window cannot show.
- * Returns true when the event is handled. */
-static bool finish_deferred_press(app *a, const SDL_MouseButtonEvent *event)
-{
-    Uint64 now = SDL_GetTicks64();
-
-    if (event->type == SDL_MOUSEBUTTONDOWN) {
-        if (!a->pull.armed || !ph_pull_lifts(&a->pull))
-            return false;
-        if (!abs_coordinates(a, event->x, event->y, &a->defer_x, &a->defer_y))
-            return false;
-        /* A previous delayed tap may still be down. It does not make this new
-         * press a native phone drag; finish it before deferring this press. */
-        if (a->abs.held || a->abs.pending || a->abs.buttons)
-            ph_abs_release_all(&a->abs, now);
-        a->defer_press = true;
-        a->defer_slide = false;
-        a->defer_wx = event->x;
-        a->defer_wy = event->y;
-        a->defer_at = now;
-        mark_input(a, event->timestamp);
-        SDL_CaptureMouse(SDL_TRUE);
-        return true;
-    }
-    if (!a->defer_press)
-        return false;
-    a->defer_press = false;
-    SDL_CaptureMouse(SDL_FALSE);
-    mark_input(a, event->timestamp);
-    long dx = (long)event->x - a->defer_wx, dy = (long)event->y - a->defer_wy;
-    long dist = dx * dx + dy * dy;
-    bool slide = a->defer_slide;
-
-    a->defer_slide = false;
-    /* The slide is one finished swipe. A finger left down is what shrinks a
-     * photo and leaves it stuck in a corner. */
-    if (slide && dist >= (long)PULL_SLIDE_PX * PULL_SLIDE_PX) {
-        double x2, y2;
-        uint32_t glide = (uint32_t)(now - a->defer_at);
-
-        /* A delayed replay of an attempted file drag can leave Photos stuck
-         * with a tiny, displaced picture. Only replay a quick gesture that
-         * ends inside the same photo; cancellation sends no phone press. */
-        if (now - a->defer_at >= PULL_HOLD_MS || !inside_pull_item(a, event->x, event->y)) {
-            ph_abs_release_all(&a->abs, now);
-            ph_window_set_detail(a->win, "Hold the photo still briefly, then drag it out");
-            PH_LOGD("photo pull: canceled ambiguous drag without sending a phone swipe");
-            return true;
-        }
-        if (glide < 80)
-            glide = 80;
-        if (glide > 280)
-            glide = 280;
-        if (abs_coordinates(a, event->x, event->y, &x2, &y2))
-            ph_abs_swipe(&a->abs, a->defer_x, a->defer_y, x2, y2, glide, 0, now);
-        return true;
-    }
-    /* Under the lift, a quick release is still the click that opens the photo. */
-    if (dist < (long)PH_PULL_LIFT_PX * PH_PULL_LIFT_PX && now - a->defer_at <= DEFER_TAP_MS)
-        ph_abs_tap(&a->abs, a->defer_x, a->defer_y, 1, 60, now);
-    return true;
-}
-
 static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
 {
     double x, y, aspect;
@@ -1274,15 +1152,23 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
         return;
     if (a->pull_hold)
         return;
+    /* Plain clicks and drags always control the phone. Ctrl+drag takes the original
+     * file of whatever is under the pointer, and that press never reaches the phone. */
     if (event->button == SDL_BUTTON_LEFT) {
         if (event->type == SDL_MOUSEBUTTONDOWN) {
-            ph_pull_press(&a->pull, !a->setup.visible && !ph_window_help_visible(a->win),
-                          on_picture(a, event->x, event->y), event->x, event->y);
-            a->defer_slide = false;
-            a->defer_wx = event->x;
-            a->defer_wy = event->y;
-            a->defer_at = SDL_GetTicks64();
+            bool lift = (SDL_GetModState() & KMOD_CTRL) && !a->setup.visible
+                        && !ph_window_help_visible(a->win);
+
+            ph_pull_press(&a->pull, lift, on_picture(a, event->x, event->y), event->x, event->y);
             snap_pull(a);
+            if (a->pull.armed) {
+                if (a->absolute && (a->abs.held || a->abs.pending || a->abs.buttons))
+                    ph_abs_release_all(&a->abs, SDL_GetTicks64());
+                mark_input(a, event->timestamp);
+                SDL_CaptureMouse(SDL_TRUE);
+                ph_window_set_detail(a->win, "Drag it out of the window to take the original file");
+                return;
+            }
         } else if (file_pull_ready(a, event->x, event->y)) {
             begin_pull(a);
             finish_pull(a);
@@ -1290,24 +1176,18 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
         } else if (a->pull.pulling) {
             finish_pull(a);
             return;
-        } else {
-            /* The deferred release needs the snapshot to decide whether a
-             * quick gesture ended inside the photo. Drop it afterwards. */
-            if (a->absolute && finish_deferred_press(a, event)) {
-                ph_pull_release(&a->pull);
-                drop_pull_snapshot(a);
-                return;
-            }
+        } else if (a->pull.armed) {
+            /* A Ctrl click without a drag: nothing reaches the phone. */
             ph_pull_release(&a->pull);
             drop_pull_snapshot(a);
-            if (a->pull_whole_hint && !on_picture(a, event->x, event->y))
-                ph_window_set_detail(a->win, "To take a full-screen photo or video, "
-                                             "hold Ctrl and drag it out");
-            a->pull_whole_hint = false;
+            SDL_CaptureMouse(SDL_FALSE);
+            ph_window_set_detail(a->win, "");
+            return;
+        } else {
+            ph_pull_release(&a->pull);
+            drop_pull_snapshot(a);
         }
     }
-    if (a->absolute && event->button == SDL_BUTTON_LEFT && finish_deferred_press(a, event))
-        return;
     if (a->absolute) {
         bool down = event->type == SDL_MOUSEBUTTONDOWN;
         x = a->abs.want_x;
@@ -1665,13 +1545,11 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         }
         return;
     }
-    if (down && sc == SDL_SCANCODE_ESCAPE && (a->defer_press || a->pull.armed || a->pull.pulling
+    if (down && sc == SDL_SCANCODE_ESCAPE && (a->pull.armed || a->pull.pulling || a->pull_hold
         || ph_gesture_active(&a->gesture)
         || a->pointer.buttons || a->pointer.requested_buttons || a->input.buttons
         || (a->absolute && (a->abs.held || a->abs.buttons || a->abs.pending)))) {
         cancel_control_intent(a, SDL_GetTicks64());
-        a->defer_press = false;
-        a->defer_slide = false;
         ph_xdnd_cancel();
         ph_pull_release(&a->pull);
         drop_pull_snapshot(a);
@@ -2279,8 +2157,6 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
             if (a->pull.pulling)
                 break;
             ph_pull_release(&a->pull);
-            a->defer_press = false; /* nothing was sent to the phone yet */
-            a->defer_slide = false;
             a->input_pending = false;
             PH_LOGD("pointer cancel: window focus lost");
             if (a->setup.calibrating) {

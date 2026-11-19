@@ -105,7 +105,9 @@ static bool read_line(int fd, char *buf, size_t len)
 
     if (len < 2)
         return false;
-    while (n + 1 < len) {
+    /* A line longer than buf keeps its start: the phone's notes grow over time, and
+     * failing here dropped the whole connection after every refused drag. */
+    for (size_t seen = 0; seen < 1024 * 1024; seen++) {
         char c;
         ssize_t got = recv(fd, &c, 1, 0);
 
@@ -117,7 +119,8 @@ static bool read_line(int fd, char *buf, size_t len)
                 buf[n - 1] = 0;
             return true;
         }
-        buf[n++] = c;
+        if (n + 1 < len)
+            buf[n++] = c;
     }
     return false;
 }
@@ -287,7 +290,7 @@ static void save_comparison(const char *dir, const uint8_t *pc_thumb, bool have_
 
 static void serve_client(ph_origin *o, int fd)
 {
-    char line[96 + 2 * PH_PICTURE_THUMB * PH_PICTURE_THUMB];
+    char line[2048 + 2 * PH_PICTURE_THUMB * PH_PICTURE_THUMB];
     /* The phone may first download a video from iCloud before it answers. */
     struct timeval tv = {.tv_sec = 300, .tv_usec = 0};
     int on = 1, idle = 15, interval = 5, count = 3;

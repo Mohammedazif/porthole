@@ -123,17 +123,17 @@ landscape presentation to AirPlay while the iPhone keeps its portrait controls.
 The Photos library grid mirrors normally on the tested phone. Porthole cannot
 reconstruct UI that the iPhone does not send. With the absolute pointer, the
 mouse, wheel, and keyboard keep working on that picture: a click is that fraction
-of the phone screen. To take a photo or video's original file, drag it off the
-window: hold it still for about 400 ms and then drag, or flick it straight out of
-the photo. A quick swipe that ends inside the photo still goes to the phone, and a
-long drag that ends inside it is canceled rather than replayed. Escape cancels a
-pending photo press or file drag. A screenshot or a photo zoomed to fill the whole
-screen has no edges of its own, like the home screen, so hold Ctrl and drag it out.
-The drag uses the newest frame, after Photos has finished zooming, and sends the
-phone app the picture at 32 and 64 cells a side. The phone app (2.5 or later) takes
-copies of one picture as the largest file, decides close calls on sharper copies,
-and checks videos frame by frame around their closest moments. When nothing can tell,
-choose the item in the phone app with Choose original. A failed match saves nothing.
+of the phone screen. Plain clicks and drags always go to the phone. To take a photo
+or video's original file, hold Ctrl and drag it out of the window: that press never
+reaches the phone. Porthole takes the photo under the pointer when it can find its
+edges, and otherwise the whole picture, such as a screenshot or a photo that fills
+the screen. Dropped before the phone has answered, the card stays where it was
+let go and the file lands there; Escape gives up. The drag uses the newest frame and
+sends the phone app the picture at 32 and 64 cells a side. The phone app (2.5 or
+later) takes copies of one picture as the largest file, decides close calls on
+sharper copies, and checks videos frame by frame around their closest moments. When
+nothing can tell, choose the item in the phone app with Choose original. A failed
+match saves nothing.
 F1 shows the address and
 code the phone app uses. The relative pointer still pauses, and the window says
 "Return to phone view", because it has to see the AssistiveTouch dot. Returning
