@@ -24,10 +24,12 @@ typedef enum ph_origin_result {
 ph_origin *ph_origin_start(char *hint, size_t hint_len);
 void ph_origin_stop(ph_origin *origin);
 
-/* Asks the connected phone. thumb is PH_PICTURE_THUMB squared luma cells or NULL.
+/* Asks the connected phone. thumb is PH_PICTURE_THUMB squared luma cells or NULL;
+ * detail is PH_PICTURE_DETAIL squared cells of the same picture, or NULL. It is sent
+ * as a fifth PULL field, which phones before 2.5 refuse.
  * False when no phone is connected. */
 bool ph_origin_ask(ph_origin *origin, uint64_t hash, double aspect, const uint8_t *thumb,
-                   const char *dir);
+                   const uint8_t *detail, const char *dir);
 
 /* IPv4 address of the phone that last gave the right code, kept after it disconnects. */
 bool ph_origin_peer(ph_origin *origin, char *address, size_t len);

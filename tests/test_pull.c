@@ -74,6 +74,20 @@ static void test_thumb(void)
     /* Smaller than the grid: cells repeat the nearest pixel instead of dividing by zero. */
     CHECK(ph_picture_thumb(px, 4, 4, 48, out) == 1);
     CHECK(ph_picture_thumb(NULL, 4, 4, 4, out) == 0);
+
+    /* The detail grid splits the same picture into 64 cells a side: on a 128-wide
+     * picture each cell is a 2 x 2 block, so a 2-pixel stripe stays visible. */
+    {
+        static uint8_t big[128 * 128], detail[PH_PICTURE_DETAIL * PH_PICTURE_DETAIL];
+        for (y = 0; y < 128; y++)
+            for (x = 0; x < 128; x++)
+                big[y * 128 + x] = (uint8_t)((x / 2) % 2 ? 250 : 10);
+        CHECK(ph_picture_cells(big, 128, 128, 128, PH_PICTURE_DETAIL, detail) == 1);
+        CHECK(detail[0] == 10 && detail[1] == 250 && detail[63 * 64 + 63] == 250);
+        CHECK(ph_picture_thumb(big, 128, 128, 128, out) == 1);
+        CHECK(out[0] == 130); /* the 32 grid averages the stripes away */
+        CHECK(ph_picture_cells(big, 128, 128, 128, 0, detail) == 0);
+    }
 }
 
 static void test_screen_header(void)

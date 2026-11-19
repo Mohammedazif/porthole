@@ -221,7 +221,9 @@ ph_rect ph_video_picture_rect(const ph_yuv_planes *p)
 
 #define ITEM_MIN_PX 64
 #define ITEM_SEEK_PX 8
-#define ITEM_GUTTER_PERCENT 82
+/* Keep dark detail that the old 82% cutoff mistook for empty padding, while
+ * allowing sparse Photos button text above a picture to stay outside it. */
+#define ITEM_GUTTER_PERCENT 94
 
 static bool gutter_column(const ph_yuv_planes *p, int x, int y0, int y1)
 {
@@ -351,6 +353,101 @@ static int outside_item(ph_rect r, int x, int y)
     return dx > dy ? dx : dy;
 }
 
+/* A dark phone screenshot can have black padding inside the photo too. Photos
+ * draws a thin frame around it. Look for that complete enclosing frame before
+ * growing from one of the screenshot's internal cards or text blocks. */
+static bool outline_ink(const ph_yuv_planes *p, int x, int y, int black)
+{
+    int cu, cv;
+
+    if (x < 0 || y < 0 || x >= p->width || y >= p->height)
+        return false;
+    cu = p->u[(y / 2) * p->uv_stride + x / 2] - 128;
+    cv = p->v[(y / 2) * p->uv_stride + x / 2] - 128;
+    return p->y[y * p->y_stride + x] > black + 8 || abs(cu) > 12 || abs(cv) > 12;
+}
+
+static bool thin_vertical(const ph_yuv_planes *p, int x, int y, int black)
+{
+    int dx;
+
+    for (dx = -1; dx <= 1; dx++) {
+        int at = x + dx;
+        if (outline_ink(p, at, y, black) && !outline_ink(p, at - 3, y, black)
+            && !outline_ink(p, at + 3, y, black))
+            return true;
+    }
+    return false;
+}
+
+static int horizontal_outline(const ph_yuv_planes *p, int near_y, int black)
+{
+    int y, best = -1, best_distance = 99;
+
+    for (y = near_y - 5; y <= near_y + 5; y++) {
+        int x, count = 0;
+        if (y < 4 || y >= p->height - 4)
+            continue;
+        for (x = p->width / 2 - 20; x <= p->width / 2 + 20; x++) {
+            count += outline_ink(p, x, y, black) && !outline_ink(p, x, y - 3, black)
+                     && !outline_ink(p, x, y + 3, black);
+        }
+        if (count >= 36 && abs(y - near_y) < best_distance) {
+            best = y;
+            best_distance = abs(y - near_y);
+        }
+    }
+    return best;
+}
+
+static ph_rect outlined_phone_photo(const ph_yuv_planes *p, int px, int py)
+{
+    ph_rect best = {0};
+    double best_coverage = 0;
+    int left, black = 16;
+
+    if (p->width >= p->height || p->width < 100)
+        return best;
+    /* VideoToolbox can send full-range black (0), AirPlay limited-range (16). */
+    for (int corner = 0; corner < 4; corner++) {
+        int x = corner & 1 ? p->width - 1 : 0;
+        int y = corner & 2 ? p->height - 1 : 0;
+        int value = p->y[y * p->y_stride + x];
+        if (value < black)
+            black = value;
+    }
+    for (left = 16; left < p->width / 3; left++) {
+        int right = p->width - 1 - left;
+        int w = right - left + 1;
+        int h = (int)lround((double)w * p->height / p->width);
+        int first = p->height, last = -1, count = 0, y, top, bottom;
+        double coverage;
+
+        if (px <= left || px >= right || h >= p->height - 32
+            || !thin_vertical(p, left, py, black) || !thin_vertical(p, right, py, black))
+            continue;
+        for (y = 16; y < p->height - 16; y++) {
+            if (thin_vertical(p, left, y, black) && thin_vertical(p, right, y, black)) {
+                if (first == p->height)
+                    first = y;
+                last = y;
+                count++;
+            }
+        }
+        coverage = (double)count / h;
+        if (coverage < .80 || coverage <= best_coverage || last < first)
+            continue;
+        top = horizontal_outline(p, (first + last - h) / 2, black);
+        bottom = horizontal_outline(p, (first + last + h) / 2, black);
+        if (top < 0 || bottom < 0 || py <= top || py >= bottom
+            || abs((bottom - top + 1) - h) > 8)
+            continue;
+        best = finish_item(left, top, right, bottom, p->width, p->height);
+        best_coverage = coverage;
+    }
+    return best;
+}
+
 ph_rect ph_video_item_rect(const ph_yuv_planes *p, int x, int y)
 {
     int sx, sy, left, top, right, bottom;
@@ -360,6 +457,9 @@ ph_rect ph_video_item_rect(const ph_yuv_planes *p, int x, int y)
         return (ph_rect){0};
     if (x < 0 || y < 0 || x >= p->width || y >= p->height)
         return (ph_rect){0};
+    item = outlined_phone_photo(p, x, y);
+    if (item.w >= ITEM_MIN_PX)
+        return item;
     sx = x;
     sy = y;
     /* A press on the one-pixel gap belongs to the neighbouring thumbnail.

@@ -101,6 +101,7 @@ typedef struct app {
     AVFrame *pull_frame;
     int pull_px, pull_py;
     bool pull_snap;
+    bool pull_whole_hint; /* this press found no photo edges and went to the phone */
     /* A bare photo or video that iOS sends instead of the phone screen is already the
      * whole picture; edge finding is only for thumbnails on the phone layout. */
     bool pull_presentation;
@@ -117,7 +118,7 @@ typedef struct app {
      * shrink the picture and leave it in a corner. */
     double press_phone_x, press_phone_y; /* where the held left press began on the phone */
     bool defer_press;
-    bool defer_slide; /* moved before the hold: this press belongs to the phone */
+    bool defer_slide; /* early motion: only a quick in-photo gesture may reach the phone */
     double defer_x, defer_y;
     int defer_wx, defer_wy;
     Uint64 defer_at;
@@ -680,6 +681,19 @@ static bool thumb_rect(const AVFrame *f, ph_rect s,
     return ph_picture_thumb(plane, s.w, s.h, f->linesize[0], out) != 0;
 }
 
+static bool detail_rect(const AVFrame *f, ph_rect s,
+                        uint8_t out[PH_PICTURE_DETAIL * PH_PICTURE_DETAIL])
+{
+    const uint8_t *plane;
+
+    if (!f || !f->data[0] || s.w < 2 || s.h < 2)
+        return false;
+    if (s.x < 0 || s.y < 0 || s.x + s.w > f->width || s.y + s.h > f->height)
+        return false;
+    plane = f->data[0] + (size_t)s.y * (size_t)f->linesize[0] + (size_t)s.x;
+    return ph_picture_cells(plane, s.w, s.h, f->linesize[0], PH_PICTURE_DETAIL, out) != 0;
+}
+
 static bool frame_planes(const AVFrame *f, ph_yuv_planes *planes)
 {
     if (!f || !f->data[0] || !f->data[1] || !f->data[2])
@@ -794,6 +808,7 @@ static void snap_pull(app *a)
     ph_rect item;
 
     drop_pull_snapshot(a);
+    a->pull_whole_hint = false;
     if (!a->pull.armed || !a->pull_frame || !a->view_frame || !a->view_frame->data[0]
         || !press_video_pixel(a, &a->pull_px, &a->pull_py))
         return;
@@ -815,7 +830,16 @@ static void snap_pull(app *a)
         return;
     }
     if (!pull_item(a, &item) || fills_frame(item, a->pull_frame->width, a->pull_frame->height)) {
+        /* A screenshot, or a photo zoomed to fill the screen, has no edges of its
+         * own, just like the home screen. Ctrl asks for the whole screen picture. */
+        if (SDL_GetModState() & KMOD_CTRL) {
+            a->pull_presentation = true;
+            ph_pull_allow_inside(&a->pull);
+            PH_LOGD("photo pull: Ctrl lifts the whole screen picture");
+            return;
+        }
         a->pull.armed = false;
+        a->pull_whole_hint = true;
         PH_LOGD("photo pull: this press stays on the phone");
         return;
     }
@@ -950,6 +974,39 @@ static void track_pull(app *a)
     note_origin(a);
 }
 
+/* A press that never reached the phone left the screen as it was, so the newest
+ * frame shows the same photo, after any zoom or open animation has finished. The
+ * frame under the press can be mid-zoom, and its picture then has the wrong shape. */
+static void settle_pull_snapshot(app *a)
+{
+    AVFrame *keep;
+    ph_rect before, after;
+    bool had;
+
+    if (!a->pull_snap || !a->view_frame || !a->view_frame->data[0] || !a->pull_frame->data[0]
+        || a->view_frame->width != a->pull_frame->width
+        || a->view_frame->height != a->pull_frame->height
+        || memcmp(&a->view_screen, &a->pull_screen, sizeof a->view_screen) != 0)
+        return;
+    keep = av_frame_alloc();
+    if (!keep)
+        return;
+    had = pull_item(a, &before);
+    av_frame_move_ref(keep, a->pull_frame);
+    if (av_frame_ref(a->pull_frame, a->view_frame) == 0 && pull_item(a, &after)
+        && (a->pull_presentation
+            || !fills_frame(after, a->pull_frame->width, a->pull_frame->height))) {
+        if (had && memcmp(&before, &after, sizeof before) != 0)
+            PH_LOGD("photo pull: picture settled from %dx%d to %dx%d", before.w, before.h,
+                    after.w, after.h);
+        av_frame_free(&keep);
+        return;
+    }
+    av_frame_unref(a->pull_frame);
+    av_frame_move_ref(a->pull_frame, keep);
+    av_frame_free(&keep);
+}
+
 static void begin_pull(app *a)
 {
     ph_yuv_planes planes;
@@ -958,14 +1015,16 @@ static void begin_pull(app *a)
     double aspect;
     int px, py;
     uint8_t thumb[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
-    bool have_thumb;
+    uint8_t detail[PH_PICTURE_DETAIL * PH_PICTURE_DETAIL];
+    bool have_thumb, have_detail;
+    bool untouched = a->defer_press;
 
     a->defer_press = false; /* a file drag never reaches the phone */
     a->defer_slide = false;
     /* A press that already reached the phone is dragging something there, such as a
      * photo being pulled closed. Lifting it at the window edge finishes that gesture;
      * going back to where it began first cancels it. */
-    if (a->absolute && a->abs.buttons)
+    if (a->absolute && a->abs.buttons && a->abs.held)
         ph_abs_cancel_drag(&a->abs, a->press_phone_x, a->press_phone_y, SDL_GetTicks64());
     else
         ph_abs_release_all(&a->abs, SDL_GetTicks64());
@@ -974,6 +1033,8 @@ static void begin_pull(app *a)
     a->pull_path[0] = 0;
     a->pull_hold = false;
     ph_origin_take(a->origin, NULL, 0); /* a late reply belongs to the previous drag */
+    if (untouched)
+        settle_pull_snapshot(a);
     if (!a->pull_snap || !frame_planes(a->pull_frame, &planes)) {
         a->pull_note = 5;
         ph_window_set_detail(a->win, "Drag one photo, not the page around it");
@@ -996,11 +1057,13 @@ static void begin_pull(app *a)
     /* The phone hashes a 64-pixel copy, so a dHash of single video pixels is mostly
      * texture noise. Hashing the averaged thumb samples what the phone samples. */
     have_thumb = thumb_rect(a->pull_frame, picture, thumb);
+    have_detail = have_thumb && detail_rect(a->pull_frame, picture, detail);
     hash = have_thumb ? ph_picture_dhash(thumb, PH_PICTURE_THUMB, PH_PICTURE_THUMB, PH_PICTURE_THUMB)
                       : hash_rect(a->pull_frame, picture);
     aspect = (double)picture.w / (double)picture.h;
     if (!ensure_pull_dir(a)
-        || !ph_origin_ask(a->origin, hash, aspect, have_thumb ? thumb : NULL, a->pull_dir)) {
+        || !ph_origin_ask(a->origin, hash, aspect, have_thumb ? thumb : NULL,
+                          have_detail ? detail : NULL, a->pull_dir)) {
         a->pull_note = 1;
         ph_window_set_detail(a->win, "Open Porthole on the iPhone, then drag the photo again");
         PH_LOGW("photo pull: iPhone is not connected");
@@ -1017,7 +1080,8 @@ static void begin_pull(app *a)
 /* Movement under this, before the hold, stays a possible file drag. */
 #define PULL_SLIDE_PX 8
 
-/* A move before the hold is a slide. Remember it and leave the phone finger up. */
+/* Remember early motion while leaving the phone finger up. A later drag out of
+ * the item may still become a file; a quick release inside may become a swipe. */
 static void note_slide(app *a, int x, int y)
 {
     long dx, dy;
@@ -1032,11 +1096,33 @@ static void note_slide(app *a, int x, int y)
         a->defer_slide = true;
 }
 
+static bool inside_pull_item(const app *a, int x, int y)
+{
+    double vx, vy;
+    ph_rect item;
+    int px, py;
+
+    if (!pull_item(a, &item) || !ph_window_picture_point(a->win, x, y, &vx, &vy))
+        return false;
+    px = a->pull_screen.x + (int)(vx * a->pull_screen.w);
+    py = a->pull_screen.y + (int)(vy * a->pull_screen.h);
+    return px >= item.x && py >= item.y && px < item.x + item.w && py < item.y + item.h;
+}
+
 /* True when this armed press has waited long enough to become a file. */
 static bool file_pull_ready(app *a, int x, int y)
 {
-    if (!a->pull.armed || a->defer_slide)
+    if (!a->pull.armed)
         return false;
+    if (a->defer_slide) {
+        /* Early motion does not turn a drag onto the desktop into a phone
+         * swipe. Nothing has reached the phone yet. A quick flick that leaves
+         * the photo is a file drag at once: waiting for the hold made fast
+         * drags out of the window do nothing at all. */
+        if (inside_pull_item(a, x, y))
+            return false;
+        return ph_pull_motion(&a->pull, on_picture(a, x, y), x, y);
+    }
     if (ph_pull_lifts(&a->pull) && SDL_GetTicks64() - a->defer_at < PULL_HOLD_MS)
         return false;
     return ph_pull_motion(&a->pull, on_picture(a, x, y), x, y);
@@ -1115,8 +1201,8 @@ static void mouse_motion(app *a, const SDL_MouseMotionEvent *event)
 
 #define DEFER_TAP_MS 500
 
-/* A left press on one photo waits. A quick release is a tap. A quick move slides
- * the phone. Held still, then dragged, it lifts that photo onto the PC. A long
+/* A left press on one photo waits. A quick release is a tap. A quick swipe kept
+ * inside the item slides the phone. Held, then dragged out, it lifts the file. A long
  * still press sends nothing, since Photos would open a menu the window cannot show.
  * Returns true when the event is handled. */
 static bool finish_deferred_press(app *a, const SDL_MouseButtonEvent *event)
@@ -1124,10 +1210,14 @@ static bool finish_deferred_press(app *a, const SDL_MouseButtonEvent *event)
     Uint64 now = SDL_GetTicks64();
 
     if (event->type == SDL_MOUSEBUTTONDOWN) {
-        if (!a->pull.armed || !ph_pull_lifts(&a->pull) || a->abs.held || a->abs.buttons)
+        if (!a->pull.armed || !ph_pull_lifts(&a->pull))
             return false;
         if (!abs_coordinates(a, event->x, event->y, &a->defer_x, &a->defer_y))
             return false;
+        /* A previous delayed tap may still be down. It does not make this new
+         * press a native phone drag; finish it before deferring this press. */
+        if (a->abs.held || a->abs.pending || a->abs.buttons)
+            ph_abs_release_all(&a->abs, now);
         a->defer_press = true;
         a->defer_slide = false;
         a->defer_wx = event->x;
@@ -1153,6 +1243,15 @@ static bool finish_deferred_press(app *a, const SDL_MouseButtonEvent *event)
         double x2, y2;
         uint32_t glide = (uint32_t)(now - a->defer_at);
 
+        /* A delayed replay of an attempted file drag can leave Photos stuck
+         * with a tiny, displaced picture. Only replay a quick gesture that
+         * ends inside the same photo; cancellation sends no phone press. */
+        if (now - a->defer_at >= PULL_HOLD_MS || !inside_pull_item(a, event->x, event->y)) {
+            ph_abs_release_all(&a->abs, now);
+            ph_window_set_detail(a->win, "Hold the photo still briefly, then drag it out");
+            PH_LOGD("photo pull: canceled ambiguous drag without sending a phone swipe");
+            return true;
+        }
         if (glide < 80)
             glide = 80;
         if (glide > 280)
@@ -1192,8 +1291,19 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
             finish_pull(a);
             return;
         } else {
+            /* The deferred release needs the snapshot to decide whether a
+             * quick gesture ended inside the photo. Drop it afterwards. */
+            if (a->absolute && finish_deferred_press(a, event)) {
+                ph_pull_release(&a->pull);
+                drop_pull_snapshot(a);
+                return;
+            }
             ph_pull_release(&a->pull);
             drop_pull_snapshot(a);
+            if (a->pull_whole_hint && !on_picture(a, event->x, event->y))
+                ph_window_set_detail(a->win, "To take a full-screen photo or video, "
+                                             "hold Ctrl and drag it out");
+            a->pull_whole_hint = false;
         }
     }
     if (a->absolute && event->button == SDL_BUTTON_LEFT && finish_deferred_press(a, event))
@@ -1555,10 +1665,20 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         }
         return;
     }
-    if (down && sc == SDL_SCANCODE_ESCAPE && (ph_gesture_active(&a->gesture)
+    if (down && sc == SDL_SCANCODE_ESCAPE && (a->defer_press || a->pull.armed || a->pull.pulling
+        || ph_gesture_active(&a->gesture)
         || a->pointer.buttons || a->pointer.requested_buttons || a->input.buttons
         || (a->absolute && (a->abs.held || a->abs.buttons || a->abs.pending)))) {
         cancel_control_intent(a, SDL_GetTicks64());
+        a->defer_press = false;
+        a->defer_slide = false;
+        ph_xdnd_cancel();
+        ph_pull_release(&a->pull);
+        drop_pull_snapshot(a);
+        hide_ghost(a);
+        a->pull_hold = false;
+        a->pull_note = 0;
+        a->pull_path[0] = 0;
         ph_input_release_all(&a->input);
         SDL_CaptureMouse(SDL_FALSE);
         a->gesture_keys[sc] = true;
@@ -2178,8 +2298,14 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
             PH_LOGD("pointer cancel: mouse left window");
             if (a->setup.calibrating)
                 break; /* calibration is autonomous; the mouse may be outside the picture */
-            if (a->absolute && a->abs.held)
-                break; /* a captured absolute drag continues outside the window */
+            if (a->absolute && a->abs.held) {
+                /* An unrecognized dark photo may have started as a native
+                 * drag. Return it before lifting instead of committing a
+                 * Photos dismissal at the edge of the window. */
+                ph_abs_cancel_drag(&a->abs, a->press_phone_x, a->press_phone_y, SDL_GetTicks64());
+                SDL_CaptureMouse(SDL_FALSE);
+                break;
+            }
             cancel_control_intent(a, SDL_GetTicks64());
             SDL_CaptureMouse(SDL_FALSE);
         }

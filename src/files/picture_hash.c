@@ -38,13 +38,12 @@ uint64_t ph_picture_dhash(const uint8_t *pixels, int width, int height, int stri
     return hash;
 }
 
-int ph_picture_thumb(const uint8_t *pixels, int width, int height, int stride,
-                     uint8_t out[PH_PICTURE_THUMB * PH_PICTURE_THUMB])
+int ph_picture_cells(const uint8_t *pixels, int width, int height, int stride, int n,
+                     uint8_t *out)
 {
-    const int n = PH_PICTURE_THUMB;
     int r, c;
 
-    if (!pixels || !out || width < 1 || height < 1 || stride < width)
+    if (!pixels || !out || n < 1 || width < 1 || height < 1 || stride < width)
         return 0;
     for (r = 0; r < n; r++) {
         int y0 = r * height / n, y1 = (r + 1) * height / n;
@@ -68,6 +67,12 @@ int ph_picture_thumb(const uint8_t *pixels, int width, int height, int stride,
         }
     }
     return 1;
+}
+
+int ph_picture_thumb(const uint8_t *pixels, int width, int height, int stride,
+                     uint8_t out[PH_PICTURE_THUMB * PH_PICTURE_THUMB])
+{
+    return ph_picture_cells(pixels, width, height, stride, PH_PICTURE_THUMB, out);
 }
 
 int ph_picture_hamming(uint64_t a, uint64_t b)

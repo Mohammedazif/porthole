@@ -117,11 +117,30 @@ static int presentation_width = PHONE_WIDTH, presentation_height = PHONE_HEIGHT;
 static int presented_width, presented_height;
 static bool presentation_blocked, landscape_accepted, absolute_presentation;
 static unsigned int presentation_leaks, abs_reports, abs_presses;
+enum photo_case { PHOTO_NONE, PHOTO_DRAG, PHOTO_JITTER, PHOTO_SLOW_RELEASE,
+                  PHOTO_SWIPE, PHOTO_TAP, PHOTO_ESCAPE, PHOTO_FOCUS, PHOTO_FAST_EXIT,
+                  PHOTO_OVERLAP, PHOTO_NATIVE_EXIT, PHOTO_FULL, PHOTO_CTRL };
+static enum photo_case photo_mode;
+static unsigned int photo_stage, photo_requests, photo_cancels, photo_presses, photo_releases;
+static Uint64 photo_at;
+static int photo_x = TARGET_X, photo_y = TARGET_Y;
+static uint8_t photo_buttons, photo_phone_buttons;
+static double photo_release_x, photo_release_y;
 #ifdef PH_TEST_WRAP_GLOBAL_MOUSE
 static SDL_Window *coordinate_window;
 static unsigned int desktop_queries;
 Uint32 __real_SDL_GetGlobalMouseState(int *x, int *y);
 Uint32 __wrap_SDL_GetGlobalMouseState(int *x, int *y);
+Uint32 __real_SDL_GetMouseState(int *x, int *y);
+Uint32 __wrap_SDL_GetMouseState(int *x, int *y);
+Uint32 __wrap_SDL_GetMouseState(int *x, int *y)
+{
+    if (!photo_mode)
+        return __real_SDL_GetMouseState(x, y);
+    if (x) *x = photo_x;
+    if (y) *y = photo_y;
+    return photo_buttons;
+}
 Uint32 __wrap_SDL_GetGlobalMouseState(int *x, int *y)
 {
     if (controls_mode != CONTROLS_POINTER_POSITION)
@@ -235,6 +254,10 @@ static void publish_frame(void)
             int background = controls_mode == CONTROLS_PRESENTATION && frame->width > frame->height
                              ? 60 : 16;
             row[x] = (uint8_t)lround(background + (90 - background) * coverage);
+            if (photo_mode && photo_mode != PHOTO_NATIVE_EXIT && photo_mode != PHOTO_FULL
+                && photo_mode != PHOTO_CTRL
+                && x >= 50 && x < 450 && y >= 150 && y < 1000)
+                row[x] = 160; /* one distinct photo inside the phone screen */
         }
     }
     for (int plane = 1; plane <= 2; plane++)
@@ -262,7 +285,15 @@ ph_window *ph_window_create(const char *title)
 }
 
 void ph_window_set_title(ph_window *w, const char *title) { (void)w, (void)title; }
-void ph_window_set_detail(ph_window *w, const char *detail) { (void)w, (void)detail; }
+void ph_window_set_detail(ph_window *w, const char *detail)
+{
+    (void)w;
+    if (!photo_mode) return;
+    if (strstr(detail, "Asking the iPhone") || strstr(detail, "Open Porthole on the iPhone"))
+        photo_requests++;
+    if (strstr(detail, "Hold the photo still"))
+        photo_cancels++;
+}
 void ph_window_set_pull_hint(ph_window *w, const char *hint) { (void)w, (void)hint; }
 void ph_decoder_limit_edge(ph_decoder *d, int long_edge) { (void)d, (void)long_edge; }
 ph_drag_ghost *ph_drag_ghost_create(void) { return NULL; }
@@ -365,6 +396,83 @@ static void push_button(Uint8 button, bool down)
     event.button.x = TARGET_X;
     event.button.y = TARGET_Y;
     SDL_PushEvent(&event);
+}
+
+static void photo_button(bool down)
+{
+    SDL_Event event = {.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP};
+    photo_buttons = down ? SDL_BUTTON_LMASK : 0;
+    event.button.windowID = 1;
+    event.button.button = SDL_BUTTON_LEFT;
+    event.button.state = down ? SDL_PRESSED : SDL_RELEASED;
+    event.button.x = photo_x;
+    event.button.y = photo_y;
+    SDL_PushEvent(&event);
+}
+
+static void photo_motion(int x, int y)
+{
+    photo_x = x;
+    photo_y = y;
+    push_motion(x, y);
+}
+
+static void tick_photo(void)
+{
+    Uint64 now = SDL_GetTicks64();
+    if (!mirroring || !control_ready || !initial_frame) return;
+    if (!photo_stage) {
+        injected = true;
+        photo_motion(TARGET_X, TARGET_Y);
+        /* A screenshot fills the whole screen like the home screen does. */
+        SDL_SetModState(photo_mode == PHOTO_CTRL ? KMOD_LCTRL : KMOD_NONE);
+        photo_button(true);
+        photo_at = now;
+        photo_stage = photo_mode == PHOTO_OVERLAP ? 10 : 1;
+    } else if (photo_stage == 10 && now - photo_at >= 60) {
+        photo_button(false);
+        photo_stage = 11;
+    } else if (photo_stage == 11 && photo_presses == 1) {
+        photo_button(true); /* previous delayed tap still has its finger down */
+        photo_at = now;
+        photo_stage = 12;
+    } else if (photo_stage == 12 && now - photo_at >= 650) {
+        photo_motion(PHONE_WIDTH + 80, TARGET_Y + 100);
+        photo_button(false);
+        photo_stage = 3;
+        photo_at = now;
+    } else if (photo_stage == 1 && now - photo_at >= 60) {
+        if (photo_mode != PHOTO_DRAG && photo_mode != PHOTO_TAP && photo_mode != PHOTO_CTRL)
+            photo_motion(TARGET_X + 12, TARGET_Y + 12); /* moves before 400 ms */
+        if (photo_mode == PHOTO_NATIVE_EXIT) {
+            photo_motion(400, 950);
+        } else if (photo_mode == PHOTO_ESCAPE) {
+            push_key(SDL_SCANCODE_ESCAPE, true, KMOD_NONE);
+            push_key(SDL_SCANCODE_ESCAPE, false, KMOD_NONE);
+        } else if (photo_mode == PHOTO_FOCUS) {
+            push_window(SDL_WINDOWEVENT_FOCUS_LOST);
+        }
+        photo_stage = 2;
+    } else if (photo_stage == 2 && now - photo_at >=
+               (photo_mode == PHOTO_DRAG || photo_mode == PHOTO_JITTER
+                || photo_mode == PHOTO_SLOW_RELEASE || photo_mode == PHOTO_CTRL ? 650U : 180U)) {
+        if (photo_mode == PHOTO_NATIVE_EXIT) {
+            push_window(SDL_WINDOWEVENT_LEAVE);
+        } else if (photo_mode == PHOTO_DRAG)
+            photo_motion(TARGET_X + 40, TARGET_Y);
+        else if (photo_mode == PHOTO_JITTER || photo_mode == PHOTO_FAST_EXIT
+                 || photo_mode == PHOTO_FULL || photo_mode == PHOTO_CTRL)
+            photo_motion(PHONE_WIDTH + 80, TARGET_Y + 100);
+        else if (photo_mode == PHOTO_SLOW_RELEASE || photo_mode == PHOTO_SWIPE)
+            photo_motion(TARGET_X + 80, TARGET_Y + 60);
+        photo_button(false);
+        SDL_SetModState(KMOD_NONE);
+        photo_stage = 3;
+        photo_at = now;
+    } else if (photo_stage == 3 && now - photo_at >= 900) {
+        photo_stage = 4;
+        quit();
+    }
 }
 
 static void push_wheel(float y)
@@ -615,6 +723,7 @@ void ph_window_tick(ph_window *w)
         timed_out = true;
         quit();
     }
+    if (photo_mode) { tick_photo(); return; }
     if (controls_mode) { tick_controls(); return; }
     if (probe_pending) {
         Uint64 elapsed = SDL_GetTicks64() - confirmation_ack_at;
@@ -941,6 +1050,16 @@ bool ph_hid_link_abs_mouse(ph_hid_link *l, uint8_t buttons, double x, double y)
     (void)l;
     (void)x;
     (void)y;
+    if (photo_mode) {
+        if ((buttons & 1) && !(photo_phone_buttons & 1)) photo_presses++;
+        if (!(buttons & 1) && (photo_phone_buttons & 1)) {
+            photo_releases++;
+            photo_release_x = x;
+            photo_release_y = y;
+        }
+        photo_phone_buttons = buttons;
+        return true;
+    }
     if (absolute_presentation) {
         abs_reports++;
         if (buttons & 1)
@@ -1128,6 +1247,18 @@ int main(int argc, char **argv)
     if (argc > 2)
         return 1;
     if (argc == 2) {
+        if (!strcmp(argv[1], "--photo-drag")) photo_mode = PHOTO_DRAG;
+        else if (!strcmp(argv[1], "--photo-jitter")) photo_mode = PHOTO_JITTER;
+        else if (!strcmp(argv[1], "--photo-slow-release")) photo_mode = PHOTO_SLOW_RELEASE;
+        else if (!strcmp(argv[1], "--photo-swipe")) photo_mode = PHOTO_SWIPE;
+        else if (!strcmp(argv[1], "--photo-tap")) photo_mode = PHOTO_TAP;
+        else if (!strcmp(argv[1], "--photo-escape")) photo_mode = PHOTO_ESCAPE;
+        else if (!strcmp(argv[1], "--photo-focus")) photo_mode = PHOTO_FOCUS;
+        else if (!strcmp(argv[1], "--photo-fast-exit")) photo_mode = PHOTO_FAST_EXIT;
+        else if (!strcmp(argv[1], "--photo-overlap")) photo_mode = PHOTO_OVERLAP;
+        else if (!strcmp(argv[1], "--photo-native-exit")) photo_mode = PHOTO_NATIVE_EXIT;
+        else if (!strcmp(argv[1], "--photo-full")) photo_mode = PHOTO_FULL;
+        else if (!strcmp(argv[1], "--photo-ctrl")) photo_mode = PHOTO_CTRL;
         if (!strcmp(argv[1], "--controls-media")) controls_mode = CONTROLS_MEDIA;
         else if (!strcmp(argv[1], "--controls-functions")) controls_mode = CONTROLS_FUNCTIONS;
         else if (!strcmp(argv[1], "--controls-mouse")) controls_mode = CONTROLS_MOUSE;
@@ -1173,7 +1304,7 @@ int main(int argc, char **argv)
     calibration_mode = argc == 2 && (!strcmp(argv[1], "--calibration-focus")
         || !strcmp(argv[1], "--calibration-escape"));
     if (argc == 2 && !drag_mode && !modal_mode && !paced_mode && !filtered_mode
-        && !confirmation_mode && !changing_mode && !stale_mode && !stream_mode && !controls_mode) return 1;
+        && !confirmation_mode && !changing_mode && !stale_mode && !stream_mode && !controls_mode && !photo_mode) return 1;
     freeze_mode = argc == 2 && !strcmp(argv[1], "--freeze-drag");
     cancel_mode = argc == 2 && (!strcmp(argv[1], "--disconnect-drag")
         || !strcmp(argv[1], "--focus-drag") || !strcmp(argv[1], "--close-drag")
@@ -1196,7 +1327,7 @@ int main(int argc, char **argv)
     SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
     ph_app_options options = {.name = "Idle-frame test", .bluetooth = true,
                               .ble_helper = "unused fake helper",
-                              .absolute_pointer = absolute_presentation};
+                              .absolute_pointer = absolute_presentation || photo_mode};
     int result = ph_app_run(&options);
     if (unexpected_abs_reports) {
         fprintf(stderr, "relative-mode run sent %u absolute reports\n", unexpected_abs_reports);
@@ -1210,6 +1341,28 @@ int main(int argc, char **argv)
     snprintf(app_config, sizeof app_config, "%s/porthole", config);
     rmdir(app_config);
     rmdir(config);
+    if (photo_mode) {
+        bool is_gesture = photo_mode == PHOTO_TAP || photo_mode == PHOTO_SWIPE
+                          || photo_mode == PHOTO_OVERLAP || photo_mode == PHOTO_NATIVE_EXIT
+                          || photo_mode == PHOTO_FULL;
+        bool is_file = photo_mode == PHOTO_DRAG || photo_mode == PHOTO_JITTER
+                       || photo_mode == PHOTO_OVERLAP || photo_mode == PHOTO_FAST_EXIT
+                       || photo_mode == PHOTO_CTRL;
+        bool passed = !result && !timed_out && !frame_failure && injected && photo_stage == 4
+            && !photo_phone_buttons && photo_presses == (is_gesture ? 1U : 0U)
+            && photo_releases == photo_presses && (photo_requests > 0) == is_file;
+        if (photo_mode == PHOTO_SLOW_RELEASE)
+            passed &= photo_cancels > 0;
+        if (photo_mode == PHOTO_FAST_EXIT) /* a quick flick out of the photo takes the file */
+            passed &= photo_cancels == 0;
+        if (photo_mode == PHOTO_NATIVE_EXIT)
+            passed &= fabs(photo_release_x - (TARGET_X + .5) / PHONE_WIDTH) < .001
+                      && fabs(photo_release_y - (TARGET_Y + .5) / PHONE_HEIGHT) < .001;
+        fprintf(passed ? stdout : stderr,
+                "photo gesture: pass=%d presses=%u releases=%u requests=%u canceled=%u case=%d\n",
+                passed, photo_presses, photo_releases, photo_requests, photo_cancels, photo_mode);
+        return passed ? 0 : 1;
+    }
     if (controls_mode) {
         SDL_SetModState(KMOD_NONE);
         bool passed = !result && !timed_out && !frame_failure && !queue_overflow

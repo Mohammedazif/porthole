@@ -17,6 +17,13 @@ uint64_t ph_picture_dhash(const uint8_t *pixels, int width, int height, int stri
 int ph_picture_thumb(const uint8_t *pixels, int width, int height, int stride,
                      uint8_t out[PH_PICTURE_THUMB * PH_PICTURE_THUMB]);
 
+/* The same box average at PH_PICTURE_DETAIL cells a side. The phone compares it only
+ * between its few closest candidates, such as two shots of a burst or two moments
+ * of one video, which the 32-cell thumb cannot tell apart. */
+#define PH_PICTURE_DETAIL 64
+int ph_picture_cells(const uint8_t *pixels, int width, int height, int stride, int side,
+                     uint8_t *out);
+
 int ph_picture_hamming(uint64_t a, uint64_t b);
 
 /* A match must be at most this many bits away, and the next candidate must be

@@ -36,6 +36,8 @@ struct ph_origin {
     double aspect;
     uint8_t thumb[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
     bool have_thumb;
+    uint8_t detail[PH_PICTURE_DETAIL * PH_PICTURE_DETAIL];
+    bool have_detail;
     unsigned ask_id;
     unsigned ready_id;
     ph_origin_result ready;
@@ -317,10 +319,13 @@ static void serve_client(ph_origin *o, int fd)
         double aspect;
         unsigned id;
         char dir[512], path[768];
-        char ask_line[64 + 2 * PH_PICTURE_THUMB * PH_PICTURE_THUMB];
+        char ask_line[64 + 2 * PH_PICTURE_THUMB * PH_PICTURE_THUMB
+                             + 2 * PH_PICTURE_DETAIL * PH_PICTURE_DETAIL];
+        static const char hex[] = "0123456789abcdef";
         uint8_t thumb[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
-        bool asked, have_thumb;
-        size_t used;
+        uint8_t detail[PH_PICTURE_DETAIL * PH_PICTURE_DETAIL];
+        bool asked, have_thumb, have_detail;
+        size_t used, i;
 
         pthread_mutex_lock(&o->lock);
         if (!wait_for_ask(o, fd)) {
@@ -332,6 +337,8 @@ static void serve_client(ph_origin *o, int fd)
         aspect = o->aspect;
         have_thumb = o->have_thumb;
         memcpy(thumb, o->thumb, sizeof thumb);
+        have_detail = have_thumb && o->have_detail;
+        memcpy(detail, o->detail, sizeof detail);
         id = o->ask_id;
         snprintf(dir, sizeof dir, "%s", o->dir);
         o->ask = false;
@@ -342,13 +349,17 @@ static void serve_client(ph_origin *o, int fd)
         used = (size_t)snprintf(ask_line, sizeof ask_line, "PULL %016llx %.4f",
                                 (unsigned long long)hash, aspect);
         if (have_thumb) {
-            static const char hex[] = "0123456789abcdef";
-            size_t i;
-
             ask_line[used++] = ' ';
             for (i = 0; i < sizeof thumb; i++) {
                 ask_line[used++] = hex[thumb[i] >> 4];
                 ask_line[used++] = hex[thumb[i] & 15];
+            }
+        }
+        if (have_detail) {
+            ask_line[used++] = ' ';
+            for (i = 0; i < sizeof detail; i++) {
+                ask_line[used++] = hex[detail[i] >> 4];
+                ask_line[used++] = hex[detail[i] & 15];
             }
         }
         ask_line[used++] = '\n';
@@ -511,7 +522,7 @@ bool ph_origin_peer(ph_origin *o, char *address, size_t len)
 }
 
 bool ph_origin_ask(ph_origin *o, uint64_t hash, double aspect, const uint8_t *thumb,
-                   const char *dir)
+                   const uint8_t *detail, const char *dir)
 {
     bool ok = false;
 
@@ -524,6 +535,9 @@ bool ph_origin_ask(ph_origin *o, uint64_t hash, double aspect, const uint8_t *th
         o->have_thumb = thumb != NULL;
         if (thumb)
             memcpy(o->thumb, thumb, sizeof o->thumb);
+        o->have_detail = detail != NULL;
+        if (detail)
+            memcpy(o->detail, detail, sizeof o->detail);
         snprintf(o->dir, sizeof o->dir, "%s", dir);
         o->ask_id++;
         o->ready = PH_ORIGIN_PENDING;
@@ -576,12 +590,13 @@ void ph_origin_stop(ph_origin *origin)
 }
 
 bool ph_origin_ask(ph_origin *origin, uint64_t hash, double aspect, const uint8_t *thumb,
-                   const char *dir)
+                   const uint8_t *detail, const char *dir)
 {
     (void)origin;
     (void)hash;
     (void)aspect;
     (void)thumb;
+    (void)detail;
     (void)dir;
     return false;
 }

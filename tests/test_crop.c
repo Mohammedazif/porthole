@@ -324,6 +324,56 @@ int main(void)
         free_frame(&f);
     }
 
+    /* A dark edge with a small amount of detail belongs to the picture. It is
+     * not the empty black separator above it, or a gap between library cells. */
+    {
+        frame f = make_frame(200, 240, 16);
+        ph_rect photo;
+        paint_box(&f, 0, 200, 80, 200, 170);
+        paint_box(&f, 90, 110, 40, 80, 170);
+        photo = item_at(&f, 100, 120);
+        CHECK(photo.x == 0 && photo.w == 200);
+        CHECK(photo.y == 40 && photo.h == 160);
+        /* A sparse floating control touches the top of the photo. Its text is
+         * not enough to join the picture to the surrounding Photos interface. */
+        paint_box(&f, 96, 104, 20, 40, 230);
+        photo = item_at(&f, 100, 120);
+        CHECK(photo.y == 40 && photo.h == 160);
+        free_frame(&f);
+    }
+
+    /* Photos' thin enclosing frame identifies a dark screenshot even when the
+     * press is on its black padding or on one disconnected card inside it. */
+    {
+        frame f = make_frame(500, 1080, 16);
+        ph_rect photo, padding;
+        paint_box(&f, 68, 432, 128, 129, 30);
+        paint_box(&f, 68, 432, 913, 914, 30);
+        paint_box(&f, 68, 69, 128, 914, 36);
+        paint_box(&f, 431, 432, 128, 914, 36);
+        paint_box(&f, 86, 414, 294, 430, 42);
+        paint_box(&f, 86, 414, 482, 574, 42);
+        photo = item_at(&f, 250, 520);
+        padding = item_at(&f, 250, 460);
+        CHECK(abs(photo.x - 68) <= 2 && abs(photo.w - 364) <= 4);
+        CHECK(abs(photo.y - 128) <= 2 && abs(photo.h - 786) <= 4);
+        CHECK(padding.x == photo.x && padding.y == photo.y && padding.h == photo.h);
+        CHECK(item_at(&f, 20, 460).w == 0);
+        CHECK(item_at(&f, 250, 40).w == 0);
+        /* The phone's broadcast uses full-range black; AirPlay can use 16. */
+        for (int i = 0; i < f.w * f.h; i++)
+            f.y[i] = (uint8_t)(f.y[i] - 16);
+        photo = item_at(&f, 250, 520);
+        CHECK(abs(photo.x - 68) <= 2 && abs(photo.w - 364) <= 4);
+        CHECK(abs(photo.y - 128) <= 2 && abs(photo.h - 786) <= 4);
+        /* Unframed cards in a real app are not an enclosing screenshot. */
+        paint_box(&f, 65, 72, 124, 918, 0);
+        paint_box(&f, 428, 435, 124, 918, 0);
+        photo = item_at(&f, 250, 460);
+        CHECK(photo.w == 0);
+        free_frame(&f);
+    }
+
     if (g_failures) {
         fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;
