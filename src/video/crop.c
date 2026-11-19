@@ -554,6 +554,158 @@ static ph_rect item_rect(const ph_yuv_planes *p, int x, int y)
     return item;
 }
 
+/* Edge strength between neighbouring columns (vertical edges) or rows, summed over a
+ * band. Cell gaps in the grid show as a pair of strong edges at every pitch. */
+static double *column_edges(const ph_yuv_planes *p, int y0, int y1)
+{
+    double *e = calloc((size_t)p->width, sizeof *e);
+
+    if (!e)
+        return NULL;
+    for (int y = y0; y < y1; y += 2) {
+        const uint8_t *row = p->y + (size_t)y * p->y_stride;
+        for (int x = 1; x < p->width; x++)
+            e[x] += abs((int)row[x] - (int)row[x - 1]);
+    }
+    return e;
+}
+
+static double *row_edges(const ph_yuv_planes *p, int y0, int y1)
+{
+    double *e = calloc((size_t)p->height, sizeof *e);
+
+    if (!e)
+        return NULL;
+    for (int y = y0 > 1 ? y0 : 1; y < y1; y++) {
+        const uint8_t *row = p->y + (size_t)y * p->y_stride;
+        const uint8_t *above = row - p->y_stride;
+        for (int x = 0; x < p->width; x += 2)
+            e[y] += abs((int)row[x] - (int)above[x]);
+    }
+    return e;
+}
+
+static double window_max(const double *e, int n, double lo, double hi)
+{
+    double best = 0;
+
+    for (int i = (int)floor(lo); i <= (int)ceil(hi); i++)
+        if (i >= 0 && i < n && e[i] > best)
+            best = e[i];
+    return best;
+}
+
+static double typical(const double *e, int lo, int hi)
+{
+    double sum = 0;
+    int n = 0;
+
+    for (int i = lo; i < hi; i++) {
+        sum += e[i];
+        n++;
+    }
+    return n ? sum / n : 0;
+}
+
+#define GRID_GAP 2
+
+bool ph_video_grid(const ph_yuv_planes *p, int x, int y, ph_grid *out)
+{
+    int y0, y1, best_n = 0;
+    double best = 0, base, *cols, *rows;
+
+    if (!p || !p->y || !out || p->width < 120 || p->height <= p->width || x < 0 || x >= p->width)
+        return false;
+    y0 = y - 240 < 40 ? 40 : y - 240;
+    y1 = y + 240 > p->height - 40 ? p->height - 40 : y + 240;
+    if (y1 - y0 < 120)
+        return false;
+    cols = column_edges(p, y0, y1);
+    if (!cols)
+        return false;
+    base = typical(cols, 1, p->width) + 1;
+    /* Columns from 2 to 15: Photos zooms between 3, 5, 7 and more. Every boundary has
+     * to stand well above the picture's own texture, so a photo is never a grid. */
+    for (int n = 2; n <= 15; n++) {
+        double pitch = (double)(p->width + GRID_GAP) / n, sum = 0, weakest = 1e30;
+        for (int k = 1; k < n; k++) {
+            double at = k * pitch;
+            double v = window_max(cols, p->width, at - GRID_GAP - 3, at + 2) / base;
+            sum += v;
+            if (v < weakest)
+                weakest = v;
+        }
+        double score = sum / (n - 1);
+        if (weakest >= 2.5 && score > best * 1.1) {
+            best = score;
+            best_n = n;
+        }
+    }
+    free(cols);
+    if (!best_n || best < 4)
+        return false;
+    out->columns = best_n;
+    out->pitch = (double)(p->width + GRID_GAP) / best_n;
+    out->gap = GRID_GAP;
+    rows = row_edges(p, y0, y1);
+    if (!rows)
+        return false;
+    /* Rows scroll: find where a row begins from the same edge pairs across the band. */
+    {
+        double phase_best = -1, row_base = typical(rows, y0 + 1, y1) + 1;
+        int phase = 0, count = 0;
+        for (int ph = 0; ph < (int)out->pitch; ph++) {
+            double sum = 0;
+            int n = 0;
+            for (double at = y0 + ph; at < y1; at += out->pitch, n++)
+                sum += window_max(rows, p->height, at - GRID_GAP - 2, at + 1);
+            if (n && sum / n > phase_best) {
+                phase_best = sum / n;
+                phase = ph;
+                count = n;
+            }
+        }
+        free(rows);
+        if (count < 1 || phase_best / row_base < 2.5)
+            return false;
+        out->row_start = fmod(y0 + phase, out->pitch);
+    }
+    return true;
+}
+
+ph_rect ph_grid_cell(const ph_grid *g, int x, int y, int width, int height)
+{
+    ph_rect r = {0};
+    double col, row, x0, y0;
+
+    if (!g || g->pitch < 8)
+        return r;
+    col = floor((x + 0.5) / g->pitch);
+    row = floor((y - g->row_start + 0.5) / g->pitch);
+    x0 = col * g->pitch;
+    y0 = g->row_start + row * g->pitch;
+    /* One pixel in from each side keeps the blurred gap out of the thumbnail. */
+    r.x = (int)ceil(x0) + 1;
+    r.y = (int)ceil(y0) + 1;
+    r.w = (int)floor(x0 + g->pitch - g->gap) - 1 - r.x;
+    r.h = (int)floor(y0 + g->pitch - g->gap) - 1 - r.y;
+    if (r.x < 0) {
+        r.w += r.x;
+        r.x = 0;
+    }
+    if (r.y < 0) {
+        r.h += r.y;
+        r.y = 0;
+    }
+    if (r.x + r.w > width)
+        r.w = width - r.x;
+    if (r.y + r.h > height)
+        r.h = height - r.y;
+    if (r.w < 8 || r.h < 8)
+        return (ph_rect){0};
+    return r;
+}
+
 /* iOS's selection blue (about #0A84FF / #007AFF) is strongly blue-difference positive
  * and red-difference negative; photos rarely have it this saturated in a small disc. */
 static bool badge_blue(const ph_yuv_planes *p, int cx, int cy)
@@ -572,7 +724,7 @@ static bool badge_white(const ph_yuv_planes *p, int x, int y)
 
 #define BADGE_CELLS_MAX 2048 /* the largest blob followed, in chroma cells */
 
-int ph_video_selected_items(const ph_yuv_planes *p, ph_rect *out, int max)
+int ph_video_selected_items(const ph_yuv_planes *p, const ph_grid *grid, ph_rect *out, int max)
 {
     int cw, ch, found = 0;
     unsigned char *seen;
@@ -620,9 +772,9 @@ int ph_video_selected_items(const ph_yuv_planes *p, ph_rect *out, int max)
                         overflow = true;
                 }
             }
-            /* A disc 12 to 48 pixels across, filled about as a circle around a tick. */
+            /* A disc 8 to 48 pixels across, filled about as a circle around a tick. */
             int bw = (x1 - x0 + 1) * 2, bh = (y1 - y0 + 1) * 2;
-            if (overflow || bw < 12 || bh < 12 || bw > 48 || bh > 48 || bw * 4 < bh * 3
+            if (overflow || bw < 8 || bh < 8 || bw > 48 || bh > 48 || bw * 4 < bh * 3
                 || bh * 4 < bw * 3)
                 continue;
             area = (x1 - x0 + 1) * (y1 - y0 + 1);
@@ -634,10 +786,16 @@ int ph_video_selected_items(const ph_yuv_planes *p, ph_rect *out, int max)
             if (white * 100 < bw * bh * 4)
                 continue; /* no white tick: blue in a photo, not a badge */
             /* The badge sits in the thumbnail's bottom-right corner. */
-            item = ph_video_item_rect(p, x0 * 2 - 4 > 0 ? x0 * 2 - 4 : 0,
-                                      y0 * 2 - 4 > 0 ? y0 * 2 - 4 : 0);
-            if (item.w < ITEM_MIN_PX || item.h < ITEM_MIN_PX || item.w > p->width * 3 / 4)
-                continue;
+            if (grid) {
+                item = ph_grid_cell(grid, x0 + x1, y0 + y1, p->width, p->height);
+                if (item.w < 16 || item.h < 16)
+                    continue;
+            } else {
+                item = ph_video_item_rect(p, x0 * 2 - 4 > 0 ? x0 * 2 - 4 : 0,
+                                          y0 * 2 - 4 > 0 ? y0 * 2 - 4 : 0);
+                if (item.w < ITEM_MIN_PX || item.h < ITEM_MIN_PX || item.w > p->width * 3 / 4)
+                    continue;
+            }
             bool again = false;
             for (int i = 0; i < found; i++)
                 again |= out[i].x == item.x && out[i].y == item.y;

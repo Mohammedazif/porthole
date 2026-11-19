@@ -440,11 +440,94 @@ int main(void)
                     f.v[(y / 2) * 250 + x / 2] = tick ? 128 : 60;
                 }
         }
-        n = ph_video_selected_items(&(ph_yuv_planes){f.y, f.u, f.v, 500, 250, 500, 1080}, sel, 8);
+        n = ph_video_selected_items(&(ph_yuv_planes){f.y, f.u, f.v, 500, 250, 500, 1080}, NULL, sel, 8);
         CHECK(n == 2);
         CHECK(n >= 1 && abs(sel[0].x - 166) <= 2 && abs(sel[0].y - 200) <= 2 && abs(sel[0].w - 164) <= 4);
         CHECK(n >= 2 && abs(sel[1].x - 332) <= 2 && abs(sel[1].y - 366) <= 2 && abs(sel[1].h - 164) <= 4);
         free_frame(&f);
+    }
+
+    {
+        /* Photos' grid at several zooms, scrolled part way, in dark and light mode, with
+         * textured, dark and flat thumbnails. A textured photo is not a grid. */
+        int columns[] = {3, 5, 7, 13};
+        unsigned seed = 7;
+        for (int mode = 0; mode < 2; mode++) {
+            uint8_t page = mode ? 255 : 0;
+            for (size_t c = 0; c < sizeof columns / sizeof columns[0]; c++) {
+                int n = columns[c];
+                double pitch = (500.0 + 2) / n;
+                int scroll = 37;
+                frame f = make_frame(500, 1080, page);
+                ph_grid g;
+                ph_rect cell;
+
+                for (int row = -1; row * pitch < 1080; row++)
+                    for (int col = 0; col < n; col++) {
+                        int x0 = (int)ceil(col * pitch), x1 = (int)floor((col + 1) * pitch - 2);
+                        int y0 = (int)ceil(scroll + row * pitch), y1 = (int)floor(scroll + (row + 1) * pitch - 2);
+                        int base = 20 + (int)((seed = seed * 1103515245u + 12345u) >> 16) % 200;
+                        for (int y = y0 < 0 ? 0 : y0; y < y1 && y < 1080; y++)
+                            for (int x = x0; x < x1 && x < 500; x++) {
+                                int texture = ((x * 7 + y * 3) % 11) * ((col + row) % 3);
+                                f.y[y * 500 + x] = (uint8_t)(base + texture);
+                            }
+                    }
+                CHECK(ph_video_grid(&(ph_yuv_planes){f.y, f.u, f.v, 500, 250, 500, 1080}, 250, 540, &g));
+                CHECK(g.columns == n);
+                cell = ph_grid_cell(&g, 250, 540, 500, 1080);
+                {
+                    int col = (int)(250 / pitch);
+                    int row = (int)floor((540 - scroll) / pitch);
+                    CHECK(abs(cell.x - (int)ceil(col * pitch)) <= 2);
+                    CHECK(abs(cell.y - (int)ceil(scroll + row * pitch)) <= 2);
+                    CHECK(abs(cell.w - (int)(pitch - 2)) <= 3 && abs(cell.h - (int)(pitch - 2)) <= 3);
+                }
+                free_frame(&f);
+            }
+        }
+        {
+            frame f = make_frame(500, 1080, 0);
+            ph_grid g;
+            for (int y = 0; y < 1080; y++)
+                for (int x = 0; x < 500; x++)
+                    f.y[y * 500 + x] = (uint8_t)(60 + (x * 13 + y * 7) % 90 + (x / 50) * 5);
+            CHECK(!ph_video_grid(&(ph_yuv_planes){f.y, f.u, f.v, 500, 250, 500, 1080}, 250, 540, &g));
+            free_frame(&f);
+        }
+        {
+            /* Badges map to their own cells in a small grid. */
+            frame f = make_frame(500, 1080, 0);
+            double pitch = 502.0 / 5;
+            ph_grid g;
+            ph_rect sel[8];
+            int n;
+
+            for (int row = 0; row * pitch < 1080; row++)
+                for (int col = 0; col < 5; col++)
+                    paint_box(&f, (int)ceil(col * pitch), (int)floor((col + 1) * pitch - 2),
+                              (int)ceil(row * pitch), (int)floor((row + 1) * pitch - 2),
+                              (uint8_t)(40 + 30 * ((row + col) % 5)));
+            for (int b = 0; b < 2; b++) {
+                int cx = (int)((b ? 3 : 1) * pitch + pitch - 16), cy = (int)((b ? 6 : 4) * pitch + pitch - 16);
+                for (int y = cy - 9; y <= cy + 9; y++)
+                    for (int x = cx - 9; x <= cx + 9; x++) {
+                        int dx = x - cx, dy = y - cy;
+                        if (dx * dx + dy * dy > 81)
+                            continue;
+                        bool tick = abs(dy - dx / 2) <= 1 && dx >= -4 && dx <= 5;
+                        f.y[y * 500 + x] = tick ? 240 : 110;
+                        f.u[(y / 2) * 250 + x / 2] = tick ? 128 : 210;
+                        f.v[(y / 2) * 250 + x / 2] = tick ? 128 : 60;
+                    }
+            }
+            CHECK(ph_video_grid(&(ph_yuv_planes){f.y, f.u, f.v, 500, 250, 500, 1080}, 250, 540, &g));
+            n = ph_video_selected_items(&(ph_yuv_planes){f.y, f.u, f.v, 500, 250, 500, 1080}, &g, sel, 8);
+            CHECK(n == 2);
+            CHECK(n == 2 && abs(sel[0].x - (int)ceil(pitch)) <= 2 && abs(sel[0].y - (int)ceil(4 * pitch)) <= 2);
+            CHECK(n == 2 && abs(sel[1].x - (int)ceil(3 * pitch)) <= 2 && abs(sel[1].y - (int)ceil(6 * pitch)) <= 2);
+            free_frame(&f);
+        }
     }
 
     if (g_failures) {

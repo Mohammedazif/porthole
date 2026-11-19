@@ -39,10 +39,26 @@ ph_rect ph_video_picture_rect(const ph_yuv_planes *p);
  * in the Photos library, stops the item. */
 ph_rect ph_video_item_rect(const ph_yuv_planes *p, int x, int y);
 
+/* Photos' library grid: equal square cells edge to edge across the screen, in rows
+ * that scroll. Found from the repeating edges between cells, so dark, light or
+ * flat thumbnails all work, at any number of columns. */
+typedef struct ph_grid {
+    int columns;
+    double pitch;     /* cell plus gap, in frame pixels */
+    double row_start; /* where a row of cells begins, modulo pitch */
+    int gap;
+} ph_grid;
+
+/* The grid around (x, y), or false when the screen there is not a thumbnail grid. */
+bool ph_video_grid(const ph_yuv_planes *p, int x, int y, ph_grid *out);
+/* The cell under (x, y), clipped to the frame. */
+ph_rect ph_grid_cell(const ph_grid *g, int x, int y, int width, int height);
+
 /* Thumbnails marked selected in Photos' Select mode: each carries iOS's blue circle
- * with a white tick in its corner. Writes up to max rects, top row first, and returns
- * how many. */
-int ph_video_selected_items(const ph_yuv_planes *p, ph_rect *out, int max);
+ * with a white tick in its corner. With a grid, each badge names its cell; without
+ * one, the thumbnail is grown from beside the badge. Writes up to max rects and
+ * returns how many. */
+int ph_video_selected_items(const ph_yuv_planes *p, const ph_grid *grid, ph_rect *out, int max);
 
 /* Retain a confirmed crop while a same-size frame is too dark to distinguish
  * the phone screen from its bars. Zero-initialize/reset for each video session.

@@ -854,6 +854,15 @@ static void snap_pull(app *a)
     if (!a->pull_presentation
         && (!pull_item(a, &item)
             || fills_frame(item, a->pull_frame->width, a->pull_frame->height))) {
+        ph_yuv_planes planes;
+        ph_grid grid;
+
+        /* Photos' grid of thumbnails: ask_pull takes the exact cell. */
+        if (frame_planes(a->pull_frame, &planes)
+            && ph_video_grid(&planes, a->pull_px, a->pull_py, &grid)) {
+            PH_LOGD("photo pull: Ctrl+drag takes this thumbnail");
+            return;
+        }
         a->pull_presentation = true;
         PH_LOGD("photo pull: Ctrl+drag takes the whole screen picture");
         return;
@@ -1138,7 +1147,25 @@ static void ask_pull(app *a)
         return;
     }
     ph_origin_take(a->origin, NULL, 0); /* a late reply belongs to the previous press */
-    if (!a->pull_snap || !frame_planes(a->pull_frame, &planes) || !pull_item(a, &picture)) {
+    bool on_grid = false;
+    ph_grid grid;
+
+    if (!a->pull_snap || !frame_planes(a->pull_frame, &planes)) {
+        a->pull_note = 5;
+        ph_window_set_detail(a->win, "Nothing to take here");
+        return;
+    }
+    /* In Photos' library grid the cell is exact, at any zoom, whatever the colours. */
+    if (!a->pull_presentation && ph_video_grid(&planes, a->pull_px, a->pull_py, &grid)) {
+        ph_rect cell = ph_grid_cell(&grid, a->pull_px, a->pull_py, a->pull_frame->width,
+                                    a->pull_frame->height);
+        if (cell.w > 0) {
+            picture = cell;
+            on_grid = true;
+            PH_LOGD("photo pull: grid of %d columns, cell %dx%d", grid.columns, cell.w, cell.h);
+        }
+    }
+    if (!on_grid && !pull_item(a, &picture)) {
         a->pull_note = 5;
         ph_window_set_detail(a->win, "Nothing to take here");
         PH_LOGW("photo pull: no picture under the press");
@@ -1149,7 +1176,7 @@ static void ask_pull(app *a)
     a->pull_batch_n = 1;
     if (!a->pull_presentation) {
         ph_rect marked[64];
-        int n = ph_video_selected_items(&planes, marked, 64);
+        int n = ph_video_selected_items(&planes, on_grid ? &grid : NULL, marked, 64);
         bool on_marked = false;
 
         for (int i = 0; i < n; i++)
@@ -1162,7 +1189,7 @@ static void ask_pull(app *a)
         }
     }
     a->pull_batch_next = 1;
-    if (!ask_rect(a, a->pull_batch[0], a->pull_batch_n == 1)) {
+    if (!ask_rect(a, a->pull_batch[0], a->pull_batch_n == 1 && !on_grid)) {
         a->pull_note = 1;
         ph_window_set_detail(a->win, "Open Porthole on the iPhone, then try again");
         PH_LOGW("photo pull: iPhone is not connected");
