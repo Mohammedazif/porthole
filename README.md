@@ -137,7 +137,9 @@ sharper copies, and checks videos frame by frame around their closest moments. W
 nothing can tell, choose the item in the phone app with Choose original. A failed
 match saves nothing. To take several at once, select them in Photos, tap Share and
 choose Porthole: the phone app (2.9 or later) sends those files themselves, and the
-next Ctrl+drag out of the window carries them all.
+next Ctrl+drag out of the window carries them all. In Photos' Select mode, Ctrl+drag
+on a checkmarked thumbnail takes every checkmarked thumbnail on screen: Porthole finds
+iOS's blue tick badges, asks the phone for each one in turn, and drops them together.
 F1 shows the address and
 code the phone app uses. The relative pointer still pauses, and the window says
 "Return to phone view", because it has to see the AssistiveTouch dot. Returning

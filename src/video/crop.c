@@ -554,6 +554,102 @@ static ph_rect item_rect(const ph_yuv_planes *p, int x, int y)
     return item;
 }
 
+/* iOS's selection blue (about #0A84FF / #007AFF) is strongly blue-difference positive
+ * and red-difference negative; photos rarely have it this saturated in a small disc. */
+static bool badge_blue(const ph_yuv_planes *p, int cx, int cy)
+{
+    int u = p->u[cy * p->uv_stride + cx], v = p->v[cy * p->uv_stride + cx];
+    int luma = p->y[(cy * 2) * p->y_stride + cx * 2];
+    return u >= 170 && v <= 105 && luma >= 50 && luma <= 210;
+}
+
+static bool badge_white(const ph_yuv_planes *p, int x, int y)
+{
+    int u = p->u[(y / 2) * p->uv_stride + x / 2] - 128;
+    int v = p->v[(y / 2) * p->uv_stride + x / 2] - 128;
+    return p->y[y * p->y_stride + x] >= 190 && abs(u) <= 24 && abs(v) <= 24;
+}
+
+#define BADGE_CELLS_MAX 2048 /* the largest blob followed, in chroma cells */
+
+int ph_video_selected_items(const ph_yuv_planes *p, ph_rect *out, int max)
+{
+    int cw, ch, found = 0;
+    unsigned char *seen;
+    int *stack;
+
+    if (!p || !p->y || !p->u || !p->v || !out || max < 1 || p->width < 32 || p->height < 32)
+        return 0;
+    cw = p->width / 2;
+    ch = p->height / 2;
+    seen = calloc((size_t)cw * ch, 1);
+    stack = malloc(sizeof *stack * BADGE_CELLS_MAX);
+    if (!seen || !stack) {
+        free(seen);
+        free(stack);
+        return 0;
+    }
+    for (int cy = 0; cy < ch && found < max; cy++) {
+        for (int cx = 0; cx < cw && found < max; cx++) {
+            int top = 0, cells = 0, x0 = cx, x1 = cx, y0 = cy, y1 = cy, white = 0, area;
+            bool overflow = false;
+            ph_rect item;
+
+            if (seen[cy * cw + cx] || !badge_blue(p, cx, cy))
+                continue;
+            seen[cy * cw + cx] = 1;
+            stack[top++] = cy * cw + cx;
+            while (top > 0) {
+                int at = stack[--top], x = at % cw, y = at / cw;
+                static const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
+
+                cells++;
+                x0 = x < x0 ? x : x0;
+                x1 = x > x1 ? x : x1;
+                y0 = y < y0 ? y : y0;
+                y1 = y > y1 ? y : y1;
+                for (int k = 0; k < 4; k++) {
+                    int nx = x + dx[k], ny = y + dy[k];
+                    if (nx < 0 || ny < 0 || nx >= cw || ny >= ch || seen[ny * cw + nx]
+                        || !badge_blue(p, nx, ny))
+                        continue;
+                    seen[ny * cw + nx] = 1;
+                    if (top < BADGE_CELLS_MAX)
+                        stack[top++] = ny * cw + nx;
+                    else
+                        overflow = true;
+                }
+            }
+            /* A disc 12 to 48 pixels across, filled about as a circle around a tick. */
+            int bw = (x1 - x0 + 1) * 2, bh = (y1 - y0 + 1) * 2;
+            if (overflow || bw < 12 || bh < 12 || bw > 48 || bh > 48 || bw * 4 < bh * 3
+                || bh * 4 < bw * 3)
+                continue;
+            area = (x1 - x0 + 1) * (y1 - y0 + 1);
+            if (cells * 100 < area * 40 || cells * 100 > area * 92)
+                continue;
+            for (int y = y0 * 2; y <= y1 * 2 + 1 && y < p->height; y++)
+                for (int x = x0 * 2; x <= x1 * 2 + 1 && x < p->width; x++)
+                    white += badge_white(p, x, y);
+            if (white * 100 < bw * bh * 4)
+                continue; /* no white tick: blue in a photo, not a badge */
+            /* The badge sits in the thumbnail's bottom-right corner. */
+            item = ph_video_item_rect(p, x0 * 2 - 4 > 0 ? x0 * 2 - 4 : 0,
+                                      y0 * 2 - 4 > 0 ? y0 * 2 - 4 : 0);
+            if (item.w < ITEM_MIN_PX || item.h < ITEM_MIN_PX || item.w > p->width * 3 / 4)
+                continue;
+            bool again = false;
+            for (int i = 0; i < found; i++)
+                again |= out[i].x == item.x && out[i].y == item.y;
+            if (!again)
+                out[found++] = item;
+        }
+    }
+    free(seen);
+    free(stack);
+    return found;
+}
+
 ph_rect ph_video_content_rect(const ph_yuv_planes *p, double portrait_aspect)
 {
     bool ambiguous;

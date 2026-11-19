@@ -101,6 +101,9 @@ typedef struct app {
      * so the frame on screen when the drag leaves can be a different photo. */
     AVFrame *pull_frame;
     ph_rect pull_picture; /* what the phone was asked about, for the drag card */
+    /* Thumbnails asked for one after another: the checkmarked ones in Select mode. */
+    ph_rect pull_batch[64];
+    int pull_batch_n, pull_batch_next, pull_batch_found;
     int pull_px, pull_py;
     bool pull_snap;
     /* A bare photo or video that iOS sends instead of the phone screen is already the
@@ -995,27 +998,53 @@ static void start_file_drag(app *a)
         ph_xdnd_motion(gx, gy);
 }
 
-/* Takes the phone's answer, before the drag or during it. */
+static bool ask_rect(app *a, ph_rect picture, bool with_screen);
+
+/* Takes the phone's answer, before the drag or during it. In a batch each answer asks
+ * for the next thumbnail; the drag carries every file found once all have answered. */
 static void note_origin(app *a)
 {
-    char path[768];
+    char path[768], line[96];
     ph_origin_result result;
+    int asked;
 
     if ((!a->pull.pulling && !a->pull.armed) || a->pull_note != 2)
         return;
     result = ph_origin_take(a->origin, path, sizeof path);
+    if (result != PH_ORIGIN_FILE && result != PH_ORIGIN_MISS)
+        return;
     if (result == PH_ORIGIN_FILE) {
-        snprintf(a->pull_path, sizeof a->pull_path, "%s", path);
-        a->pull_note = 3;
-        if (!a->pull.pulling) {
-            ph_window_set_detail(a->win, "Found it. Drag it out of the window");
+        size_t used = strlen(a->pull_path);
+        if (used + strlen(path) + 2 < sizeof a->pull_path) {
+            snprintf(a->pull_path + used, sizeof a->pull_path - used, "%s%s", used ? "\n" : "", path);
+            a->pull_batch_found++;
+        }
+    }
+    asked = a->pull_batch_next;
+    if (asked < a->pull_batch_n) {
+        if (ask_rect(a, a->pull_batch[asked], false)) {
+            a->pull_batch_next++;
+            snprintf(line, sizeof line, "Finding %d of %d on the iPhone", asked + 1, a->pull_batch_n);
+            ph_window_set_detail(a->win, line);
+            ph_drag_ghost_caption(a->ghost, line, false);
             return;
         }
+        PH_LOGW("photo pull: iPhone left during a batch");
+    }
+    if (a->pull_path[0]) {
+        a->pull_note = 3;
+        if (a->pull_batch_n > 1)
+            snprintf(line, sizeof line, "Found %d of %d", a->pull_batch_found, a->pull_batch_n);
+        else
+            snprintf(line, sizeof line, a->pull.pulling ? "Pulling the original file"
+                                                         : "Found it. Drag it out of the window");
+        ph_window_set_detail(a->win, line);
+        if (!a->pull.pulling)
+            return;
         start_file_drag(a);
-        ph_window_set_detail(a->win, "Pulling the original file");
         if (a->pull_hold)
             end_pull(a);
-    } else if (result == PH_ORIGIN_MISS) {
+    } else {
         a->pull_note = 4;
         hide_ghost(a);
         ph_window_set_detail(a->win, "Not a photo or video from this iPhone's library");
@@ -1046,10 +1075,10 @@ static void track_pull(app *a)
 /* Asks the phone about the picture under a Ctrl press at once, before any drag, so
  * the card only appears for something the phone has: the home screen or an app page
  * never shows one. Nothing here reaches the phone's screen. */
-static void ask_pull(app *a)
+/* Asks the phone about one picture in the pull frame. with_screen also sends the
+ * whole phone screen, for a picture whose edges may be wrong or missing. */
+static bool ask_rect(app *a, ph_rect picture, bool with_screen)
 {
-    ph_yuv_planes planes;
-    ph_rect picture;
     uint64_t hash;
     double aspect;
     uint8_t thumb[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
@@ -1057,14 +1086,47 @@ static void ask_pull(app *a)
     static ph_origin_screen screen;
     bool have_thumb, have_detail, have_screen;
 
+    /* The phone hashes a 64-pixel copy, so a dHash of single video pixels is mostly
+     * texture noise. Hashing the averaged thumb samples what the phone samples. */
+    have_thumb = thumb_rect(a->pull_frame, picture, thumb);
+    have_detail = have_thumb && detail_rect(a->pull_frame, picture, detail);
+    hash = have_thumb ? ph_picture_dhash(thumb, PH_PICTURE_THUMB, PH_PICTURE_THUMB, PH_PICTURE_THUMB)
+                      : hash_rect(a->pull_frame, picture);
+    aspect = (double)picture.w / (double)picture.h;
+    /* On the phone's own portrait screen, also send the whole screen: the phone can
+     * place each library item the way Photos shows it, which needs no edges at all. */
+    have_screen = with_screen && have_detail && a->pull_screen.w > 1
+                  && a->pull_screen.h > a->pull_screen.w
+                  && thumb_rect(a->pull_frame, a->pull_screen, screen.thumb)
+                  && detail_rect(a->pull_frame, a->pull_screen, screen.detail);
+    screen.aspect = have_screen ? (double)a->pull_screen.w / (double)a->pull_screen.h : 0;
+    if (!ensure_pull_dir(a)
+        || !ph_origin_ask(a->origin, hash, aspect, have_thumb ? thumb : NULL,
+                          have_detail ? detail : NULL, have_screen ? &screen : NULL,
+                          a->pull_dir))
+        return false;
+    PH_LOGI("photo pull: item %dx%d aspect %.4f hash %016llx%s", picture.w, picture.h, aspect,
+            (unsigned long long)hash, have_screen ? " (and the whole screen)" : "");
+    return true;
+}
+
+/* Asks the phone about the picture under a Ctrl press at once, before any drag, so
+ * the card only appears for something the phone has: the home screen or an app page
+ * never shows one. A press on a checkmarked thumbnail in Select mode takes every
+ * checkmarked thumbnail on screen. Nothing here reaches the phone's screen. */
+static void ask_pull(app *a)
+{
+    ph_yuv_planes planes;
+    ph_rect picture;
+    char line[96];
+
     a->pull_path[0] = 0;
     a->pull_hold = false;
     a->pull_picture = (ph_rect){0};
     a->pull_inbox = false;
+    a->pull_batch_n = a->pull_batch_next = a->pull_batch_found = 0;
     if (a->inbox_paths && a->pull_snap) {
         /* Items sent from the phone's Share sheet go first: this drag carries them all. */
-        char line[96];
-
         snprintf(a->pull_path, sizeof a->pull_path, "%s", a->inbox_paths);
         a->pull_inbox = true;
         a->pull_note = 3;
@@ -1083,32 +1145,35 @@ static void ask_pull(app *a)
         return;
     }
     a->pull_picture = picture;
-    /* The phone hashes a 64-pixel copy, so a dHash of single video pixels is mostly
-     * texture noise. Hashing the averaged thumb samples what the phone samples. */
-    have_thumb = thumb_rect(a->pull_frame, picture, thumb);
-    have_detail = have_thumb && detail_rect(a->pull_frame, picture, detail);
-    hash = have_thumb ? ph_picture_dhash(thumb, PH_PICTURE_THUMB, PH_PICTURE_THUMB, PH_PICTURE_THUMB)
-                      : hash_rect(a->pull_frame, picture);
-    aspect = (double)picture.w / (double)picture.h;
-    /* On the phone's own portrait screen, also send the whole screen: the phone can
-     * place each library item the way Photos shows it, which needs no edges at all. */
-    have_screen = have_detail && a->pull_screen.w > 1 && a->pull_screen.h > a->pull_screen.w
-                  && thumb_rect(a->pull_frame, a->pull_screen, screen.thumb)
-                  && detail_rect(a->pull_frame, a->pull_screen, screen.detail);
-    screen.aspect = have_screen ? (double)a->pull_screen.w / (double)a->pull_screen.h : 0;
-    if (!ensure_pull_dir(a)
-        || !ph_origin_ask(a->origin, hash, aspect, have_thumb ? thumb : NULL,
-                          have_detail ? detail : NULL, have_screen ? &screen : NULL,
-                          a->pull_dir)) {
+    a->pull_batch[0] = picture;
+    a->pull_batch_n = 1;
+    if (!a->pull_presentation) {
+        ph_rect marked[64];
+        int n = ph_video_selected_items(&planes, marked, 64);
+        bool on_marked = false;
+
+        for (int i = 0; i < n; i++)
+            on_marked |= a->pull_px >= marked[i].x && a->pull_px < marked[i].x + marked[i].w
+                         && a->pull_py >= marked[i].y && a->pull_py < marked[i].y + marked[i].h;
+        if (on_marked && n > 1) {
+            memcpy(a->pull_batch, marked, sizeof marked[0] * (size_t)n);
+            a->pull_batch_n = n;
+            PH_LOGI("photo pull: %d checkmarked thumbnails", n);
+        }
+    }
+    a->pull_batch_next = 1;
+    if (!ask_rect(a, a->pull_batch[0], a->pull_batch_n == 1)) {
         a->pull_note = 1;
         ph_window_set_detail(a->win, "Open Porthole on the iPhone, then try again");
         PH_LOGW("photo pull: iPhone is not connected");
         return;
     }
     a->pull_note = 2;
-    ph_window_set_detail(a->win, "Asking the iPhone for this photo");
-    PH_LOGI("photo pull: item %dx%d aspect %.4f hash %016llx%s", picture.w, picture.h, aspect,
-            (unsigned long long)hash, have_screen ? " (and the whole screen)" : "");
+    if (a->pull_batch_n > 1)
+        snprintf(line, sizeof line, "Finding 1 of %d on the iPhone", a->pull_batch_n);
+    else
+        snprintf(line, sizeof line, "Asking the iPhone for this photo");
+    ph_window_set_detail(a->win, line);
 }
 
 /* The Ctrl press became a drag. The card follows the pointer while the phone is still

@@ -406,6 +406,47 @@ int main(void)
         free_frame(&f);
     }
 
+    {
+        /* Photos' Select mode: a grid of thumbnails, two carrying the blue badge with a
+         * white tick in their bottom-right corner; a blue sky alone is not a badge. */
+        frame f = make_frame(500, 1080, 0);
+        ph_rect sel[8];
+        int n;
+
+        for (int row = 0; row < 2; row++)
+            for (int col = 0; col < 3; col++) {
+                int x0 = col * 166, y0 = 200 + row * 166;
+                paint_box(&f, x0, x0 + 164, y0, y0 + 164, (uint8_t)(70 + 20 * col + 10 * row));
+            }
+        /* thumbnail (0,0) is sky blue all over: no badge */
+        for (int y = 200; y < 364; y++)
+            for (int x = 0; x < 164; x++) {
+                f.y[y * 500 + x] = 120;
+                f.u[(y / 2) * 250 + x / 2] = 200;
+                f.v[(y / 2) * 250 + x / 2] = 90;
+            }
+        /* badges on (1,0) and (2,1): a 26-pixel disc of iOS blue with a white tick */
+        int badges[2][2] = {{166 + 164 - 20, 200 + 164 - 20}, {332 + 164 - 20, 366 + 164 - 20}};
+        for (int b = 0; b < 2; b++) {
+            int cx = badges[b][0], cy = badges[b][1];
+            for (int y = cy - 13; y <= cy + 13; y++)
+                for (int x = cx - 13; x <= cx + 13; x++) {
+                    int dx = x - cx, dy = y - cy;
+                    if (dx * dx + dy * dy > 13 * 13)
+                        continue;
+                    bool tick = (abs(dy - dx / 2) <= 1 && dx >= -6 && dx <= 7);
+                    f.y[y * 500 + x] = tick ? 240 : 110;
+                    f.u[(y / 2) * 250 + x / 2] = tick ? 128 : 210;
+                    f.v[(y / 2) * 250 + x / 2] = tick ? 128 : 60;
+                }
+        }
+        n = ph_video_selected_items(&(ph_yuv_planes){f.y, f.u, f.v, 500, 250, 500, 1080}, sel, 8);
+        CHECK(n == 2);
+        CHECK(n >= 1 && abs(sel[0].x - 166) <= 2 && abs(sel[0].y - 200) <= 2 && abs(sel[0].w - 164) <= 4);
+        CHECK(n >= 2 && abs(sel[1].x - 332) <= 2 && abs(sel[1].y - 366) <= 2 && abs(sel[1].h - 164) <= 4);
+        free_frame(&f);
+    }
+
     if (g_failures) {
         fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

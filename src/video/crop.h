@@ -39,6 +39,11 @@ ph_rect ph_video_picture_rect(const ph_yuv_planes *p);
  * in the Photos library, stops the item. */
 ph_rect ph_video_item_rect(const ph_yuv_planes *p, int x, int y);
 
+/* Thumbnails marked selected in Photos' Select mode: each carries iOS's blue circle
+ * with a white tick in its corner. Writes up to max rects, top row first, and returns
+ * how many. */
+int ph_video_selected_items(const ph_yuv_planes *p, ph_rect *out, int max);
+
 /* Retain a confirmed crop while a same-size frame is too dark to distinguish
  * the phone screen from its bars. Zero-initialize/reset for each video session.
  * A new frame size defaults to the whole frame when its pixels are ambiguous. */
