@@ -1240,6 +1240,8 @@ enum {
 #define SHARE_SELECT_X 0.86
 #define SHARE_SELECT_Y 0.074
 #define SHARE_CLOSE_X 0.90
+/* The Share sheet's close button, below that. */
+#define SHARE_SHEET_CLOSE_Y 0.096
 
 static bool share_tap(app *a, double fx, double fy)
 {
@@ -1295,30 +1297,22 @@ static bool start_share(app *a)
         return false;
     a->share_leave = false;
     a->share_seen = 0;
-    if (ph_photos_share_button(&planes, a->pull_screen, &bx, &by)
-        && share_point(a, bx, by, &fx, &fy)) {
-        /* Select mode, or one photo or video: Share takes exactly that. */
-        if (!share_tap(a, fx, fy))
-            return false;
-        a->share_step = SHARE_SHEET;
-        PH_LOGI("photo share: tapping Share");
-    } else if (!a->pull_presentation && ph_video_grid(&planes, a->pull_px, a->pull_py, &grid)) {
-        /* The library grid: Select, tick this thumbnail, Share, and close Select. */
-        ph_rect cell = ph_grid_cell(&grid, a->pull_px, a->pull_py, a->pull_frame->width,
-                                    a->pull_frame->height);
-
-        if (cell.w < 8
-            || !share_point(a, cell.x + cell.w / 2, cell.y + cell.h / 2, &a->share_cell_x,
-                            &a->share_cell_y)
-            || !share_tap(a, SHARE_SELECT_X, SHARE_SELECT_Y))
-            return false;
-        a->pull_picture = cell;
-        a->share_leave = true;
-        a->share_step = SHARE_SELECT;
-        PH_LOGI("photo share: tapping Select for one thumbnail");
-    } else {
+    /* Only Select mode: a grid with the Share button under it. One photo on screen is
+     * matched in a few seconds, faster than the Share sheet, so it stays matched. */
+    if (a->pull_presentation || !ph_photos_share_button(&planes, a->pull_screen, &bx, &by)
+        || !share_point(a, bx, by, &fx, &fy))
         return false;
+    {
+        ph_rect marked[1];
+        bool grid_here = ph_video_grid(&planes, a->pull_px, a->pull_py, &grid);
+
+        if (!grid_here && ph_video_selected_items(&planes, NULL, marked, 1) == 0)
+            return false;
     }
+    if (!share_tap(a, fx, fy))
+        return false;
+    a->share_step = SHARE_SHEET;
+    PH_LOGI("photo share: Select mode, tapping Share");
     if (!a->pull_picture.w)
         a->pull_picture = a->pull_screen;
     a->share_at = SDL_GetTicks64();
@@ -1390,9 +1384,11 @@ static void run_share(app *a)
                 PH_LOGI("photo share: tapping Porthole in the Share sheet");
                 ph_window_set_detail(a->win, "Photos is sending it...");
             }
-        } else if (since > 6000) {
-            share_stop(a, "Porthole is not in the iPhone's Share sheet: scroll its apps to More, "
-                          "tap Edit, and move Porthole to the front");
+        } else if (since > 4000) {
+            /* Close the sheet again, with its close button at the top right. */
+            share_tap(a, SHARE_CLOSE_X, SHARE_SHEET_CLOSE_Y);
+            share_stop(a, "Porthole is not among the first apps in the iPhone's Share sheet: "
+                          "scroll its apps to More, tap Edit, and move Porthole to the front");
         }
         break;
     default:
