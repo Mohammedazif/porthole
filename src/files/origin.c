@@ -421,7 +421,14 @@ static void serve_client(ph_origin *o, int fd)
         o->ready_id = id;
         snprintf(o->path, sizeof o->path, "%s", path);
         pthread_mutex_unlock(&o->lock);
-        PH_LOGI("photo pull: original %s", path);
+        {
+            /* Phones from 2.11 put the match's scores after the name. */
+            const char *why = strchr(line, ' ');
+            why = why ? strchr(why + 1, ' ') : NULL;
+            why = why ? strchr(why + 1, ' ') : NULL;
+            PH_LOGI("photo pull: original %s%s%s%s", path, why ? " (scores " : "", why ? why + 1 : "",
+                    why ? ")" : "");
+        }
     }
 done:
     pthread_mutex_lock(&o->lock);
