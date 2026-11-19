@@ -151,12 +151,12 @@ bool ph_photos_porthole_icon(const ph_yuv_planes *p, ph_rect s, int *x, int *y)
                     stack[top++] = ny * cw + nx;
                 }
             }
-            /* A rounded square 6% to 25% of the screen's width, mostly purple (the
-             * white ring takes about a fifth). */
+            /* 6% to 25% of the screen's width: the whole purple icon, or, in iOS's dark
+             * and tinted icon styles, just its purple ring (about a third purple). */
             int bw = (x1 - x0 + 1) * 2, bh = (y1 - y0 + 1) * 2;
             if (bw < s.w * 6 / 100 || bw > s.w / 4 || bw * 5 < bh * 4 || bh * 5 < bw * 4)
                 continue;
-            if (cells * 100 < (x1 - x0 + 1) * (y1 - y0 + 1) * 45)
+            if (cells * 100 < (x1 - x0 + 1) * (y1 - y0 + 1) * 20)
                 continue;
             if (cells > best) {
                 best = cells;

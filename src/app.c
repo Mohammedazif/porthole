@@ -1002,6 +1002,47 @@ static int desktop_copy_all(char *paths)
     return copied;
 }
 
+/* Moves each file, one per line, onto the Desktop without replacing anything there:
+ * a name already taken gets 2-, 3-, ... in front. Returns how many arrived. */
+static int desktop_move_all(char *paths)
+{
+    const char *home = getenv("HOME");
+    int moved = 0;
+
+    for (char *line = paths, *next; line && *line; line = next) {
+        const char *base = strrchr(line, '/');
+        char dest[1024];
+        bool ok = false;
+
+        next = strchr(line, '\n');
+        if (next)
+            *next++ = 0;
+        if (!home || !home[0] || !base || !base[1])
+            continue;
+        for (int n = 1; n < 1000 && !ok; n++) {
+            FILE *taken;
+            int len = n == 1 ? snprintf(dest, sizeof dest, "%s/Desktop/%s", home, base + 1)
+                             : snprintf(dest, sizeof dest, "%s/Desktop/%d-%s", home, n, base + 1);
+
+            if (len >= (int)sizeof dest)
+                break;
+            if ((taken = fopen(dest, "rb"))) {
+                fclose(taken);
+                continue;
+            }
+            ok = rename(line, dest) == 0 || (copy_file(line, dest) && remove(line) == 0);
+            break;
+        }
+        if (ok) {
+            moved++;
+            PH_LOGI("share: on the Desktop: %s", dest);
+        } else {
+            PH_LOGW("share: stayed at %s", line);
+        }
+    }
+    return moved;
+}
+
 static void end_pull(app *a)
 {
     bool placed = false;
@@ -2559,15 +2600,31 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
             free(a->inbox_paths);
             a->inbox_paths = both;
             a->inbox_count += count;
-        } else {
+        } else if ((a->share_step == SHARE_SHEET || a->share_step == SHARE_SEND) && a->pull_note == 2
+                   && (a->pull.armed || a->pull.pulling || a->pull_hold)) {
+            /* A Ctrl+drag is waiting for these: they land where it was dropped. */
             free(a->inbox_paths);
             a->inbox_paths = e->user.data1;
             a->inbox_count = count;
+            share_delivered(a);
+            break;
+        } else {
+            /* Sent from the iPhone's Share sheet with no drag waiting: straight onto
+             * the Desktop, like AirDrop. */
+            int saved = desktop_move_all(e->user.data1);
+
+            free(e->user.data1);
+            if (a->share_step == SHARE_SHEET || a->share_step == SHARE_SEND)
+                a->share_step = a->share_leave ? SHARE_CLOSE : SHARE_IDLE;
+            snprintf(line, sizeof line, "Saved %d item%s from the iPhone on the Desktop", saved,
+                     saved == 1 ? "" : "s");
+            ph_window_set_detail(a->win, line);
+            PH_LOGI("share: saved %d of %d item(s) on the Desktop", saved, count);
+            break;
         }
         snprintf(line, sizeof line, "%d item%s from the iPhone: hold Ctrl and drag out of the window",
                  a->inbox_count, a->inbox_count == 1 ? "" : "s");
         ph_window_set_detail(a->win, line);
-        share_delivered(a);
         break;
     }
     default:
