@@ -1334,7 +1334,8 @@ int main(int argc, char **argv)
         /* Without Ctrl the phone gets every press, even one dragged out of the
          * window, and no file is asked for. With Ctrl the phone gets nothing. */
         bool is_gesture = !photo_ctrl();
-        bool is_file = photo_mode == PHOTO_CTRL || photo_mode == PHOTO_JITTER;
+        /* A Ctrl press asks the phone at once, before any drag. */
+        bool is_file = photo_ctrl();
         bool passed = !result && !timed_out && !frame_failure && injected && photo_stage == 4
             && !photo_phone_buttons && photo_presses == (is_gesture ? 1U : 0U)
             && photo_releases == photo_presses && (photo_requests > 0) == is_file;

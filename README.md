@@ -125,9 +125,11 @@ reconstruct UI that the iPhone does not send. With the absolute pointer, the
 mouse, wheel, and keyboard keep working on that picture: a click is that fraction
 of the phone screen. Plain clicks and drags always go to the phone. To take a photo
 or video's original file, hold Ctrl and drag it out of the window: that press never
-reaches the phone. Porthole takes the photo under the pointer when it can find its
-edges, and otherwise the whole picture, such as a screenshot or a photo that fills
-the screen. Dropped before the phone has answered, the card stays where it was
+reaches the phone. Porthole asks the phone app at the press, so the drag card only
+appears for a photo or video from the iPhone's library; on the home screen or an app
+page the window says so and nothing is dragged. Porthole takes the photo under the
+pointer when it can find its edges, and otherwise the whole picture, such as a
+screenshot or a photo that fills the screen. Dropped before the phone has answered, the card stays where it was
 let go and the file lands there; Escape gives up. The drag uses the newest frame and
 sends the phone app the picture at 32 and 64 cells a side. The phone app (2.5 or
 later) takes copies of one picture as the largest file, decides close calls on

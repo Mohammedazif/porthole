@@ -99,6 +99,7 @@ typedef struct app {
     /* The picture under the press. A drag inside the picture swipes the phone,
      * so the frame on screen when the drag leaves can be a different photo. */
     AVFrame *pull_frame;
+    ph_rect pull_picture; /* what the phone was asked about, for the drag card */
     int pull_px, pull_py;
     bool pull_snap;
     /* A bare photo or video that iOS sends instead of the phone screen is already the
@@ -778,6 +779,8 @@ static void place_ghost(app *a, int gx, int gy)
     if (!a->ghost)
         return;
     ph_drag_ghost_move(a->ghost, gx, gy);
+    if (a->pull_note == 2)
+        return; /* still "Finding it on the iPhone..."; there is no file to place yet */
     if (a->place_at && gx == a->place_x && gy == a->place_y && now - a->place_at < 80)
         return;
     a->place_x = gx;
@@ -902,7 +905,7 @@ static void end_pull(app *a)
         ph_window_set_detail(a->win, placed ? "Pulled the original photo"
                                             : "Original photo saved on the Desktop");
     else if (note == 4)
-        ph_window_set_detail(a->win, "No original matched that photo");
+        ph_window_set_detail(a->win, "Not a photo or video from this iPhone's library");
     else if (note == 1)
         ph_window_set_detail(a->win, "Open Porthole on the iPhone, then drag the photo again");
     else if (note == 5)
@@ -911,38 +914,49 @@ static void end_pull(app *a)
         ph_window_set_detail(a->win, "iPhone did not answer");
 }
 
+static void start_file_drag(app *a)
+{
+    int gx, gy;
+
+    if (!a->pull_path[0])
+        return;
+    if (ph_xdnd_busy()) {
+        ph_xdnd_set_path(a->pull_path);
+        return;
+    }
+    SDL_GetGlobalMouseState(&gx, &gy);
+    if (a->pull_hold) { /* it lands where it was dropped */
+        gx = a->hold_gx;
+        gy = a->hold_gy;
+    }
+    if (ph_xdnd_begin(SDL_GetWindowFromID(ph_window_id(a->win)), a->pull_path))
+        ph_xdnd_motion(gx, gy);
+}
+
+/* Takes the phone's answer, before the drag or during it. */
 static void note_origin(app *a)
 {
     char path[768];
     ph_origin_result result;
 
-    if (!a->pull.pulling)
+    if ((!a->pull.pulling && !a->pull.armed) || a->pull_note != 2)
         return;
     result = ph_origin_take(a->origin, path, sizeof path);
     if (result == PH_ORIGIN_FILE) {
-        int gx, gy;
-
         snprintf(a->pull_path, sizeof a->pull_path, "%s", path);
-        if (!ph_xdnd_busy()) {
-            SDL_GetGlobalMouseState(&gx, &gy);
-            if (a->pull_hold) { /* it lands where it was dropped */
-                gx = a->hold_gx;
-                gy = a->hold_gy;
-            }
-            if (ph_xdnd_begin(SDL_GetWindowFromID(ph_window_id(a->win)), path))
-                ph_xdnd_motion(gx, gy);
-        } else {
-            ph_xdnd_set_path(path);
+        a->pull_note = 3;
+        if (!a->pull.pulling) {
+            ph_window_set_detail(a->win, "Found it. Drag it out of the window");
+            return;
         }
-        if (a->pull_note != 3) {
-            a->pull_note = 3;
-            ph_window_set_detail(a->win, "Pulling the original photo");
-        }
+        start_file_drag(a);
+        ph_window_set_detail(a->win, "Pulling the original file");
         if (a->pull_hold)
             end_pull(a);
-    } else if (result == PH_ORIGIN_MISS && a->pull_note != 4) {
+    } else if (result == PH_ORIGIN_MISS) {
         a->pull_note = 4;
-        ph_window_set_detail(a->win, "No original matched that photo");
+        hide_ghost(a);
+        ph_window_set_detail(a->win, "Not a photo or video from this iPhone's library");
         if (a->pull_hold)
             end_pull(a);
     }
@@ -967,83 +981,31 @@ static void track_pull(app *a)
     note_origin(a);
 }
 
-/* A Ctrl press never reaches the phone, so the screen stays as it was and the newest
- * frame shows the same photo, after any zoom or open animation has finished. The
- * frame under the press can be mid-zoom, and its picture then has the wrong shape. */
-static void settle_pull_snapshot(app *a)
-{
-    AVFrame *keep;
-    ph_rect before, after;
-    bool had;
-
-    if (!a->pull_snap || !a->view_frame || !a->view_frame->data[0] || !a->pull_frame->data[0]
-        || a->view_frame->width != a->pull_frame->width
-        || a->view_frame->height != a->pull_frame->height
-        || memcmp(&a->view_screen, &a->pull_screen, sizeof a->view_screen) != 0)
-        return;
-    keep = av_frame_alloc();
-    if (!keep)
-        return;
-    had = pull_item(a, &before);
-    av_frame_move_ref(keep, a->pull_frame);
-    if (av_frame_ref(a->pull_frame, a->view_frame) == 0 && pull_item(a, &after)
-        && (a->pull_presentation
-            || !fills_frame(after, a->pull_frame->width, a->pull_frame->height))) {
-        if (had && memcmp(&before, &after, sizeof before) != 0)
-            PH_LOGD("photo pull: picture settled from %dx%d to %dx%d", before.w, before.h,
-                    after.w, after.h);
-        av_frame_free(&keep);
-        return;
-    }
-    av_frame_unref(a->pull_frame);
-    av_frame_move_ref(a->pull_frame, keep);
-    av_frame_free(&keep);
-}
-
-static void begin_pull(app *a)
+/* Asks the phone about the picture under a Ctrl press at once, before any drag, so
+ * the card only appears for something the phone has: the home screen or an app page
+ * never shows one. Nothing here reaches the phone's screen. */
+static void ask_pull(app *a)
 {
     ph_yuv_planes planes;
     ph_rect picture;
     uint64_t hash;
     double aspect;
-    int px, py;
     uint8_t thumb[PH_PICTURE_THUMB * PH_PICTURE_THUMB];
     uint8_t detail[PH_PICTURE_DETAIL * PH_PICTURE_DETAIL];
     static ph_origin_screen screen;
     bool have_thumb, have_detail, have_screen;
 
-    /* A press that already reached the phone is dragging something there, such as a
-     * photo being pulled closed. Lifting it at the window edge finishes that gesture;
-     * going back to where it began first cancels it. */
-    if (a->absolute && a->abs.buttons && a->abs.held)
-        ph_abs_cancel_drag(&a->abs, a->press_phone_x, a->press_phone_y, SDL_GetTicks64());
-    else
-        ph_abs_release_all(&a->abs, SDL_GetTicks64());
-    ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
-    SDL_CaptureMouse(SDL_TRUE);
     a->pull_path[0] = 0;
     a->pull_hold = false;
-    ph_origin_take(a->origin, NULL, 0); /* a late reply belongs to the previous drag */
-    settle_pull_snapshot(a); /* a Ctrl press never reached the phone */
-    if (!a->pull_snap || !frame_planes(a->pull_frame, &planes)) {
+    a->pull_picture = (ph_rect){0};
+    ph_origin_take(a->origin, NULL, 0); /* a late reply belongs to the previous press */
+    if (!a->pull_snap || !frame_planes(a->pull_frame, &planes) || !pull_item(a, &picture)) {
         a->pull_note = 5;
-        ph_window_set_detail(a->win, "Drag one photo, not the page around it");
-        PH_LOGW("photo pull: drag was not on a photo (no picture under the press)");
+        ph_window_set_detail(a->win, "Nothing to take here");
+        PH_LOGW("photo pull: no picture under the press");
         return;
     }
-    px = a->pull_px;
-    py = a->pull_py;
-    /* The whole phone screen is not a photo. A press on the home screen, or on
-     * the bars around a picture, has no separate edges and saves nothing. */
-    if (!pull_item(a, &picture)
-        || (!a->pull_presentation
-            && fills_frame(picture, a->pull_frame->width, a->pull_frame->height))) {
-        a->pull_note = 5;
-        ph_window_set_detail(a->win, "Drag one photo, not the page around it");
-        PH_LOGW("photo pull: drag was not on a photo (no edges around %d,%d)", px, py);
-        return;
-    }
-    carry_ghost(a, picture);
+    a->pull_picture = picture;
     /* The phone hashes a 64-pixel copy, so a dHash of single video pixels is mostly
      * texture noise. Hashing the averaged thumb samples what the phone samples. */
     have_thumb = thumb_rect(a->pull_frame, picture, thumb);
@@ -1062,7 +1024,7 @@ static void begin_pull(app *a)
                           have_detail ? detail : NULL, have_screen ? &screen : NULL,
                           a->pull_dir)) {
         a->pull_note = 1;
-        ph_window_set_detail(a->win, "Open Porthole on the iPhone, then drag the photo again");
+        ph_window_set_detail(a->win, "Open Porthole on the iPhone, then try again");
         PH_LOGW("photo pull: iPhone is not connected");
         return;
     }
@@ -1070,6 +1032,23 @@ static void begin_pull(app *a)
     ph_window_set_detail(a->win, "Asking the iPhone for this photo");
     PH_LOGI("photo pull: item %dx%d aspect %.4f hash %016llx%s", picture.w, picture.h, aspect,
             (unsigned long long)hash, have_screen ? " (and the whole screen)" : "");
+}
+
+/* The Ctrl press became a drag. The card follows the pointer while the phone is still
+ * looking or has the file; after a refusal there is nothing to carry. */
+static void begin_pull(app *a)
+{
+    ph_abs_release_all(&a->abs, SDL_GetTicks64());
+    ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
+    SDL_CaptureMouse(SDL_TRUE);
+    note_origin(a);
+    if (a->pull_note != 2 && a->pull_note != 3)
+        return;
+    carry_ghost(a, a->pull_picture);
+    if (a->pull_note == 2)
+        ph_drag_ghost_caption(a->ghost, "Finding it on the iPhone...", false);
+    else
+        start_file_drag(a);
 }
 
 /* True on the motion that turns a Ctrl press into a file drag. */
@@ -1087,6 +1066,7 @@ static void follow_pull(app *a)
         end_pull(a);
     }
     if (a->pull.armed) {
+        note_origin(a);
         SDL_GetMouseState(&x, &y);
         if (file_pull_ready(a, x, y))
             begin_pull(a);
@@ -1174,7 +1154,7 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
                     ph_abs_release_all(&a->abs, SDL_GetTicks64());
                 mark_input(a, event->timestamp);
                 SDL_CaptureMouse(SDL_TRUE);
-                ph_window_set_detail(a->win, "Drag it out of the window to take the original file");
+                ask_pull(a);
                 return;
             }
         } else if (file_pull_ready(a, event->x, event->y)) {
@@ -1185,11 +1165,13 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
             finish_pull(a);
             return;
         } else if (a->pull.armed) {
-            /* A Ctrl click without a drag: nothing reaches the phone. */
+            /* A Ctrl click without a drag: nothing reaches the phone. A late answer is
+             * dropped by the next ask. */
             ph_pull_release(&a->pull);
             drop_pull_snapshot(a);
             SDL_CaptureMouse(SDL_FALSE);
-            ph_window_set_detail(a->win, "");
+            a->pull_note = 0;
+            a->pull_path[0] = 0;
             return;
         } else {
             ph_pull_release(&a->pull);
