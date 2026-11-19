@@ -9,12 +9,36 @@
 #define MAX_NON_BLACK 0.005  /* tolerate 0.5% stray pixels */
 #define EDGE_MARGIN 2        /* ignore columns right next to the content edge (blur) */
 
+/* The darkest luma that still counts as background. AirPlay's limited-range black is
+ * 16 and is kept at BLACK_MAX_Y. The screen broadcast is full range: Photos' black is
+ * 0 there, and a dark screenshot on it is about 17, which BLACK_MAX_Y called black.
+ * Set only for one item search, on the thread doing it. */
+static _Thread_local int black_max_y = BLACK_MAX_Y;
+#define FULL_RANGE_BLACK_MAX_Y 10
+
 static bool pixel_is_black(const ph_yuv_planes *p, int x, int y)
 {
     int luma = p->y[y * p->y_stride + x];
     int cu = p->u[(y / 2) * p->uv_stride + x / 2] - 128;
     int cv = p->v[(y / 2) * p->uv_stride + x / 2] - 128;
-    return luma <= BLACK_MAX_Y && abs(cu) <= BLACK_MAX_CHROMA && abs(cv) <= BLACK_MAX_CHROMA;
+    return luma <= black_max_y && abs(cu) <= BLACK_MAX_CHROMA && abs(cv) <= BLACK_MAX_CHROMA;
+}
+
+/* Full-range black when every corner of a portrait phone screen is near 0. */
+static int item_black_max(const ph_yuv_planes *p)
+{
+    int darkest = 255;
+
+    if (p->width >= p->height)
+        return BLACK_MAX_Y;
+    for (int corner = 0; corner < 4; corner++) {
+        int x = corner & 1 ? p->width - 1 : 0;
+        int y = corner & 2 ? p->height - 1 : 0;
+        int value = p->y[y * p->y_stride + x];
+        if (value < darkest)
+            darkest = value;
+    }
+    return darkest <= 4 ? FULL_RANGE_BLACK_MAX_Y : BLACK_MAX_Y;
 }
 
 /* True if columns [x0, x1) are (almost) entirely black. */
@@ -448,15 +472,64 @@ static ph_rect outlined_phone_photo(const ph_yuv_planes *p, int px, int py)
     return best;
 }
 
+/* Ink at the item's own left or right side on row y: Photos' thin frame line. */
+static bool side_ink(const ph_yuv_planes *p, int y, int left, int right)
+{
+    for (int d = -2; d <= 2; d++) {
+        int l = left + d, r = right + d;
+        if ((l >= 0 && l < p->width && !pixel_is_black(p, l, y))
+            || (r >= 0 && r < p->width && !pixel_is_black(p, r, y)))
+            return true;
+    }
+    return false;
+}
+
+static int row_ink_percent(const ph_yuv_planes *p, int y, int left, int right)
+{
+    int x, ink = 0;
+
+    for (x = left; x <= right; x++)
+        ink += !pixel_is_black(p, x, y);
+    return ink * 100 / (right - left + 1);
+}
+
+/* A dark screenshot's status bar or bottom edge is black like the page around it.
+ * Photos still frames the screenshot: thin lines run down both sides through that band
+ * and a line closes it. Thumbnail gaps have no side lines, so they are never crossed. */
+static int framed_edge(const ph_yuv_planes *p, int from, int step, int left, int right)
+{
+    int y, sided = 0, rows = 0;
+
+    for (y = from; y >= 0 && y < p->height && rows < 120; y += step, rows++) {
+        if (row_ink_percent(p, y, left, right) >= 80)
+            /* The frame's corners are rounded, so the top rows miss the side line. */
+            return rows >= 4 && sided * 100 >= rows * 60 ? y : -1;
+        sided += side_ink(p, y, left, right);
+    }
+    return -1;
+}
+
+static ph_rect item_rect(const ph_yuv_planes *p, int x, int y);
+
 ph_rect ph_video_item_rect(const ph_yuv_planes *p, int x, int y)
 {
-    int sx, sy, left, top, right, bottom;
     ph_rect item;
 
     if (!p || !p->y || !p->u || !p->v || p->width < 16 || p->height < 16)
         return (ph_rect){0};
     if (x < 0 || y < 0 || x >= p->width || y >= p->height)
         return (ph_rect){0};
+    black_max_y = item_black_max(p);
+    item = item_rect(p, x, y);
+    black_max_y = BLACK_MAX_Y;
+    return item;
+}
+
+static ph_rect item_rect(const ph_yuv_planes *p, int x, int y)
+{
+    int sx, sy, left, top, right, bottom;
+    ph_rect item;
+
     item = outlined_phone_photo(p, x, y);
     if (item.w >= ITEM_MIN_PX)
         return item;
@@ -467,6 +540,14 @@ ph_rect ph_video_item_rect(const ph_yuv_planes *p, int x, int y)
     if (pixel_is_black(p, x, y) && !nearest_ink(p, x, y, &sx, &sy))
         return (ph_rect){0};
     grow_item(p, sx, sy, &left, &top, &right, &bottom);
+    if (right - left >= ITEM_MIN_PX) {
+        int edge = framed_edge(p, top - 1, -1, left, right);
+        if (edge >= 0)
+            top = edge;
+        edge = framed_edge(p, bottom + 1, 1, left, right);
+        if (edge >= 0)
+            bottom = edge;
+    }
     item = finish_item(left, top, right, bottom, p->width, p->height);
     if (item.w < ITEM_MIN_PX || outside_item(item, x, y) > ITEM_SEEK_PX)
         return (ph_rect){0};

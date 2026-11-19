@@ -374,6 +374,38 @@ int main(void)
         free_frame(&f);
     }
 
+    {
+        /* From a live broadcast frame: Photos' black is 0, a dark screenshot is about
+         * 17, and the screenshot's own status bar is black, crossed only by Photos'
+         * thin frame lines on both sides with rounded top corners. */
+        frame f = make_frame(500, 1080, 0);
+        ph_rect shot, a, b;
+
+        paint_box(&f, 68, 432, 128, 129, 24);   /* top frame line */
+        for (int y = 129; y < 168; y++) {
+            int inset = y < 140 ? 6 : 0;        /* rounded corner */
+            f.y[y * 500 + 68 + inset] = 24;
+            f.y[y * 500 + 431 - inset] = 24;
+        }
+        paint_box(&f, 150, 210, 143, 155, 240); /* the time in the status bar */
+        paint_box(&f, 68, 432, 168, 914, 17);
+        paint_box(&f, 76, 424, 560, 900, 60);   /* a share sheet inside it */
+        shot = item_at(&f, 250, 500);
+        CHECK(abs(shot.x - 68) <= 2 && abs(shot.w - 364) <= 4);
+        CHECK(abs(shot.y - 128) <= 2 && abs(shot.h - 786) <= 4);
+        CHECK(item_at(&f, 250, 1000).w == 0);
+        free_frame(&f);
+
+        /* Thumbnails a few black rows apart, with nothing down their sides, stay apart. */
+        f = make_frame(500, 1080, 0);
+        paint_box(&f, 20, 240, 100, 300, 17);
+        paint_box(&f, 20, 240, 306, 506, 17);
+        a = item_at(&f, 100, 200);
+        b = item_at(&f, 100, 400);
+        CHECK(a.w > 0 && a.y + a.h <= 302 && b.y >= 304);
+        free_frame(&f);
+    }
+
     if (g_failures) {
         fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;
