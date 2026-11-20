@@ -168,17 +168,19 @@ public sealed class ProtocolRunner
                         continue;
                     }
                     var frame = envelope.Frame;
-                    if (frame.Type is FrameType.Mouse or FrameType.Keyboard or FrameType.Consumer)
+                    if (frame.Type is FrameType.Mouse or FrameType.AbsMouse or FrameType.Keyboard
+                        or FrameType.Consumer)
                     {
+                        var kind = frame.Type == FrameType.AbsMouse ? ReportKind.Mouse : (ReportKind)frame.Type;
                         // A failed press must not prevent its queued zero release.
                         if ((!healthy || Volatile.Read(ref protocolFaultEpoch) == epoch)
                             && !IsZero(frame.Payload))
                             continue;
-                        bool sent = await NotifyAsync(ticket, (ReportKind)frame.Type, frame.Payload,
+                        bool sent = await NotifyAsync(ticket, kind, frame.Payload,
                                                        runCancellation).ConfigureAwait(false);
                         healthy &= sent;
                         if (!sent && gate.IsCurrent(ticket.Token))
-                            Fail($"error notifying {((ReportKind)frame.Type).ToString().ToLowerInvariant()} report");
+                            Fail($"error notifying {kind.ToString().ToLowerInvariant()} report");
                         await DelayAsync(ticket, interval, runCancellation).ConfigureAwait(false);
                     }
                     else if (frame.Type == FrameType.Interval)

@@ -3,6 +3,11 @@
 `porthole-ble-winrt.exe` runs as a child process of Porthole. It uses Windows'
 `GattServiceProvider` to publish HID over GATT (service 1812), with the same
 keyboard, 16-bit relative mouse and consumer report descriptor as the C app.
+With `PORTHOLE_HID_ABSOLUTE=replace` (Porthole's default) report 2 is the absolute
+mouse instead, X/Y 0..32767, byte for byte the map `helpers/ble-bluez` publishes, so
+the iPhone pointer lands where the PC mouse is. The iPhone caches the report map:
+after switching between the two, Forget This Device on the iPhone, remove the iPhone
+in Windows Bluetooth settings, and pair again.
 It requires Windows 10 version 2004 (build 19041) or later, a BLE radio, and a
 Windows driver that supports the BLE **peripheral** role. A radio that supports
 ordinary Bluetooth accessories does not necessarily support this role.

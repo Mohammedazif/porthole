@@ -17,12 +17,47 @@ public static class HidDescriptor
         0x19, 0x00, 0x2a, 0xff, 0x03, 0x15, 0x00, 0x26, 0xff, 0x03, 0x75, 0x10, 0x95, 0x01, 0x81, 0x00,
         0xc0,
     ];
-    public static ReadOnlyMemory<byte> ReportMap => Bytes;
+    // PORTHOLE_HID_ABSOLUTE=replace swaps the relative mouse (report 2) for an absolute
+    // one, as helpers/ble-bluez does: X/Y 0..32767 map straight to the iPhone screen
+    // under AssistiveTouch, so the pointer lands where the PC mouse is. The iPhone
+    // caches the report map, so a change needs Forget This Device and a new pairing.
+    private static readonly byte[] AbsoluteMouse =
+    [
+        0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x85, 0x02,
+        0x09, 0x01, 0xa1, 0x00,
+        0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x03, 0x81, 0x02,             // 3 buttons
+        0x75, 0x05, 0x95, 0x01, 0x81, 0x01,             // padding
+        0x05, 0x01, 0x09, 0x30, 0x09, 0x31,
+        0x15, 0x00, 0x26, 0xff, 0x7f, 0x35, 0x00, 0x46, 0xff, 0x7f,
+        0x75, 0x10, 0x95, 0x02, 0x81, 0x02,             // X, Y absolute
+        0x09, 0x38, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x01,
+        0x81, 0x06,                                     // wheel, relative
+        0xc0, 0xc0,
+    ];
+
+    public static bool Absolute { get; set; } =
+        Environment.GetEnvironmentVariable("PORTHOLE_HID_ABSOLUTE") == "replace";
+
+    public static ReadOnlyMemory<byte> ReportMap => Absolute ? WithAbsoluteMouse() : Bytes;
+
     public static int GetReportLength(ReportKind kind) => kind switch
     {
         ReportKind.Keyboard => 8,
-        ReportKind.Mouse => 7,
+        ReportKind.Mouse => Absolute ? 6 : 7,
         ReportKind.Consumer => 2,
         _ => throw new ArgumentOutOfRangeException(nameof(kind))
     };
+
+    private static byte[] WithAbsoluteMouse()
+    {
+        ReadOnlySpan<byte> start = [0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x85, 0x02];
+        ReadOnlySpan<byte> end = [0xc0, 0xc0];
+        int from = Bytes.AsSpan().IndexOf(start);
+        int to = from < 0 ? -1 : Bytes.AsSpan(from).IndexOf(end);
+        if (from < 0 || to < 0)
+            throw new InvalidOperationException("relative mouse collection not found");
+        to += from + end.Length;
+        return [.. Bytes.AsSpan(0, from), .. AbsoluteMouse, .. Bytes.AsSpan(to)];
+    }
 }

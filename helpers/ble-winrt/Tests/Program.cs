@@ -46,6 +46,35 @@ internal static class Program
         return Task.CompletedTask;
     }
 
+    // The same absolute report map helpers/ble-bluez builds with PORTHOLE_HID_ABSOLUTE=replace.
+    private const string LinuxAbsoluteMap =
+        "05010906a1018501050719e029e715002501750195088102750895018101050819012905750195059102750395019101"
+        + "050719002aff00150026ff00750895068100c005010902a10185020901a1000509190129031500250175019503810275"
+        + "0595018101050109300931150026ff7f350046ff7f75109502810209381581257f750895018106c0c0050c0901a10185"
+        + "0319002aff03150026ff03751095018100c0";
+
+    private static async Task AbsoluteMouse()
+    {
+        try
+        {
+            HidDescriptor.Absolute = true;
+            Check(Convert.ToHexString(HidDescriptor.ReportMap.ToArray()).ToLowerInvariant() == LinuxAbsoluteMap,
+                  "Absolute report map differs from the Linux helper.");
+            Check(HidDescriptor.GetReportLength(ReportKind.Mouse) == 6, "Absolute mouse report length.");
+            var frames = new List<ProtocolFrame>(); var errors = new List<string>();
+            byte[] bytes = Join(Frame(4, 1, 0xff, 0x3f, 0xff, 0x3f, 0), Mouse(3), Key(4));
+            await foreach (var frame in FrameReader.ReadAsync(new MemoryStream(bytes), errors.Add)) frames.Add(frame);
+            Check(frames.Count == 2 && frames[0].Type == FrameType.AbsMouse && frames[1].Type == FrameType.Keyboard,
+                  "Absolute frames must pass and relative ones be refused.");
+            Check(errors.Count == 1, "A relative mouse frame in absolute mode must be reported.");
+        }
+        finally
+        {
+            HidDescriptor.Absolute = false;
+        }
+        Check(HidDescriptor.GetReportLength(ReportKind.Mouse) == 7, "Relative mouse report length.");
+    }
+
     private static async Task Framing()
     {
         byte[] bytes = Join(Key(4), Mouse(3), Frame(3, 0x23, 2), Sync(0x80000001), Frame(17, 15, 0), Frame(18, 20, 0));
@@ -275,7 +304,8 @@ internal static class Program
             ("retiring peer cleanup generations and bounded completion", RetiringCleanupTests.Run),
             ("cached target generation survives raw COM object replacement", ConcurrencyTests.CachedGenerationCannotBleed),
             ("same-bond idle and restored helper lifetimes", ConcurrencyTests.SameBondIdleAndRestoredLifetimes),
-            ("descriptor matches C", Descriptor), ("split/complete/malformed framing", Framing),
+            ("descriptor matches C", Descriptor), ("absolute mouse matches Linux", AbsoluteMouse),
+            ("split/complete/malformed framing", Framing),
             ("readiness, stale sessions and pipe lifetime", ReadinessAndPipeLifetime),
             ("atomic subscription snapshots", SessionSnapshotTests.Run),
             ("first-neutral priming barriers and failures", PrimingTests.Run),

@@ -172,6 +172,7 @@ typedef struct connect_boxes {
     SDL_Rect copy, setup, help, stats, fresh, gear;
     SDL_Rect card, ready, qr;
     int left, inner, title_y, footer_y;
+    int details_x, details_y; /* where the name, address and code start */
     bool wide;
 } connect_boxes;
 
@@ -198,16 +199,28 @@ static connect_boxes connect_layout(int width, int height, int top)
         g.card = (SDL_Rect){g.left, body_y, card_w, 330};
         g.ready = (SDL_Rect){g.left + card_w + 24, body_y + 24, g.inner - card_w - 24, 4 * 64 + 24};
     } else {
-        if (g.inner < 420) qr = 0;          /* too narrow: the code and address are enough */
-        else if (g.inner < 560) qr = 120;
-        /* Narrow: the code and buttons stay, the note under them goes, rows are compact. */
-        g.card = (SDL_Rect){g.left, body_y, g.inner, 252};
+        /* Narrow: the code and buttons stay, the note under them goes, rows are compact.
+         * A phone-sized window puts the QR above the address instead of beside it. */
+        bool on_top = g.inner < 420;
+        qr = g.inner < 560 ? 132 : 164;
+        if (on_top && body_y + 20 + qr + 42 + 228 > g.footer_y - 8)
+            on_top = false, qr = 0; /* the smallest windows keep the address and code only */
+        g.card = (SDL_Rect){g.left, body_y, g.inner, on_top ? 20 + qr + 42 + 228 : 252};
         g.ready = (SDL_Rect){g.left, g.card.y + g.card.h + 44, g.inner, 4 * 48};
+        if (on_top) {
+            g.qr = (SDL_Rect){g.card.x + (g.card.w - qr) / 2, g.card.y + 20, qr, qr};
+            g.details_x = g.card.x + 24;
+            g.details_y = g.qr.y + qr + 42;
+        }
     }
-    if (qr)
+    if (qr && !g.qr.w)
         g.qr = (SDL_Rect){g.card.x + 24, g.card.y + 24, qr, qr};
+    if (!g.details_y) {
+        g.details_x = qr ? g.qr.x + qr + 28 : g.card.x + 24;
+        g.details_y = g.card.y + 24;
+    }
     {
-        int dx = qr ? g.qr.x + qr + 28 : g.card.x + 24;
+        int dx = g.details_x;
         int dw = g.card.x + g.card.w - 24 - dx;
         int by = g.card.y + g.card.h - 24 - 36;
         int cw = dw < 242 ? (dw - 10) * 55 / 100 : 128;
@@ -626,9 +639,9 @@ static void draw_waiting(ph_window *w, int width, int height, int top)
         draw_text(r, cap, g.qr.x + (g.qr.w - ph_text_width(cap, PH_TEXT(12, PH_FONT_REGULAR))) / 2,
                   g.qr.y + g.qr.h + 10, g.qr.w + 40, PH_TEXT(12, PH_FONT_REGULAR), color_muted);
     }
-    dx = g.qr.w ? g.qr.x + g.qr.w + 28 : g.card.x + 24;
+    dx = g.details_x;
     dw = g.card.x + g.card.w - 24 - dx;
-    y = g.card.y + 24;
+    y = g.details_y;
     draw_text(r, "THIS PC APPEARS AS", dx, y, dw, PH_TEXT(11, PH_FONT_MEDIUM), color_muted);
     draw_text(r, w->pc_name[0] ? w->pc_name : "This PC", dx, y + 18, dw, PH_TEXT(20, PH_FONT_SEMIBOLD),
               color_text);

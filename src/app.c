@@ -2396,6 +2396,9 @@ static void start_bluetooth(app *a)
         setenv("PORTHOLE_HID_ABSOLUTE", "replace", 1);
     else
         unsetenv("PORTHOLE_HID_ABSOLUTE");
+#else
+    /* The WinRT helper inherits this and publishes the absolute mouse report. */
+    _putenv_s("PORTHOLE_HID_ABSOLUTE", a->opt->absolute_pointer ? "replace" : "");
 #endif
     snprintf(a->ble_status, sizeof a->ble_status, "starting");
     a->link = ph_hid_link_start(argv, on_ble_status, a);

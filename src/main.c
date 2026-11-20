@@ -30,7 +30,7 @@ static void print_usage(FILE *out, const char *argv0)
             "      --no-bluetooth  View only: don't control the phone over Bluetooth\n"
             "      --relative-pointer  Legacy relative mouse with video tracking (the iPhone\n"
             "                    must be forgotten and re-paired after switching modes)\n"
-            "      --absolute-pointer  Exact absolute pointer (default on Linux)\n"
+            "      --absolute-pointer  Exact absolute pointer (default)\n"
             "      --no-audio     Mute audio playback on the PC\n"
             "      --setup        Open guided pairing and calibration setup\n"
             "      --no-setup     Start on the connection screen (default; F2 opens setup)\n"
@@ -83,11 +83,7 @@ int main(int argc, char **argv)
     bool audio = true;
     bool diagnostics = false, setup = false, auto_setup = false;
     bool pin_required = false, four_k = false, autostart = false, usb = true;
-#ifdef _WIN32
-    bool absolute_pointer = false; /* the WinRT helper does not publish it yet */
-#else
-    bool absolute_pointer = true;
-#endif
+    bool absolute_pointer = true; /* both Bluetooth helpers publish the absolute mouse */
     bool pointer_chosen = false;
     int audio_delay_ms = 0;
     const char *precise_touch = NULL;

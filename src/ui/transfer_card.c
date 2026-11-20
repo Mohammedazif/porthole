@@ -26,6 +26,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#include <SDL_syswm.h>
 #endif
 
 #define CARD_W 420
@@ -44,6 +45,7 @@ enum { PHASE_HIDDEN, PHASE_IN, PHASE_HOLD, PHASE_OUT };
 struct ph_transfer_card {
     SDL_Window *window;
     SDL_Renderer *renderer;
+    int shaped_w; /* pixel width the Windows corner region was cut for */
     SDL_Cursor *hand;
     SDL_Cursor *arrow;
     int phase;
@@ -516,6 +518,29 @@ static void paint(ph_transfer_card *c, Uint64 now)
     layout_buttons(c);
     rgba(c->renderer, 28, 28, 30, 255);
     SDL_RenderClear(c->renderer);
+    /* Lay out in window points: on a 150% or 200% display the window has more pixels
+     * than points, and drawing 1:1 left the card small in its top-left corner. */
+    {
+        int ww = 0, wh = 0, ow = 0, oh = 0;
+        SDL_GetWindowSize(c->window, &ww, &wh);
+        if (ww > 0 && wh > 0 && SDL_GetRendererOutputSize(c->renderer, &ow, &oh) == 0 && ow > 0) {
+            SDL_RenderSetScale(c->renderer, (float)ow / (float)ww, (float)oh / (float)wh);
+#ifdef _WIN32
+            if (ow != c->shaped_w) {
+                SDL_SysWMinfo info;
+                int r = CARD_R * ow / ww;
+                SDL_VERSION(&info.version);
+                if (SDL_GetWindowWMInfo(c->window, &info) && info.subsystem == SDL_SYSWM_WINDOWS) {
+                    HRGN round = CreateRoundRectRgn(0, 0, ow + 1, oh + 1, 2 * r, 2 * r);
+                    if (round && SetWindowRgn(info.info.win.window, round, TRUE))
+                        c->shaped_w = ow;
+                    else if (round)
+                        DeleteObject(round);
+                }
+            }
+#endif
+        }
+    }
     rgba(c->renderer, 255, 255, 255, 255);
     fill_circle(c->renderer, PAD + 8, 34, 8);
     ph_ui_draw_text(c->renderer, "Porthole", PAD + 24, 22, 200, 2, white);

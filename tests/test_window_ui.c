@@ -183,6 +183,8 @@ int main(int argc, char **argv)
 
     SDL_SetWindowSize(native, 320, 480);
     ph_window_redraw(w); screenshot(w, dir, "02-compact");
+    SDL_SetWindowSize(native, 352, 796);
+    ph_window_redraw(w); screenshot(w, dir, "02b-phone-sized-connect");
     SDL_SetWindowSize(native, 960, 640);
     ph_window_redraw(w); screenshot(w, dir, "03-wide");
     SDL_SetWindowSize(native, 460, 740);
