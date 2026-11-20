@@ -10,9 +10,8 @@
 #include <string.h>
 #ifdef _WIN32
 #include <direct.h>
-#else
-#include <sys/stat.h>
 #endif
+#include <sys/stat.h>
 
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
@@ -96,6 +95,7 @@ typedef struct app {
     double wheel_point_x, wheel_point_y, wheel_point_aspect;
     ph_gesture gesture;
     bool feed_mode, feed_have_wheel;
+    bool controls_paused;
     bool gesture_keys[256];
     Uint64 feed_wheel_at;
     AVFrame *view_frame, *pointer_baseline, *pointer_reference, *pointer_after;
@@ -479,7 +479,8 @@ static void handle_ble_status(app *a, const char *line)
     /* "connected" is followed by "subscribed" once reports flow; keep "on" if already on. */
     if (state && !(!strcmp(line, "connected") && !strcmp(a->ble_status, "on")))
         snprintf(a->ble_status, sizeof a->ble_status, "%s", state);
-    ph_input_set_enabled(&a->input, !a->link_stopping && !strcmp(a->ble_status, "on"));
+    ph_input_set_enabled(&a->input, !a->controls_paused && !a->link_stopping
+                         && !strcmp(a->ble_status, "on"));
     if (!strcmp(line, "subscribed") && !was_on && a->input.enabled)
         PH_LOGI("Bluetooth keyboard ready. Alt+K shows or hides the iPhone keyboard");
     ph_pointer_set_enabled(&a->pointer, a->input.enabled && a->phone_name[0]
@@ -1671,11 +1672,15 @@ static uint16_t pc_consumer_usage(SDL_Scancode scancode)
     }
 }
 
-static uint8_t pc_modifiers(SDL_Keymod mods)
+static bool clipboard_file(char *out, size_t cap);
+static bool queue_pc_file(app *a, const char *path);
+
+static uint8_t pc_modifiers(const app *a, SDL_Keymod mods)
 {
     uint8_t result = 0;
-    if (mods & KMOD_LCTRL) result |= PH_HID_MOD_LCTRL;
-    if (mods & KMOD_RCTRL) result |= PH_HID_MOD_RCTRL;
+    bool command = ph_window_ctrl_is_command(a->win);
+    if (mods & KMOD_LCTRL) result |= command ? PH_HID_MOD_LGUI : PH_HID_MOD_LCTRL;
+    if (mods & KMOD_RCTRL) result |= command ? PH_HID_MOD_RGUI : PH_HID_MOD_RCTRL;
     if (mods & KMOD_LSHIFT) result |= PH_HID_MOD_LSHIFT;
     if (mods & KMOD_RSHIFT) result |= PH_HID_MOD_RSHIFT;
     if (mods & KMOD_LALT) result |= PH_HID_MOD_LALT;
@@ -1922,8 +1927,17 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
     }
     if (a->phone_name[0] && (unsigned)sc < 256) {
         mark_input(a, e->timestamp);
+        if (down && !e->repeat && sc == SDL_SCANCODE_V && (e->keysym.mod & KMOD_CTRL)
+            && !(e->keysym.mod & (KMOD_ALT | KMOD_GUI))) {
+            char path[1024];
+            if (clipboard_file(path, sizeof path)) {
+                a->gesture_keys[sc] = true;
+                queue_pc_file(a, path);
+                return;
+            }
+        }
         ph_input_key(&a->input, (uint8_t)sc, e->type == SDL_KEYDOWN, e->repeat != 0,
-                     pc_modifiers((SDL_Keymod)e->keysym.mod));
+                     pc_modifiers(a, (SDL_Keymod)e->keysym.mod));
     }
 }
 
@@ -2351,6 +2365,11 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
         snprintf(line, sizeof line, "Saved %d item%s from the iPhone in Downloads", saved,
                  saved == 1 ? "" : "s");
         ph_window_set_detail(a->win, line);
+        if (saved > 0) {
+            char note[64];
+            snprintf(note, sizeof note, "Received %d item%s", saved, saved == 1 ? "" : "s");
+            ph_window_note_transfer(a->win, note);
+        }
         PH_LOGI("share: saved %d of %d item(s) in Downloads", saved, count);
         break;
     }
@@ -2419,7 +2438,8 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
                 finish_calibration(a, false);
                 ph_window_set_setup(a->win, &a->setup);
             }
-            ph_input_release_all(&a->input);
+            if (ph_window_release_on_blur(a->win))
+                ph_input_release_all(&a->input);
             cancel_control_intent(a, SDL_GetTicks64());
             memset(a->gesture_keys, 0, sizeof a->gesture_keys);
             SDL_CaptureMouse(SDL_FALSE);
@@ -2439,6 +2459,12 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
             }
             cancel_control_intent(a, SDL_GetTicks64());
             SDL_CaptureMouse(SDL_FALSE);
+        }
+        break;
+    case SDL_DROPFILE:
+        if (e->drop.file) {
+            queue_pc_file(a, e->drop.file);
+            SDL_free(e->drop.file);
         }
         break;
     case SDL_KEYDOWN:
@@ -2639,6 +2665,175 @@ static void sync_clipboard(app *a)
     free(data);
 }
 
+static bool regular_file(const char *path)
+{
+#ifdef _WIN32
+    struct _stat st;
+    return path && path[0] && _stat(path, &st) == 0 && (st.st_mode & _S_IFMT) == _S_IFREG;
+#else
+    struct stat st;
+    return path && path[0] && stat(path, &st) == 0 && S_ISREG(st.st_mode);
+#endif
+}
+
+static void percent_decode(const char *in, char *out, size_t cap)
+{
+    size_t n = 0;
+
+    while (*in && n + 1 < cap) {
+        if (in[0] == '%' && in[1] && in[2]) {
+            char hex[3] = {in[1], in[2], 0};
+            char *end = NULL;
+            long value = strtol(hex, &end, 16);
+            if (end && end != hex && !*end && value >= 0 && value <= 255) {
+                out[n++] = (char)value;
+                in += 3;
+                continue;
+            }
+        }
+        out[n++] = *in++;
+    }
+    out[n] = 0;
+}
+
+static bool clipboard_file(char *out, size_t cap)
+{
+    char *text = SDL_GetClipboardText();
+    char *start, *end, decoded[1024];
+    bool ok = false;
+
+    if (!text)
+        return false;
+    start = text;
+    while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n')
+        start++;
+    end = start + strlen(start);
+    while (end > start && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n'))
+        *--end = 0;
+    if (start[0] && !strchr(start, '\n')) {
+        const char *path = NULL;
+        if (!strncmp(start, "file://", 7)) {
+            path = start + 7;
+            if (strncmp(path, "localhost", 9) == 0)
+                path += 9;
+            else if (path[0] != '/') {
+                const char *slash = strchr(path, '/');
+                path = slash ? slash : path;
+            }
+            percent_decode(path, decoded, sizeof decoded);
+            path = decoded;
+        } else if (start[0] == '/') {
+            path = start;
+        }
+        if (path && regular_file(path) && strlen(path) < cap) {
+            snprintf(out, cap, "%s", path);
+            ok = true;
+        }
+    }
+    SDL_free(text);
+    return ok;
+}
+
+static bool queue_pc_file(app *a, const char *path)
+{
+    if (!a->origin || !ph_origin_put_file(a->origin, path)) {
+        ph_window_set_detail(a->win, "That file cannot be sent right now");
+        return false;
+    }
+    return true;
+}
+
+static void track_push(app *a)
+{
+    char name[96], line[120];
+    int note;
+
+    if (!a->origin)
+        return;
+    note = ph_origin_take_push(a->origin, name, sizeof name);
+    if (note) {
+        if (!name[0])
+            snprintf(name, sizeof name, "file");
+        if (note == 1)
+            snprintf(line, sizeof line, "Sent %s", name);
+        else if (note == 3)
+            snprintf(line, sizeof line, "Cancelled %s", name);
+        else
+            snprintf(line, sizeof line, "Could not send %s", name);
+        ph_window_note_transfer(a->win, line);
+        ph_window_set_detail(a->win, line);
+        return;
+    }
+    if (!ph_origin_push_busy(a->origin, name, sizeof name))
+        return;
+    snprintf(line, sizeof line, "Sending %s", name[0] ? name : "file");
+    ph_window_show_transfers(a->win);
+    if (ph_window_set_active_transfer(a->win, line))
+        ph_window_set_detail(a->win, line);
+}
+
+static void save_window_prefs(app *a)
+{
+    bool ok = ph_config_write_line("ctrl-command",
+                                   ph_window_ctrl_is_command(a->win) ? "1" : "0")
+        && ph_config_write_line("release-on-blur",
+                                ph_window_release_on_blur(a->win) ? "1" : "0")
+        && ph_config_write_line("pointer-mode",
+                                ph_window_next_relative(a->win) ? "relative" : "absolute");
+    ph_window_set_detail(a->win, ok
+        ? "Saved. Pointer direction applies the next time Porthole opens."
+        : "Could not save these settings");
+}
+
+static void apply_window_action(app *a, bool *running)
+{
+    switch (ph_window_take_action(a->win)) {
+    case PH_WINDOW_ACTION_NONE:
+        break;
+    case PH_WINDOW_ACTION_FEED:
+        cancel_control_intent(a, SDL_GetTicks64());
+        a->feed_mode = !a->feed_mode;
+        update_title(a);
+        PH_LOGI("feed wheel: %s", a->feed_mode ? "on (one swipe per wheel burst)" : "off");
+        break;
+    case PH_WINDOW_ACTION_FORGET:
+        if (a->origin)
+            ph_origin_forget(a->origin);
+        ph_window_set_detail(a->win, "This PC forgot the iPhone. Enter the code again.");
+        break;
+    case PH_WINDOW_ACTION_PAUSE:
+        a->controls_paused = !a->controls_paused;
+        if (a->controls_paused) {
+            ph_input_release_all(&a->input);
+            if (a->absolute)
+                ph_abs_release_all(&a->abs, SDL_GetTicks64());
+            cancel_control_intent(a, SDL_GetTicks64());
+        }
+        ph_input_set_enabled(&a->input, !a->controls_paused && !a->link_stopping
+                             && !strcmp(a->ble_status, "on"));
+        ph_pointer_set_enabled(&a->pointer, a->input.enabled && a->phone_name[0]
+                               && !a->presentation_mode, SDL_GetTicks64());
+        ph_window_set_detail(a->win, a->controls_paused ? "Controls paused" : "Controls on");
+        break;
+    case PH_WINDOW_ACTION_MUTE:
+        if (a->audio) {
+            struct ph_audio_settings settings;
+            bool muted = false;
+            if (ph_audio_settings(a->audio, &settings))
+                muted = settings.muted;
+            ph_audio_set_muted(a->audio, !muted);
+            ph_window_set_detail(a->win, muted ? "Sound on" : "Sound muted");
+        }
+        break;
+    case PH_WINDOW_ACTION_QUIT:
+        *running = false;
+        break;
+    case PH_WINDOW_ACTION_SAVE:
+        save_window_prefs(a);
+        break;
+    }
+}
+
 int ph_app_run(const ph_app_options *opt)
 {
     app a = {.opt = opt};
@@ -2709,6 +2904,17 @@ int ph_app_run(const ph_app_options *opt)
     a.pointer_after = av_frame_alloc();
     a.pull_frame = av_frame_alloc();
     a.win = ph_window_create(PORTHOLE_NAME);
+    {
+        char line[32];
+        bool ctrl = true, blur = true, next_relative = false;
+        if (ph_config_read_line("ctrl-command", line, sizeof line) && line[0])
+            ctrl = strcmp(line, "0") != 0;
+        if (ph_config_read_line("release-on-blur", line, sizeof line) && line[0])
+            blur = strcmp(line, "0") != 0;
+        if (ph_config_read_line("pointer-mode", line, sizeof line))
+            next_relative = strcmp(line, "relative") == 0;
+        ph_window_set_prefs(a.win, ctrl, blur, next_relative);
+    }
     a.dec = ph_decoder_start(on_frame, &a);
     if (opt->audio)
         a.audio = ph_audio_create();
@@ -2801,6 +3007,10 @@ int ph_app_run(const ph_app_options *opt)
             if (ph_origin_renew(a.origin, hint, sizeof hint) && hint[0])
                 ph_window_set_pull_hint(a.win, hint);
         }
+        apply_window_action(&a, &running);
+        if (ph_window_take_cancel(a.win) && a.origin)
+            ph_origin_cancel_push(a.origin);
+        track_push(&a);
         sync_clipboard(&a);
         follow_pull(&a);
         ph_transfer_card_tick(a.card, SDL_GetTicks64());

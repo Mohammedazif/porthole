@@ -31,6 +31,20 @@ void ph_origin_stop(ph_origin *origin);
 /* Replaces the pairing code, drops the connected phone, and rewrites hint. */
 bool ph_origin_renew(ph_origin *origin, char *hint, size_t hint_len);
 
+/* Drops the connected phone but keeps the pairing code. */
+void ph_origin_forget(ph_origin *origin);
+
+/* Queues a regular file for the connected phone. False when the path is unusable
+ * or another send is already waiting. The phone must have said FILES. */
+bool ph_origin_put_file(ph_origin *origin, const char *path);
+void ph_origin_cancel_push(ph_origin *origin);
+
+/* True while a file is queued or still moving. name receives the file name. */
+bool ph_origin_push_busy(ph_origin *origin, char *name, size_t name_len);
+
+/* 0 none, 1 sent, 2 failed, 3 cancelled. name receives the file name. */
+int ph_origin_take_push(ph_origin *origin, char *name, size_t name_len);
+
 /* Asks the connected phone. thumb is PH_PICTURE_THUMB squared luma cells or NULL;
  * detail is PH_PICTURE_DETAIL squared cells of the same picture, or NULL. It is sent
  * as a fifth PULL field, which phones before 2.5 refuse.

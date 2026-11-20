@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""Hand one file to the Porthole window on this PC, which sends it to the iPhone."""
+
+import os
+import socket
+import sys
+
+PORT = 47734
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print("Usage: send-to-porthole FILE", file=sys.stderr)
+        return 2
+    path = os.path.abspath(sys.argv[1])
+    if not os.path.isfile(path):
+        print("send-to-porthole: not a file", file=sys.stderr)
+        return 2
+    try:
+        link = socket.create_connection(("127.0.0.1", PORT), 2)
+    except OSError:
+        print("send-to-porthole: Porthole is not listening on this PC", file=sys.stderr)
+        return 1
+    with link:
+        link.sendall(f"SEND {path}\n".encode())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

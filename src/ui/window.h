@@ -35,6 +35,30 @@ void ph_window_set_pull_hint(ph_window *w, const char *hint);
 /* True once, after New code is clicked on the connect screen. */
 bool ph_window_take_new_code(ph_window *w);
 
+/* One click from Settings. NONE when nothing is waiting. */
+typedef enum ph_window_action {
+    PH_WINDOW_ACTION_NONE = 0,
+    PH_WINDOW_ACTION_FEED,
+    PH_WINDOW_ACTION_FORGET,
+    PH_WINDOW_ACTION_PAUSE,
+    PH_WINDOW_ACTION_MUTE,
+    PH_WINDOW_ACTION_QUIT,
+    PH_WINDOW_ACTION_SAVE
+} ph_window_action;
+
+ph_window_action ph_window_take_action(ph_window *w);
+bool ph_window_ctrl_is_command(const ph_window *w);
+bool ph_window_release_on_blur(const ph_window *w);
+bool ph_window_next_relative(const ph_window *w);
+void ph_window_set_prefs(ph_window *w, bool ctrl_command, bool release_blur, bool next_relative);
+
+/* A line in the Transfers panel. active is the one in progress; NULL clears it.
+ * set_active returns true when the line changed. show_transfers opens that panel. */
+void ph_window_note_transfer(ph_window *w, const char *line);
+bool ph_window_set_active_transfer(ph_window *w, const char *line);
+void ph_window_show_transfers(ph_window *w);
+bool ph_window_take_cancel(ph_window *w);
+
 /* Whether both the companion link and the screen-sharing listener started. */
 void ph_window_set_share_available(ph_window *w, bool available);
 

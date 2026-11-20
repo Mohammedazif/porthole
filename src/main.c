@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/config.h"
 #include "core/log.h"
 #include "core/version.h"
 
@@ -85,6 +86,7 @@ int main(int argc, char **argv)
 #else
     bool absolute_pointer = true;
 #endif
+    bool pointer_chosen = false;
     int audio_delay_ms = 0;
     const char *precise_touch = NULL;
 #ifdef PORTHOLE_BLE_HELPER
@@ -113,8 +115,10 @@ int main(int argc, char **argv)
             bluetooth = false;
         } else if (!strcmp(arg, "--relative-pointer")) {
             absolute_pointer = false;
+            pointer_chosen = true;
         } else if (!strcmp(arg, "--absolute-pointer")) {
             absolute_pointer = true;
+            pointer_chosen = true;
         } else if (!strcmp(arg, "--no-audio")) {
             audio = false;
         } else if (!strcmp(arg, "--setup")) {
@@ -172,6 +176,20 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+
+#ifndef _WIN32
+    if (!pointer_chosen) {
+        char mode[32];
+        if (ph_config_read_line("pointer-mode", mode, sizeof mode)) {
+            if (!strcmp(mode, "relative"))
+                absolute_pointer = false;
+            else if (!strcmp(mode, "absolute"))
+                absolute_pointer = true;
+        }
+    }
+#else
+    (void)pointer_chosen;
+#endif
 
     PH_LOGI("%s %s, receiver name \"%s\"", PORTHOLE_NAME, PORTHOLE_VERSION, name);
 #ifdef PORTHOLE_HAVE_AIRPLAY

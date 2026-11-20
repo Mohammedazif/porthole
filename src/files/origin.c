@@ -13,6 +13,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <fcntl.h>
+#include <sys/stat.h>
+
 #if defined(__linux__)
 
 #include <arpa/inet.h>
@@ -49,6 +52,15 @@ struct ph_origin {
     char path[768];
     char token[16];
     ph_bonjour *bonjour;
+    int push_fd;
+    char push_path[1024];
+    bool push_pending;
+    bool push_cancel;
+    bool files_ok;
+    int push_note;
+    char push_note_name[96];
+    bool push_busy;
+    char push_busy_name[96];
     char peer[64]; /* address of the connection being served */
     char known[64]; /* last phone that gave the right code */
     bool clip_ready;
@@ -290,6 +302,13 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
         *consumed = true;
         return true;
     }
+    if (strcmp(line, "FILES") == 0) {
+        pthread_mutex_lock(&o->lock);
+        o->files_ok = true;
+        pthread_mutex_unlock(&o->lock);
+        *consumed = true;
+        return true;
+    }
     if (strncmp(line, "CLIP ", 5) != 0)
         return true;
     *consumed = true;
@@ -360,11 +379,131 @@ static bool send_outgoing(ph_origin *o, int fd)
     return true;
 }
 
+#define PH_PUSH_PORT 47734
+#define PH_PUSH_MAX (512ull * 1024ull * 1024ull)
+
+static bool safe_name(const char *path, char *out, size_t cap)
+{
+    const char *base = strrchr(path, '/');
+    size_t i, n = 0;
+
+    base = base ? base + 1 : path;
+    if (!base || !base[0] || !out || cap < 2)
+        return false;
+    for (i = 0; base[i] && n + 1 < cap; i++) {
+        unsigned char c = (unsigned char)base[i];
+        if (c < 32 || c == '/' || c == '\\' || c == '"')
+            c = '_';
+        out[n++] = (char)c;
+    }
+    out[n] = 0;
+    return n > 0 && strcmp(out, ".") != 0 && strcmp(out, "..") != 0;
+}
+
+static void push_result(ph_origin *o, int note, const char *name)
+{
+    pthread_mutex_lock(&o->lock);
+    o->push_note = note;
+    snprintf(o->push_note_name, sizeof o->push_note_name, "%s", name ? name : "");
+    o->push_busy = false;
+    pthread_mutex_unlock(&o->lock);
+}
+
+static bool send_push(ph_origin *o, int fd)
+{
+    char path[1024], name[96], hdr[160];
+    struct stat st;
+    int file = -1, hdr_len;
+    bool ok = true, cancel = false, ready;
+    unsigned long long left;
+
+    pthread_mutex_lock(&o->lock);
+    if (!o->push_pending) {
+        pthread_mutex_unlock(&o->lock);
+        return true;
+    }
+    snprintf(path, sizeof path, "%s", o->push_path);
+    cancel = o->push_cancel;
+    ready = o->files_ok;
+    o->push_pending = false;
+    o->push_cancel = false;
+    pthread_mutex_unlock(&o->lock);
+    if (!safe_name(path, name, sizeof name))
+        name[0] = 0;
+    if (cancel) {
+        push_result(o, 3, name);
+        return true;
+    }
+    if (!ready) {
+        PH_LOGW("send: the connected iPhone cannot receive a file yet");
+        push_result(o, 2, name);
+        return true;
+    }
+    if (!name[0] || stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0
+        || (unsigned long long)st.st_size > PH_PUSH_MAX) {
+        push_result(o, 2, name);
+        return true;
+    }
+    file = open(path, O_RDONLY);
+    hdr_len = snprintf(hdr, sizeof hdr, "PUSH %llu %s\n", (unsigned long long)st.st_size, name);
+    if (file < 0 || hdr_len < 1 || (size_t)hdr_len >= sizeof hdr || !send_all(fd, hdr, (size_t)hdr_len)) {
+        if (file >= 0)
+            close(file);
+        push_result(o, 2, name);
+        return false;
+    }
+    left = (unsigned long long)st.st_size;
+    while (left && ok && !cancel) {
+        char chunk[65536];
+        size_t want = left > sizeof chunk ? sizeof chunk : (size_t)left;
+        ssize_t n = read(file, chunk, want);
+
+        pthread_mutex_lock(&o->lock);
+        cancel = o->push_cancel;
+        pthread_mutex_unlock(&o->lock);
+        if (cancel)
+            break;
+        if (n <= 0) {
+            ok = false;
+            break;
+        }
+        ok = send_all(fd, chunk, (size_t)n);
+        left -= (unsigned long long)n;
+    }
+    close(file);
+    if (cancel) {
+        push_result(o, 3, name);
+        shutdown(fd, SHUT_RDWR);
+        return false;
+    }
+    if (!ok || left) {
+        push_result(o, 2, name);
+        return false;
+    }
+    {
+        struct pollfd p = {.fd = fd, .events = POLLIN};
+        char line[32];
+        int pr = poll(&p, 1, 15000);
+
+        if (pr > 0 && read_line(fd, line, sizeof line) && strcmp(line, "SAVED") == 0) {
+            PH_LOGI("send: %s arrived on the iPhone", name);
+            push_result(o, 1, name);
+            return true;
+        }
+    }
+    PH_LOGW("send: the iPhone did not accept %s", name);
+    push_result(o, 2, name);
+    return true;
+}
+
 /* Reads clipboard messages that arrived while no photo request is in flight,
  * then sends one waiting PC clipboard item. */
 static bool service_idle(ph_origin *o, int fd)
 {
     int i;
+
+    if (!send_push(o, fd))
+        return false;
 
     for (i = 0; i < 8; i++) {
         struct pollfd p = {.fd = fd, .events = POLLIN};
@@ -673,6 +812,7 @@ static void serve_client(ph_origin *o, int fd)
 done:
     pthread_mutex_lock(&o->lock);
     o->have_client = false;
+    o->files_ok = false;
     o->client_fd = -1;
     o->clip_ready = false;
     o->in_ready = false;
@@ -687,18 +827,161 @@ done:
     pthread_mutex_unlock(&o->lock);
 }
 
+static void listen_send(ph_origin *o)
+{
+    struct sockaddr_in addr;
+    int fd, on = 1;
+
+    o->push_fd = -1;
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+    memset(&addr, 0, sizeof addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(PH_PUSH_PORT);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof addr) != 0 || listen(fd, 2) != 0) {
+        PH_LOGW("send: local port %d is unavailable", PH_PUSH_PORT);
+        close(fd);
+        return;
+    }
+    o->push_fd = fd;
+    PH_LOGI("send: drop a file on the window, or send a path to 127.0.0.1:%d", PH_PUSH_PORT);
+}
+
+static void take_local_send(ph_origin *o)
+{
+    char buf[1200];
+    size_t n = 0;
+    int fd;
+    struct timeval tv = {.tv_sec = 2, .tv_usec = 0};
+
+    if (!o || o->push_fd < 0)
+        return;
+    fd = accept(o->push_fd, NULL, NULL);
+    if (fd < 0)
+        return;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    while (n + 1 < sizeof buf) {
+        ssize_t got = recv(fd, buf + n, 1, 0);
+        if (got <= 0)
+            break;
+        if (buf[n] == '\n')
+            break;
+        n++;
+    }
+    buf[n] = 0;
+    close(fd);
+    if (strncmp(buf, "SEND ", 5) == 0 && buf[5])
+        ph_origin_put_file(o, buf + 5);
+}
+
+bool ph_origin_put_file(ph_origin *o, const char *path)
+{
+    struct stat st;
+    char name[96];
+
+    if (!o || !path || path[0] != '/' || strlen(path) >= sizeof o->push_path)
+        return false;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0
+        || (unsigned long long)st.st_size > PH_PUSH_MAX)
+        return false;
+    if (!safe_name(path, name, sizeof name))
+        return false;
+    pthread_mutex_lock(&o->lock);
+    if (o->push_pending || o->push_busy) {
+        pthread_mutex_unlock(&o->lock);
+        return false;
+    }
+    snprintf(o->push_path, sizeof o->push_path, "%s", path);
+    snprintf(o->push_busy_name, sizeof o->push_busy_name, "%s", name);
+    o->push_pending = true;
+    o->push_busy = true;
+    o->push_cancel = false;
+    pthread_mutex_unlock(&o->lock);
+    PH_LOGI("send: queued %s", path);
+    return true;
+}
+
+bool ph_origin_push_busy(ph_origin *o, char *name, size_t name_len)
+{
+    bool busy;
+
+    if (!o)
+        return false;
+    pthread_mutex_lock(&o->lock);
+    busy = o->push_busy;
+    if (name && name_len)
+        snprintf(name, name_len, "%s", busy ? o->push_busy_name : "");
+    pthread_mutex_unlock(&o->lock);
+    return busy;
+}
+
+void ph_origin_cancel_push(ph_origin *o)
+{
+    if (!o)
+        return;
+    pthread_mutex_lock(&o->lock);
+    o->push_cancel = true;
+    pthread_mutex_unlock(&o->lock);
+}
+
+int ph_origin_take_push(ph_origin *o, char *name, size_t name_len)
+{
+    int note;
+
+    if (!o)
+        return 0;
+    pthread_mutex_lock(&o->lock);
+    note = o->push_note;
+    if (name && name_len)
+        snprintf(name, name_len, "%s", note ? o->push_note_name : "");
+    o->push_note = 0;
+    pthread_mutex_unlock(&o->lock);
+    return note;
+}
+
+void ph_origin_forget(ph_origin *o)
+{
+    int client = -1;
+
+    if (!o)
+        return;
+    pthread_mutex_lock(&o->lock);
+    o->known[0] = 0;
+    client = o->client_fd;
+    pthread_mutex_unlock(&o->lock);
+    if (client >= 0)
+        shutdown(client, SHUT_RDWR);
+    PH_LOGI("photo pull: forgot the connected iPhone");
+}
+
 static void *origin_main(void *arg)
 {
     ph_origin *o = arg;
 
     while (!o->stop) {
-        struct pollfd p = {.fd = o->listen_fd, .events = POLLIN};
-        int pr = poll(&p, 1, 200);
-        int fd;
+        struct pollfd p[2];
+        int nfds = 1, pr, fd;
         struct sockaddr_in peer;
         socklen_t peer_len = sizeof peer;
 
+        p[0].fd = o->listen_fd;
+        p[0].events = POLLIN;
+        p[0].revents = 0;
+        if (o->push_fd >= 0) {
+            p[1].fd = o->push_fd;
+            p[1].events = POLLIN;
+            p[1].revents = 0;
+            nfds = 2;
+        }
+        pr = poll(p, (nfds_t)nfds, 200);
         if (pr <= 0)
+            continue;
+        if (nfds == 2 && (p[1].revents & POLLIN))
+            take_local_send(o);
+        if (!(p[0].revents & POLLIN))
             continue;
         fd = accept(o->listen_fd, (struct sockaddr *)&peer, &peer_len);
         if (fd < 0)
@@ -722,6 +1005,7 @@ ph_origin *ph_origin_start(char *hint, size_t hint_len)
     o = calloc(1, sizeof *o);
     if (!o)
         return NULL;
+    o->push_fd = -1;
     if (!ph_config_read_line("pull-token", token, sizeof token) || !token_ok(token)) {
         make_token(token, sizeof token);
         ph_config_write_line("pull-token", token);
@@ -745,6 +1029,7 @@ ph_origin *ph_origin_start(char *hint, size_t hint_len)
     }
     o->listen_fd = fd;
     o->client_fd = -1;
+    listen_send(o);
     pthread_mutex_init(&o->lock, NULL);
     pthread_cond_init(&o->cond, NULL);
     if (pthread_create(&o->thread, NULL, origin_main, o) != 0) {
@@ -800,6 +1085,8 @@ void ph_origin_stop(ph_origin *o)
     shutdown(o->listen_fd, SHUT_RDWR);
     pthread_join(o->thread, NULL);
     close(o->listen_fd);
+    if (o->push_fd >= 0)
+        close(o->push_fd);
     ph_bonjour_stop(o->bonjour);
     free(o->out_data);
     free(o->in_data);
@@ -966,6 +1253,39 @@ bool ph_origin_renew(ph_origin *origin, char *hint, size_t hint_len)
     if (hint && hint_len)
         hint[0] = 0;
     return false;
+}
+
+void ph_origin_forget(ph_origin *origin)
+{
+    (void)origin;
+}
+
+bool ph_origin_put_file(ph_origin *origin, const char *path)
+{
+    (void)origin;
+    (void)path;
+    return false;
+}
+
+bool ph_origin_push_busy(ph_origin *origin, char *name, size_t name_len)
+{
+    (void)origin;
+    if (name && name_len)
+        name[0] = 0;
+    return false;
+}
+
+void ph_origin_cancel_push(ph_origin *origin)
+{
+    (void)origin;
+}
+
+int ph_origin_take_push(ph_origin *origin, char *name, size_t name_len)
+{
+    (void)origin;
+    if (name && name_len)
+        name[0] = 0;
+    return 0;
 }
 
 bool ph_origin_ask(ph_origin *origin, uint64_t hash, double aspect, const uint8_t *thumb,

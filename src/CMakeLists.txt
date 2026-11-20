@@ -120,6 +120,16 @@ if(PORTHOLE_WITH_AIRPLAY)
     endif()
     porthole_set_warnings(porthole_app)
 
+    # Nayuki's QR library. Its own warnings stay off this project's -Werror set.
+    add_library(qrcodegen STATIC ui/vendor/qrcodegen.c)
+    target_include_directories(qrcodegen PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    if(MSVC)
+        target_compile_options(qrcodegen PRIVATE /w)
+    else()
+        target_compile_options(qrcodegen PRIVATE -w)
+    endif()
+    target_link_libraries(porthole_app PUBLIC qrcodegen)
+
     target_link_libraries(porthole PRIVATE porthole_app)
     target_compile_definitions(porthole PRIVATE PORTHOLE_HAVE_AIRPLAY=1)
     if(WIN32)

@@ -11,6 +11,7 @@
 #include "control/setup.h"
 #include "core/version.h"
 #include "ui/text.h"
+#include "ui/vendor/qrcodegen.h"
 #include "ui/window.h"
 
 #define CHECK(condition) do { if (!(condition)) { \
@@ -105,6 +106,38 @@ int main(int argc, char **argv)
     CHECK(ph_window_take_new_code(w));
     CHECK(!ph_window_take_new_code(w));
 
+    {
+        uint8_t qr[qrcodegen_BUFFER_LEN_FOR_VERSION(8)];
+        uint8_t temp[qrcodegen_BUFFER_LEN_FOR_VERSION(8)];
+        CHECK(qrcodegen_encodeText("porthole://192.0.2.42:47731/SAMPLE42", temp, qr,
+                                   qrcodegen_Ecc_MEDIUM, 1, 8, qrcodegen_Mask_AUTO, true));
+        CHECK(qrcodegen_getSize(qr) >= 21);
+        CHECK(qrcodegen_getModule(qr, 0, 0));
+    }
+    SDL_Event gear = {.type = SDL_MOUSEBUTTONDOWN};
+    gear.button.button = SDL_BUTTON_LEFT;
+    gear.button.x = 184; gear.button.y = 703;
+    CHECK(ph_window_chrome_event(w, &gear));
+    gear.type = SDL_MOUSEBUTTONUP;
+    CHECK(ph_window_chrome_event(w, &gear));
+    CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_NONE);
+    SDL_Event row = {.type = SDL_MOUSEBUTTONDOWN};
+    row.button.button = SDL_BUTTON_LEFT;
+    row.button.x = 230; row.button.y = 125;
+    CHECK(ph_window_chrome_event(w, &row));
+    row.type = SDL_MOUSEBUTTONUP;
+    CHECK(ph_window_chrome_event(w, &row));
+    CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_FEED);
+    gear.type = SDL_MOUSEBUTTONDOWN;
+    CHECK(ph_window_chrome_event(w, &gear));
+    gear.type = SDL_MOUSEBUTTONUP;
+    CHECK(ph_window_chrome_event(w, &gear));
+    CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_NONE);
+    ph_window_set_active_transfer(w, "Sending photo.jpg");
+    CHECK(!ph_window_set_active_transfer(w, "Sending photo.jpg"));
+    ph_window_note_transfer(w, "Sent photo.jpg");
+    CHECK(!ph_window_take_cancel(w));
+
     SDL_Renderer *renderer = SDL_GetRenderer(native);
     const char *paragraph = "Readable guidance wraps consistently, including longlonglongwords.";
     int wrapped = ph_ui_text_height(paragraph, 130, 2);
@@ -179,6 +212,51 @@ int main(int argc, char **argv)
     CHECK(!ph_window_to_video(w, 230, 410, &vx, &vy));
     CHECK(ph_window_picture_point(w, 230, 410, &vx, &vy));
     screenshot(w, dir, "07-viewing-only");
+    {
+        /* Phone-sized window, then Controls and Transfers open beside the picture. */
+        int ww, wh;
+        SDL_Event click = {.type = SDL_MOUSEBUTTONDOWN};
+        click.button.button = SDL_BUTTON_LEFT;
+        click.button.clicks = 1;
+        SDL_SetWindowSize(native, 360, 812);
+        ph_window_note_transfer(w, "Received 3 items");
+        ph_window_note_transfer(w, "Sent Q3 report.pdf");
+        ph_window_note_transfer(w, "Could not send Site photos.zip");
+        ph_window_redraw(w);
+        screenshot(w, dir, "09-phone-sized");
+        click.button.x = 360 - 120 - 9 - 64 + 15; click.button.y = 16;  /* Controls */
+        CHECK(ph_window_chrome_event(w, &click));
+        click.type = SDL_MOUSEBUTTONUP;
+        CHECK(ph_window_chrome_event(w, &click));
+        SDL_GetWindowSize(native, &ww, &wh);
+        CHECK(ww == 360 + 60);
+        click.type = SDL_MOUSEBUTTONDOWN;
+        click.button.x = ww - 120 - 9 - 32 + 15;                       /* Transfers */
+        CHECK(ph_window_chrome_event(w, &click));
+        click.type = SDL_MOUSEBUTTONUP;
+        CHECK(ph_window_chrome_event(w, &click));
+        SDL_GetWindowSize(native, &ww, &wh);
+        CHECK(ww == 360 + 60 + 300);
+        ph_window_set_active_transfer(w, "Sending IMG_4790.MOV");
+        SDL_Event hover = {.type = SDL_MOUSEMOTION};
+        hover.motion.x = 360 + 30; hover.motion.y = 32 + 10 + 20;      /* Home */
+        ph_window_chrome_event(w, &hover);
+        ph_window_redraw(w);
+        screenshot(w, dir, "10-controls-transfers");
+        click.type = SDL_MOUSEBUTTONDOWN;
+        click.button.x = ww - 120 - 9 - 64 + 15;                        /* close Controls */
+        CHECK(ph_window_chrome_event(w, &click));
+        click.type = SDL_MOUSEBUTTONUP;
+        CHECK(ph_window_chrome_event(w, &click));
+        click.type = SDL_MOUSEBUTTONDOWN;
+        click.button.x = ww - 60 - 120 - 9 - 32 + 15;                   /* close Transfers */
+        CHECK(ph_window_chrome_event(w, &click));
+        click.type = SDL_MOUSEBUTTONUP;
+        CHECK(ph_window_chrome_event(w, &click));
+        SDL_GetWindowSize(native, &ww, &wh);
+        CHECK(ww == 360);
+        ph_window_set_active_transfer(w, "");
+    }
     av_frame_free(&frame);
     ph_window_clear(w);
     ph_window_set_pull_hint(w, "");

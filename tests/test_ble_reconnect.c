@@ -40,6 +40,17 @@ void ph_window_set_detail(ph_window *w, const char *detail) { (void)w, (void)det
 void ph_window_set_pull_hint(ph_window *w, const char *hint) { (void)w, (void)hint; }
 void ph_window_set_share_available(ph_window *w, bool available) { (void)w; (void)available; }
 bool ph_window_take_new_code(ph_window *w) { (void)w; return false; }
+ph_window_action ph_window_take_action(ph_window *w) { (void)w; return PH_WINDOW_ACTION_NONE; }
+bool ph_window_ctrl_is_command(const ph_window *w) { (void)w; return true; }
+bool ph_window_release_on_blur(const ph_window *w) { (void)w; return true; }
+bool ph_window_next_relative(const ph_window *w) { (void)w; return false; }
+void ph_window_set_prefs(ph_window *w, bool ctrl, bool blur, bool relative)
+{ (void)w; (void)ctrl; (void)blur; (void)relative; }
+void ph_window_note_transfer(ph_window *w, const char *line) { (void)w; (void)line; }
+bool ph_window_set_active_transfer(ph_window *w, const char *line)
+{ (void)w; (void)line; return false; }
+void ph_window_show_transfers(ph_window *w) { (void)w; }
+bool ph_window_take_cancel(ph_window *w) { (void)w; return false; }
 
 void ph_decoder_limit_edge(ph_decoder *d, int long_edge) { (void)d, (void)long_edge; }
 ph_drag_ghost *ph_drag_ghost_create(void) { return NULL; }

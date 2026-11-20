@@ -14,12 +14,13 @@
 #include "ui/text.h"
 #include "ui/brand_art.h"
 #include "ui/placement.h"
+#include "ui/vendor/qrcodegen.h"
 
 #define RESIZE_SETTLE_MS 400 /* a new picture size must last this long before resizing */
 #define WAITING_W 960
 #define WAITING_H 680
-#define RAIL_W 56
-#define TRANSFERS_W 248
+#define RAIL_W 60
+#define TRANSFERS_W 300
 
 struct ph_window {
     SDL_Window *window;
@@ -45,6 +46,15 @@ struct ph_window {
     char pull_hint[96];
     bool share_checked, share_available;
     bool new_code;
+    bool settings_visible;
+    bool ctrl_command;
+    bool release_blur;
+    bool next_relative;
+    ph_window_action pending_action;
+    char transfer_lines[6][72];
+    int transfer_count;
+    char transfer_active[72];
+    bool transfer_cancel;
     Uint64 copied_until;
     int modal_scroll, modal_max_scroll;
     int chrome_hover;
@@ -55,15 +65,18 @@ struct ph_window {
     bool rail_open;
     bool transfers_open;
     int transfer_tab;
+    bool transfers_unseen;
 };
 
 static void place_window(ph_window *w, int pic_w, int pic_h, bool center);
 
 enum {
     CHROME_NONE, CHROME_MIN, CHROME_MAX, CHROME_CLOSE, CHROME_DRAG,
-    CHROME_SETUP, CHROME_HELP, CHROME_STATS, CHROME_COPY, CHROME_NEW_CODE,
-    CHROME_RAIL, CHROME_TRANSFERS, CHROME_TAB_FILES, CHROME_TAB_CLIP,
-    CHROME_ACT
+    CHROME_SETUP, CHROME_HELP, CHROME_STATS, CHROME_COPY, CHROME_NEW_CODE, CHROME_SETTINGS,
+    CHROME_CANCEL,
+    CHROME_RAIL, CHROME_TRANSFERS, CHROME_TAB_FILES, CHROME_TAB_CLIP, CHROME_PANEL,
+    CHROME_SET = 40,
+    CHROME_ACT = 100
 };
 
 static int text_height(const char *text, int width, int scale)
@@ -135,7 +148,7 @@ static void draw_button(ph_window *w, SDL_Rect box, const char *label, bool prim
 }
 
 typedef struct connect_boxes {
-    SDL_Rect copy, setup, help, stats, fresh;
+    SDL_Rect copy, setup, help, stats, fresh, gear;
     int left, inner;
 } connect_boxes;
 
@@ -158,6 +171,7 @@ static connect_boxes connect_layout(int width, int height, int top)
     g.help = (SDL_Rect){g.left, button_y + 48, 56, 22};
     g.stats = (SDL_Rect){g.left + 72, button_y + 48, 56, 22};
     g.fresh = (SDL_Rect){g.left + inner - 92, button_y + 48, 92, 22};
+    g.gear = (SDL_Rect){g.left + 148, button_y + 48, 72, 22};
     return g;
 }
 
@@ -209,6 +223,101 @@ static void status_dot(SDL_Renderer *renderer, int x, int y, int r, int g, int b
     rounded(renderer, (SDL_Rect){x, y, 8, 8}, 4, (SDL_Color){(Uint8)r, (Uint8)g, (Uint8)b, 255});
 }
 
+static void draw_qr(SDL_Renderer *renderer, const char *text, SDL_Rect box)
+{
+    uint8_t temp[qrcodegen_BUFFER_LEN_FOR_VERSION(8)];
+    uint8_t qr[qrcodegen_BUFFER_LEN_FOR_VERSION(8)];
+    int n, span, scale, side, ox, oy, x, y;
+
+    if (!text || !text[0]
+        || !qrcodegen_encodeText(text, temp, qr, qrcodegen_Ecc_MEDIUM, 1, 8,
+                                 qrcodegen_Mask_AUTO, true))
+        return;
+    n = qrcodegen_getSize(qr);
+    span = n + 4;
+    scale = box.w < box.h ? box.w / span : box.h / span;
+    if (scale < 2)
+        return;
+    side = span * scale;
+    ox = box.x + (box.w - side) / 2;
+    oy = box.y + (box.h - side) / 2;
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+    {
+        SDL_Rect quiet = {ox, oy, side, side};
+        SDL_RenderFillRect(renderer, &quiet);
+    }
+    SDL_SetRenderDrawColor(renderer, 17, 17, 17, 255);
+    for (y = 0; y < n; y++) {
+        for (x = 0; x < n; x++) {
+            SDL_Rect dot;
+            if (!qrcodegen_getModule(qr, x, y))
+                continue;
+            dot = (SDL_Rect){ox + (x + 2) * scale, oy + (y + 2) * scale, scale, scale};
+            SDL_RenderFillRect(renderer, &dot);
+        }
+    }
+}
+
+static const char *settings_label(const ph_window *w, int index, char *buf, size_t cap)
+{
+    switch (index) {
+    case 0: return "Check pointer alignment";
+    case 1: return "Wheel: Normal or Feed";
+    case 2:
+        snprintf(buf, cap, "Ctrl is Command: %s", w->ctrl_command ? "On" : "Off");
+        return buf;
+    case 3:
+        snprintf(buf, cap, "Release keys on blur: %s", w->release_blur ? "On" : "Off");
+        return buf;
+    case 4:
+        snprintf(buf, cap, "Relative pointer next open: %s", w->next_relative ? "On" : "Off");
+        return buf;
+    case 5: return "Pause or resume controls";
+    case 6: return "Play or mute sound";
+    case 7: return "Copy pairing details";
+    case 8: return "Forget this iPhone";
+    case 9: return "Quit";
+    default: return "";
+    }
+}
+
+static SDL_Rect settings_row_box(int width, int index)
+{
+    int row_w = width - 48;
+    int x;
+
+    if (row_w > 440)
+        row_w = 440;
+    x = (width - row_w) / 2;
+    return (SDL_Rect){x, PH_WINDOW_BAR_PX + 44 + index * 34, row_w, 30};
+}
+
+static void draw_settings(ph_window *w, int width, int height)
+{
+    int i;
+
+    paint(w->renderer, (SDL_Rect){0, PH_WINDOW_BAR_PX, width, height - PH_WINDOW_BAR_PX},
+          243, 244, 246, 255);
+    draw_text(w->renderer, "Settings", 24, PH_WINDOW_BAR_PX + 12, width - 48, 2, color_text);
+    for (i = 0; i < 10; i++) {
+        char buf[80];
+        SDL_Rect row = settings_row_box(width, i);
+        SDL_Color ink = w->chrome_hover == CHROME_SET + i ? color_on_ink : color_text;
+        if (row.y + row.h > height - 8)
+            break;
+        rounded(w->renderer, row, 6,
+                w->chrome_hover == CHROME_SET + i ? color_text : color_on_ink);
+        draw_text(w->renderer, settings_label(w, i, buf, sizeof buf), row.x + 10, row.y + 6,
+                  row.w - 20, 1, ink);
+    }
+}
+
+/* Live bar, right to left: window buttons, a divider, Transfers, Controls, Settings. */
+static SDL_Rect live_settings_box(int win_w)
+{
+    return (SDL_Rect){win_w - 120 - 9 - 3 * 32, 4, 30, PH_WINDOW_BAR_PX - 8};
+}
+
 static void draw_waiting(ph_window *w, int width, int height, int top)
 {
     connect_boxes g = connect_layout(width, height, top);
@@ -229,7 +338,7 @@ static void draw_waiting(ph_window *w, int width, int height, int top)
               "Open Porthole on your iPhone and enter this PC. Keep both on the same Wi-Fi.",
               g.left, y, g.inner, 1, color_muted);
     y += 36;
-    card_h = have ? 132 : 72;
+    card_h = have ? 268 : 72;
     if (y + card_h > g.copy.y - 16) card_h = g.copy.y - 16 - y;
     if (card_h < 48) card_h = 48;
     card = (SDL_Rect){g.left, y, g.inner, card_h};
@@ -243,6 +352,18 @@ static void draw_waiting(ph_window *w, int width, int height, int top)
         draw_text(w->renderer, address, card.x + 100, card.y + 62, card.w - 116, 2, color_text);
         draw_text(w->renderer, "Code", card.x + 16, card.y + 92, 80, 1, color_muted);
         draw_text(w->renderer, code, card.x + 100, card.y + 88, card.w - 116, 2, color_text);
+        if (card.h > 200) {
+            char payload[128], compact[16];
+            size_t n = 0;
+            SDL_Rect qr = {card.x + (card.w - 120) / 2, card.y + 118, 120, 120};
+            for (const char *p = code; *p && n + 1 < sizeof compact; p++) {
+                if (*p != ' ')
+                    compact[n++] = *p;
+            }
+            compact[n] = 0;
+            snprintf(payload, sizeof payload, "porthole://%s:47731/%s", address, compact);
+            draw_qr(w->renderer, payload, qr);
+        }
     } else {
         draw_text(w->renderer, w->share_checked && !w->share_available
                     ? "The companion connection is unavailable in this build."
@@ -296,6 +417,8 @@ static void draw_waiting(ph_window *w, int width, int height, int top)
         SDL_Color ink = w->chrome_hover == CHROME_NEW_CODE ? color_text : color_muted;
         draw_text(w->renderer, label, g.fresh.x + g.fresh.w - tw, g.fresh.y, tw + 2, 1, ink);
     }
+    draw_text(w->renderer, "Settings", g.gear.x, g.gear.y, g.gear.w, 1,
+              w->chrome_hover == CHROME_SETTINGS ? color_text : color_muted);
 }
 
 static int card_height(const char *title, const char *body, int inner, int scale)
@@ -650,7 +773,8 @@ static void toolbar_buttons(int width, SDL_Rect buttons[3])
 
 static bool mirror_chrome(const ph_window *w)
 {
-    return w->has_picture && !w->help_visible && !w->setup.visible && !w->diagnostics_visible;
+    return w->has_picture && !w->help_visible && !w->setup.visible && !w->diagnostics_visible
+           && !w->settings_visible;
 }
 
 static int side_panels_w(const ph_window *w)
@@ -668,18 +792,39 @@ static int picture_column_w(const ph_window *w, int win_w)
 
 static SDL_Rect rail_toggle_box(int win_w)
 {
-    return (SDL_Rect){win_w - 120 - 8 - 64, 3, 28, PH_WINDOW_BAR_PX - 6};
+    return (SDL_Rect){win_w - 120 - 9 - 2 * 32, 4, 30, PH_WINDOW_BAR_PX - 8};
 }
 
 static SDL_Rect transfers_toggle_box(int win_w)
 {
-    return (SDL_Rect){win_w - 120 - 8 - 32, 3, 28, PH_WINDOW_BAR_PX - 6};
+    return (SDL_Rect){win_w - 120 - 9 - 32, 4, 30, PH_WINDOW_BAR_PX - 8};
 }
 
+/* Home, App Switcher, Control Center, Notifications | Screenshot | Volume | Feed. */
 static SDL_Rect action_box(const ph_window *w, int win_w, int index)
 {
+    static const int group_gap[8] = {0, 0, 0, 0, 1, 2, 2, 3};
     int x = picture_column_w(w, win_w);
-    return (SDL_Rect){x + 8, PH_WINDOW_BAR_PX + 8 + index * 44, 40, 40};
+    return (SDL_Rect){x + 8, PH_WINDOW_BAR_PX + 10 + index * 44 + group_gap[index] * 13, 44, 40};
+}
+
+typedef struct transfer_boxes {
+    int x;
+    SDL_Rect files, clip, card, cancel, drop;
+} transfer_boxes;
+
+static transfer_boxes transfers_layout(const ph_window *w, int win_w, int win_h)
+{
+    transfer_boxes t;
+    int inner = TRANSFERS_W - 32;
+
+    t.x = picture_column_w(w, win_w) + (w->rail_open ? RAIL_W : 0);
+    t.files = (SDL_Rect){t.x + 16 + 3, PH_WINDOW_BAR_PX + 50, inner / 2 - 3, 28};
+    t.clip = (SDL_Rect){t.x + 16 + inner / 2, PH_WINDOW_BAR_PX + 50, inner / 2 - 3, 28};
+    t.card = (SDL_Rect){t.x + 16, PH_WINDOW_BAR_PX + 96, inner, 74};
+    t.cancel = (SDL_Rect){t.card.x + t.card.w - 66, t.card.y + 10, 56, 24};
+    t.drop = (SDL_Rect){t.x + 16, win_h - 16 - 92, inner, 92};
+    return t;
 }
 
 static int chrome_at(const ph_window *w, int win_w, int win_h, int x, int y)
@@ -691,17 +836,30 @@ static int chrome_at(const ph_window *w, int win_w, int win_h, int x, int y)
         chrome_buttons(win_w, buttons);
         for (int i = 0; i < 3; i++)
             if (SDL_PointInRect(&point, &buttons[i])) return CHROME_MIN + i;
-        if (mirror_chrome(w)) {
+        if (w->has_picture && !w->help_visible && !w->setup.visible && !w->diagnostics_visible) {
             SDL_Rect rail = rail_toggle_box(win_w);
             SDL_Rect transfers = transfers_toggle_box(win_w);
-            if (SDL_PointInRect(&point, &rail)) return CHROME_RAIL;
-            if (SDL_PointInRect(&point, &transfers)) return CHROME_TRANSFERS;
+            SDL_Rect gear = live_settings_box(win_w);
+            if (SDL_PointInRect(&point, &gear)) return CHROME_SETTINGS;
+            if (!w->settings_visible && SDL_PointInRect(&point, &rail)) return CHROME_RAIL;
+            if (!w->settings_visible && SDL_PointInRect(&point, &transfers)) return CHROME_TRANSFERS;
         } else {
             toolbar_buttons(win_w, buttons);
             for (int i = 0; i < 3; i++)
                 if (SDL_PointInRect(&point, &buttons[i])) return CHROME_SETUP + i;
         }
         return CHROME_DRAG;
+    }
+    if (w->settings_visible) {
+        int i;
+        for (i = 0; i < 10; i++) {
+            SDL_Rect row = settings_row_box(win_w, i);
+            if (row.y + row.h > win_h - 8)
+                break;
+            if (SDL_PointInRect(&point, &row))
+                return CHROME_SET + i;
+        }
+        return CHROME_SETTINGS;
     }
     if (mirror_chrome(w)) {
         int column = picture_column_w(w, win_w);
@@ -710,16 +868,15 @@ static int chrome_at(const ph_window *w, int win_w, int win_h, int x, int y)
                 SDL_Rect box = action_box(w, win_w, i);
                 if (SDL_PointInRect(&point, &box)) return CHROME_ACT + i;
             }
-            return CHROME_RAIL;
+            return CHROME_PANEL;
         }
         if (w->transfers_open && x >= column + (w->rail_open ? RAIL_W : 0)) {
-            int panel = column + (w->rail_open ? RAIL_W : 0);
-            SDL_Rect files = {panel + 12, PH_WINDOW_BAR_PX + 40, (TRANSFERS_W - 32) / 2, 28};
-            SDL_Rect clip = files;
-            clip.x += files.w + 8;
-            if (SDL_PointInRect(&point, &files)) return CHROME_TAB_FILES;
-            if (SDL_PointInRect(&point, &clip)) return CHROME_TAB_CLIP;
-            return CHROME_TRANSFERS;
+            transfer_boxes t = transfers_layout(w, win_w, win_h);
+            if (SDL_PointInRect(&point, &t.files)) return CHROME_TAB_FILES;
+            if (SDL_PointInRect(&point, &t.clip)) return CHROME_TAB_CLIP;
+            if (!w->transfer_tab && w->transfer_active[0] && SDL_PointInRect(&point, &t.cancel))
+                return CHROME_CANCEL;
+            return CHROME_PANEL;
         }
     }
     if (!w->has_picture && !w->help_visible && !w->setup.visible) {
@@ -731,6 +888,7 @@ static int chrome_at(const ph_window *w, int win_w, int win_h, int x, int y)
         if (SDL_PointInRect(&point, &g.help)) return CHROME_HELP;
         if (SDL_PointInRect(&point, &g.stats)) return CHROME_STATS;
         if (SDL_PointInRect(&point, &g.fresh)) return address[0] ? CHROME_NEW_CODE : CHROME_NONE;
+        if (SDL_PointInRect(&point, &g.gear)) return CHROME_SETTINGS;
     }
     return CHROME_NONE;
 }
@@ -771,27 +929,93 @@ static void draw_chrome_glyph(SDL_Renderer *renderer, int kind, SDL_Rect box, in
     }
 }
 
+static const SDL_Color color_stage = {11, 12, 13, 255};
+static const SDL_Color color_stage_raised = {42, 45, 49, 255};
+static const SDL_Color color_stage_muted = {150, 154, 160, 255};
+static const SDL_Color color_live = {61, 214, 140, 255};
+static const SDL_Color color_line = {226, 228, 232, 255};
+static const SDL_Color color_ground = {243, 244, 246, 255};
+
+static void stroke(SDL_Renderer *renderer, int x1, int y1, int x2, int y2);
+
+static void ring(SDL_Renderer *renderer, int cx, int cy, int outer, int inner, SDL_Color ink,
+                 SDL_Color hole)
+{
+    rounded(renderer, (SDL_Rect){cx - outer, cy - outer, outer * 2, outer * 2}, outer, ink);
+    rounded(renderer, (SDL_Rect){cx - inner, cy - inner, inner * 2, inner * 2}, inner, hole);
+}
+
+/* 0 Settings (gear), 1 Controls (sliders), 2 Transfers (up and down arrows). */
+static void bar_toggle(ph_window *w, SDL_Rect box, int kind, bool on, bool hot)
+{
+    SDL_Renderer *r = w->renderer;
+    SDL_Color back = on || hot ? color_stage_raised : color_stage;
+    int cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+
+    if (on || hot)
+        rounded(r, box, 6, back);
+    SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+    if (kind == 0) {
+        fill_px(r, cx - 1, cy - 8, 3, 16);
+        fill_px(r, cx - 8, cy - 1, 16, 3);
+        stroke(r, cx - 6, cy - 6, cx + 5, cy + 5);
+        stroke(r, cx + 5, cy - 6, cx - 6, cy + 5);
+        ring(r, cx, cy, 6, 2, color_on_ink, back);
+    } else if (kind == 1) {
+        static const int knob[3] = {-3, 3, -1};
+        for (int i = 0; i < 3; i++) {
+            int y = cy - 5 + i * 5;
+            SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+            fill_px(r, cx - 7, y, 15, 1);
+            rounded(r, (SDL_Rect){cx + knob[i] * 2 - 2, y - 2, 5, 5}, 2, color_on_ink);
+        }
+    } else {
+        stroke(r, cx - 4, cy - 6, cx - 4, cy + 6);
+        stroke(r, cx - 7, cy - 3, cx - 4, cy - 6);
+        stroke(r, cx - 1, cy - 3, cx - 4, cy - 6);
+        stroke(r, cx + 3, cy - 6, cx + 3, cy + 6);
+        stroke(r, cx, cy + 3, cx + 3, cy + 6);
+        stroke(r, cx + 6, cy + 3, cx + 3, cy + 6);
+    }
+}
+
 static void draw_bar(ph_window *w, int width, int height)
 {
-    bool live = mirror_chrome(w);
+    bool live = w->has_picture && !w->help_visible && !w->setup.visible && !w->diagnostics_visible;
     (void)height;
     paint(w->renderer, (SDL_Rect){0, 0, width, PH_WINDOW_BAR_PX}, live ? 11 : 255, live ? 12 : 255,
           live ? 13 : 255, 255);
-    if (w->mark) {
+    if (live) {
+        /* The brand mark is ink; on the dark bar draw the porthole ring in white. */
+        ring(w->renderer, 19, 16, 8, 6, color_on_ink, color_stage);
+        paint(w->renderer, (SDL_Rect){15, 13, 8, 2}, 255, 255, 255, 230);
+        paint(w->renderer, (SDL_Rect){16, 17, 6, 2}, 255, 255, 255, 150);
+    } else if (w->mark) {
         SDL_Rect mark = {10, 7, 18, 18};
         SDL_RenderCopy(w->renderer, w->mark, NULL, &mark);
     }
     if (live) {
         SDL_Rect rail = rail_toggle_box(width);
         SDL_Rect transfers = transfers_toggle_box(width);
+        SDL_Rect gear = live_settings_box(width);
         status_dot(w->renderer, 34, 12, 61, 214, 140);
         draw_text(w->renderer, "iPhone", 48, 6, 80, 1, color_on_ink);
-        if (w->rail_open || w->chrome_hover == CHROME_RAIL)
-            rounded(w->renderer, rail, 6, (SDL_Color){40, 42, 46, 255});
-        if (w->transfers_open || w->chrome_hover == CHROME_TRANSFERS)
-            rounded(w->renderer, transfers, 6, (SDL_Color){40, 42, 46, 255});
-        draw_text(w->renderer, "C", rail.x + 9, 6, 16, 1, color_on_ink);
-        draw_text(w->renderer, "T", transfers.x + 9, 6, 16, 1, color_on_ink);
+        bar_toggle(w, rail, 1, w->rail_open, w->chrome_hover == CHROME_RAIL);
+        bar_toggle(w, transfers, 2, w->transfers_open, w->chrome_hover == CHROME_TRANSFERS);
+        bar_toggle(w, gear, 0, w->settings_visible, w->chrome_hover == CHROME_SETTINGS);
+        if (w->transfers_unseen && !w->transfers_open) {
+            rounded(w->renderer, (SDL_Rect){transfers.x + transfers.w - 10, transfers.y + 1, 10, 10}, 5,
+                    color_stage);
+            rounded(w->renderer, (SDL_Rect){transfers.x + transfers.w - 8, transfers.y + 3, 6, 6}, 3,
+                    color_live);
+        }
+        paint(w->renderer, (SDL_Rect){width - 120 - 5, 9, 1, PH_WINDOW_BAR_PX - 18}, 42, 45, 49, 255);
+        if ((w->rail_open || w->transfers_open) && w->metrics.fps_known && w->metrics.fps > 0) {
+            char fps[24];
+            snprintf(fps, sizeof fps, "%.0f fps", w->metrics.fps);
+            draw_text(w->renderer, fps, gear.x - 10 - ph_text_width(fps, 1), 6, 80, 1,
+                      color_stage_muted);
+        }
     } else {
         draw_text(w->renderer, "Porthole", 35, 6, 100, 1, color_text);
         SDL_Rect buttons[3];
@@ -862,6 +1086,8 @@ ph_window *ph_window_create(const char *title)
 
     if (!w)
         return NULL;
+    w->ctrl_command = true;
+    w->release_blur = true;
     w->window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WAITING_W,
                                  WAITING_H,
                                  SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_BORDERLESS);
@@ -952,6 +1178,86 @@ bool ph_window_take_new_code(ph_window *w)
     if (!w || !w->new_code)
         return false;
     w->new_code = false;
+    return true;
+}
+
+ph_window_action ph_window_take_action(ph_window *w)
+{
+    ph_window_action action;
+
+    if (!w)
+        return PH_WINDOW_ACTION_NONE;
+    action = w->pending_action;
+    w->pending_action = PH_WINDOW_ACTION_NONE;
+    return action;
+}
+
+bool ph_window_ctrl_is_command(const ph_window *w)
+{
+    return !w || w->ctrl_command;
+}
+
+bool ph_window_release_on_blur(const ph_window *w)
+{
+    return !w || w->release_blur;
+}
+
+bool ph_window_next_relative(const ph_window *w)
+{
+    return w && w->next_relative;
+}
+
+void ph_window_set_prefs(ph_window *w, bool ctrl_command, bool release_blur, bool next_relative)
+{
+    if (!w)
+        return;
+    w->ctrl_command = ctrl_command;
+    w->release_blur = release_blur;
+    w->next_relative = next_relative;
+}
+
+void ph_window_note_transfer(ph_window *w, const char *line)
+{
+    if (!w || !line || !line[0])
+        return;
+    if (w->transfer_count == 6) {
+        memmove(w->transfer_lines, w->transfer_lines + 1, 5 * sizeof w->transfer_lines[0]);
+        w->transfer_count = 5;
+    }
+    snprintf(w->transfer_lines[w->transfer_count], sizeof w->transfer_lines[0], "%s", line);
+    w->transfer_count++;
+    w->transfer_active[0] = 0;
+    if (!w->transfers_open)
+        w->transfers_unseen = true;
+    ph_window_redraw(w);
+}
+
+bool ph_window_set_active_transfer(ph_window *w, const char *line)
+{
+    if (!w)
+        return false;
+    if (!line)
+        line = "";
+    if (!strcmp(w->transfer_active, line))
+        return false;
+    snprintf(w->transfer_active, sizeof w->transfer_active, "%s", line);
+    ph_window_redraw(w);
+    return true;
+}
+
+void ph_window_show_transfers(ph_window *w)
+{
+    if (!w || w->transfers_open)
+        return;
+    w->transfers_unseen = false;
+    flip_panel(w, &w->transfers_open, TRANSFERS_W);
+}
+
+bool ph_window_take_cancel(ph_window *w)
+{
+    if (!w || !w->transfer_cancel)
+        return false;
+    w->transfer_cancel = false;
     return true;
 }
 
@@ -1192,7 +1498,7 @@ static void stroke(SDL_Renderer *renderer, int x1, int y1, int x2, int y2)
 
 static void draw_action_icon(SDL_Renderer *renderer, int index, SDL_Rect box)
 {
-    int x = box.x + 11, y = box.y + 11;
+    int x = box.x + (box.w - 17) / 2, y = box.y + (box.h - 17) / 2;
 
     SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
     switch (index) {
@@ -1247,42 +1553,240 @@ static void draw_action_icon(SDL_Renderer *renderer, int index, SDL_Rect box)
     }
 }
 
+/* One line, cut with "..." to fit. */
+static void draw_line_fit(SDL_Renderer *renderer, const char *text, int x, int y, int width, int scale,
+                          SDL_Color color)
+{
+    char buf[128];
+    size_t n;
+
+    snprintf(buf, sizeof buf, "%s", text);
+    n = strlen(buf);
+    if (ph_text_width(buf, scale) > width) {
+        while (n > 0) {
+            buf[--n] = 0;
+            char probe[132];
+            snprintf(probe, sizeof probe, "%s...", buf);
+            if (ph_text_width(probe, scale) <= width) {
+                snprintf(buf + n, sizeof buf - n, "...");
+                break;
+            }
+        }
+    }
+    draw_text(renderer, buf, x, y, width + 8, scale, color);
+}
+
+static SDL_Color kind_color(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+    char ext[8] = "";
+
+    if (dot) {
+        size_t i;
+        for (i = 0; i + 1 < sizeof ext && dot[1 + i]; i++)
+            ext[i] = (char)((dot[1 + i] >= 'A' && dot[1 + i] <= 'Z') ? dot[1 + i] + 32 : dot[1 + i]);
+        ext[i] = 0;
+    }
+    if (!strcmp(ext, "pdf")) return (SDL_Color){180, 35, 24, 255};
+    if (!strcmp(ext, "zip") || !strcmp(ext, "7z") || !strcmp(ext, "rar"))
+        return (SDL_Color){122, 90, 18, 255};
+    if (!strcmp(ext, "m4a") || !strcmp(ext, "mp3") || !strcmp(ext, "wav") || !strcmp(ext, "aac"))
+        return (SDL_Color){91, 62, 138, 255};
+    if (!strcmp(ext, "jpg") || !strcmp(ext, "jpeg") || !strcmp(ext, "png") || !strcmp(ext, "heic")
+        || !strcmp(ext, "gif") || !strcmp(ext, "mov") || !strcmp(ext, "mp4") || !strcmp(ext, "webp"))
+        return (SDL_Color){47, 95, 138, 255};
+    return (SDL_Color){74, 78, 85, 255};
+}
+
+/* A page with its type colour along the bottom. */
+static void file_tile(SDL_Renderer *renderer, int x, int y, const char *name)
+{
+    rounded(renderer, (SDL_Rect){x, y, 26, 32}, 4, (SDL_Color){213, 216, 221, 255});
+    rounded(renderer, (SDL_Rect){x + 1, y + 1, 24, 30}, 3, color_on_ink);
+    rounded(renderer, (SDL_Rect){x - 2, y + 19, 18, 8}, 2, kind_color(name));
+}
+
+typedef struct transfer_row {
+    const char *title;
+    const char *sub;
+    SDL_Color sub_color;
+} transfer_row;
+
+static transfer_row read_transfer(const char *line)
+{
+    transfer_row row = {line, "", color_muted};
+
+    if (!strncmp(line, "Sent ", 5)) { row.title = line + 5; row.sub = "Sent to iPhone"; }
+    else if (!strncmp(line, "Cancelled ", 10)) { row.title = line + 10; row.sub = "Cancelled"; }
+    else if (!strncmp(line, "Could not send ", 15)) {
+        row.title = line + 15;
+        row.sub = "Could not send";
+        row.sub_color = color_warn;
+    } else if (!strncmp(line, "Received ", 9)) {
+        row.title = line + 9;
+        row.sub = "From iPhone, in Downloads";
+    }
+    return row;
+}
+
+static void dashed_box(SDL_Renderer *renderer, SDL_Rect box, int radius)
+{
+    SDL_SetRenderDrawColor(renderer, 196, 200, 206, 255);
+    for (int x = box.x + radius; x < box.x + box.w - radius; x += 8) {
+        int len = x + 4 > box.x + box.w - radius ? box.x + box.w - radius - x : 4;
+        fill_px(renderer, x, box.y, len, 1);
+        fill_px(renderer, x, box.y + box.h - 1, len, 1);
+    }
+    for (int y = box.y + radius; y < box.y + box.h - radius; y += 8) {
+        int len = y + 4 > box.y + box.h - radius ? box.y + box.h - radius - y : 4;
+        fill_px(renderer, box.x, y, 1, len);
+        fill_px(renderer, box.x + box.w - 1, y, 1, len);
+    }
+}
+
+static const char *const action_names[8] = {
+    "Home", "App Switcher", "Control Center", "Notifications", "Screenshot", "Volume up",
+    "Volume down", "Feed scrolling"
+};
+static const char *const action_keys[8] = {
+    "Alt+H", "Alt+S", "Alt+C", "Alt+N", "Alt+P", "Alt+Up", "Alt+Down", "F4"
+};
+
+static void draw_controls(ph_window *w, int x, int height)
+{
+    paint(w->renderer, (SDL_Rect){x, PH_WINDOW_BAR_PX, RAIL_W, height - PH_WINDOW_BAR_PX},
+          19, 21, 23, 255);
+    paint(w->renderer, (SDL_Rect){x, PH_WINDOW_BAR_PX, 1, height - PH_WINDOW_BAR_PX}, 42, 45, 49, 255);
+    for (int i = 0; i < 8; i++) {
+        SDL_Rect box = action_box(w, x + RAIL_W + (w->transfers_open ? TRANSFERS_W : 0), i);
+        bool hot = w->chrome_hover == CHROME_ACT + i;
+        if (box.y + box.h > height - 4)
+            break;
+        if (hot)
+            rounded(w->renderer, box, 10, color_stage_raised);
+        if (i == 4 || i == 5 || i == 7)
+            paint(w->renderer, (SDL_Rect){x + 18, box.y - 8, RAIL_W - 36, 1}, 42, 45, 49, 255);
+        draw_action_icon(w->renderer, i, box);
+    }
+}
+
+/* Hover label over the picture, left of the rail: "Home  Alt+H". */
+static void draw_action_tip(ph_window *w, int x)
+{
+    int i = w->chrome_hover - CHROME_ACT;
+    SDL_Rect box;
+    int name_w, key_w, width;
+
+    if (i < 0 || i >= 8)
+        return;
+    box = action_box(w, x + RAIL_W + (w->transfers_open ? TRANSFERS_W : 0), i);
+    name_w = ph_text_width(action_names[i], 1);
+    key_w = ph_text_width(action_keys[i], 1);
+    width = name_w + key_w + 34;
+    rounded(w->renderer, (SDL_Rect){x - width - 6, box.y + 7, width, 26}, 8, color_stage_raised);
+    draw_text(w->renderer, action_names[i], x - width + 6, box.y + 10, name_w + 4, 1, color_on_ink);
+    draw_text(w->renderer, action_keys[i], x - key_w - 18, box.y + 10, key_w + 4, 1, color_stage_muted);
+}
+
+static void draw_transfers(ph_window *w, int width, int height)
+{
+    SDL_Renderer *r = w->renderer;
+    transfer_boxes t = transfers_layout(w, width, height);
+    int inner = TRANSFERS_W - 32;
+    int y, list_end;
+
+    paint(r, (SDL_Rect){t.x, PH_WINDOW_BAR_PX, TRANSFERS_W, height - PH_WINDOW_BAR_PX}, 255, 255, 255, 255);
+    paint(r, (SDL_Rect){t.x, PH_WINDOW_BAR_PX, 1, height - PH_WINDOW_BAR_PX}, 226, 228, 232, 255);
+    draw_text(r, "Transfers", t.x + 16, PH_WINDOW_BAR_PX + 14, inner, 2, color_text);
+
+    rounded(r, (SDL_Rect){t.x + 16, t.files.y - 3, inner, t.files.h + 6}, 9, color_ground);
+    {
+        SDL_Rect on = w->transfer_tab ? t.clip : t.files;
+        rounded(r, on, 7, (SDL_Color){213, 216, 221, 255});
+        rounded(r, (SDL_Rect){on.x, on.y, on.w, on.h - 1}, 7, color_on_ink);
+        draw_text(r, "Files", t.files.x + (t.files.w - ph_text_width("Files", 1)) / 2, t.files.y + 5,
+                  t.files.w, 1, w->transfer_tab ? color_muted : color_text);
+        draw_text(r, "Clipboard", t.clip.x + (t.clip.w - ph_text_width("Clipboard", 1)) / 2,
+                  t.clip.y + 5, t.clip.w, 1, w->transfer_tab ? color_text : color_muted);
+    }
+
+    if (w->transfer_tab) {
+        draw_text(r, "Copy text or a picture on either side while Porthole is open on the iPhone, "
+                     "then paste on the other with Ctrl+V or Paste.",
+                  t.x + 16, t.card.y, inner, 1, color_muted);
+        return;
+    }
+
+    y = t.card.y;
+    if (w->transfer_active[0]) {
+        const char *name = !strncmp(w->transfer_active, "Sending ", 8) ? w->transfer_active + 8
+                                                                       : w->transfer_active;
+        Uint64 now = SDL_GetTicks64();
+        int track = t.card.w - 28, seg = track / 3;
+        int pos = (int)((now / 6) % (Uint64)(track + seg)) - seg;
+        int a = pos < 0 ? 0 : pos, b = pos + seg > track ? track : pos + seg;
+
+        surface_card(r, t.card);
+        file_tile(r, t.card.x + 14, t.card.y + 12, name);
+        draw_line_fit(r, name, t.card.x + 52, t.card.y + 10, t.card.w - 52 - 76, 1, color_text);
+        draw_text(r, "Sending to iPhone", t.card.x + 52, t.card.y + 30, t.card.w - 120, 1, color_muted);
+        rounded(r, t.cancel, 6, w->chrome_hover == CHROME_CANCEL ? color_line : color_ground);
+        draw_text(r, "Cancel", t.cancel.x + (t.cancel.w - ph_text_width("Cancel", 1)) / 2,
+                  t.cancel.y + 3, t.cancel.w, 1, color_text);
+        rounded(r, (SDL_Rect){t.card.x + 14, t.card.y + t.card.h - 14, track, 4}, 2, color_line);
+        if (b > a)
+            rounded(r, (SDL_Rect){t.card.x + 14 + a, t.card.y + t.card.h - 14, b - a, 4}, 2, color_text);
+        y = t.card.y + t.card.h + 18;
+    }
+
+    list_end = t.drop.y - 12;
+    if (t.drop.y < y + 60)
+        list_end = height - 12;
+    if (!w->transfer_count) {
+        if (!w->transfer_active[0])
+            draw_text(r, "Nothing sent yet. Share from any app on the iPhone to save files in Downloads, "
+                         "or drop files here to send them to the iPhone.",
+                      t.x + 16, y, inner, 1, color_muted);
+    } else {
+        draw_text(r, "RECENT", t.x + 16, y, inner, 1, color_muted);
+        y += 24;
+        for (int i = w->transfer_count - 1; i >= 0 && y + 44 <= list_end; i--) {
+            transfer_row row = read_transfer(w->transfer_lines[i]);
+            file_tile(r, t.x + 18, y + 4, row.title);
+            draw_line_fit(r, row.title, t.x + 56, y + 2, inner - 44, 1, color_text);
+            draw_text(r, row.sub, t.x + 56, y + 21, inner - 44, 1, row.sub_color);
+            y += 48;
+            if (i > 0)
+                paint(r, (SDL_Rect){t.x + 56, y - 4, inner - 40, 1}, 226, 228, 232, 255);
+        }
+    }
+
+    if (t.drop.y >= y + 12 && t.drop.y > t.card.y + 40) {
+        int cx = t.drop.x + t.drop.w / 2;
+        dashed_box(r, t.drop, 10);
+        SDL_SetRenderDrawColor(r, 92, 96, 104, 255);
+        stroke(r, cx, t.drop.y + 16, cx, t.drop.y + 30);
+        stroke(r, cx - 5, t.drop.y + 21, cx, t.drop.y + 16);
+        stroke(r, cx + 5, t.drop.y + 21, cx, t.drop.y + 16);
+        {
+            const char *head = "Drop files to send to iPhone";
+            const char *sub = "Pictures go to Photos, the rest to Files";
+            draw_text(r, head, cx - ph_text_width(head, 1) / 2, t.drop.y + 38, inner, 1, color_text);
+            draw_text(r, sub, cx - ph_text_width(sub, 1) / 2, t.drop.y + 60, inner, 1, color_muted);
+        }
+    }
+}
+
 static void draw_mirror_panels(ph_window *w, int width, int height)
 {
     int column = picture_column_w(w, width);
-    int x = column;
 
-    if (w->rail_open) {
-        paint(w->renderer, (SDL_Rect){x, PH_WINDOW_BAR_PX, RAIL_W, height - PH_WINDOW_BAR_PX},
-              11, 12, 13, 255);
-        for (int i = 0; i < 8; i++) {
-            SDL_Rect box = action_box(w, width, i);
-            if (w->chrome_hover == CHROME_ACT + i)
-                rounded(w->renderer, box, 8, (SDL_Color){40, 42, 46, 255});
-            draw_action_icon(w->renderer, i, box);
-        }
-        x += RAIL_W;
-    }
-    if (w->transfers_open) {
-        SDL_Rect files, clip;
-        const char *body = w->transfer_tab
-            ? "Copy on either side while Porthole is open on the iPhone. Paste there with Ctrl+V."
-            : "Share from any app on the iPhone. Files save to Downloads.\n\n"
-              "Hold a photo in this picture, then drag it out. That takes the original file.";
-        paint(w->renderer, (SDL_Rect){x, PH_WINDOW_BAR_PX, TRANSFERS_W, height - PH_WINDOW_BAR_PX},
-              255, 255, 255, 255);
-        draw_text(w->renderer, "Transfers", x + 14, PH_WINDOW_BAR_PX + 12, TRANSFERS_W - 28, 2, color_text);
-        files = (SDL_Rect){x + 12, PH_WINDOW_BAR_PX + 40, (TRANSFERS_W - 32) / 2, 28};
-        clip = files;
-        clip.x += files.w + 8;
-        rounded(w->renderer, files, 6, w->transfer_tab ? (SDL_Color){243, 244, 246, 255} : color_text);
-        rounded(w->renderer, clip, 6, w->transfer_tab ? color_text : (SDL_Color){243, 244, 246, 255});
-        draw_text(w->renderer, "Files", files.x + 18, files.y + 4, files.w - 8, 1,
-                  w->transfer_tab ? color_text : color_on_ink);
-        draw_text(w->renderer, "Clipboard", clip.x + 6, clip.y + 4, clip.w - 8, 1,
-                  w->transfer_tab ? color_on_ink : color_text);
-        draw_text(w->renderer, body, x + 14, PH_WINDOW_BAR_PX + 80, TRANSFERS_W - 28, 1, color_muted);
-    }
+    if (w->rail_open)
+        draw_controls(w, column, height);
+    if (w->transfers_open)
+        draw_transfers(w, width, height);
+    if (w->rail_open)
+        draw_action_tip(w, column);
 }
 
 void ph_window_redraw(ph_window *w)
@@ -1321,6 +1825,8 @@ void ph_window_redraw(ph_window *w)
         draw_diagnostics(w, width, height, PH_WINDOW_BAR_PX);
     if (w->setup.visible)
         draw_setup(w, width, height, PH_WINDOW_BAR_PX);
+    if (w->settings_visible && !w->help_visible && !w->setup.visible)
+        draw_settings(w, width, height);
     draw_bar(w, width, height);
     SDL_RenderSetScale(w->renderer, 1, 1);
     SDL_RenderPresent(w->renderer);
@@ -1344,7 +1850,7 @@ bool ph_window_picture_point(const ph_window *w, int x, int y, double *vx, doubl
     int win_w, win_h;
     SDL_Rect r;
 
-    if (!w->has_picture || w->help_visible || w->setup.visible)
+    if (!w->has_picture || w->help_visible || w->setup.visible || w->settings_visible)
         return false;
     if (y < PH_WINDOW_BAR_PX)
         return false;
@@ -1473,6 +1979,44 @@ bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
             w->new_code = true;
             ph_window_redraw(w);
         }
+        else if (hit == CHROME_SETTINGS) {
+            w->settings_visible = !w->settings_visible;
+            ph_window_redraw(w);
+        }
+        else if (hit == CHROME_CANCEL) {
+            w->transfer_cancel = true;
+            ph_window_redraw(w);
+        }
+        else if (hit >= CHROME_SET && hit < CHROME_SET + 10) {
+            int index = hit - CHROME_SET;
+            if (index == 0)
+                push_shortcut(w, SDL_SCANCODE_F2, KMOD_NONE);
+            else if (index == 1)
+                w->pending_action = PH_WINDOW_ACTION_FEED;
+            else if (index == 2) {
+                w->ctrl_command = !w->ctrl_command;
+                w->pending_action = PH_WINDOW_ACTION_SAVE;
+            } else if (index == 3) {
+                w->release_blur = !w->release_blur;
+                w->pending_action = PH_WINDOW_ACTION_SAVE;
+            } else if (index == 4) {
+                w->next_relative = !w->next_relative;
+                w->pending_action = PH_WINDOW_ACTION_SAVE;
+            } else if (index == 5)
+                w->pending_action = PH_WINDOW_ACTION_PAUSE;
+            else if (index == 6)
+                w->pending_action = PH_WINDOW_ACTION_MUTE;
+            else if (index == 7 && w->pull_hint[0]) {
+                if (SDL_SetClipboardText(w->pull_hint) == 0)
+                    w->copied_until = SDL_GetTicks64() + 1800;
+            } else if (index == 8)
+                w->pending_action = PH_WINDOW_ACTION_FORGET;
+            else if (index == 9)
+                w->pending_action = PH_WINDOW_ACTION_QUIT;
+            if (index == 0)
+                w->settings_visible = false;
+            ph_window_redraw(w);
+        }
         else if (hit == CHROME_SETUP)
             push_shortcut(w, SDL_SCANCODE_F2, KMOD_NONE);
         else if (hit == CHROME_HELP)
@@ -1481,8 +2025,10 @@ bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
             push_shortcut(w, SDL_SCANCODE_F3, KMOD_NONE);
         else if (hit == CHROME_RAIL)
             flip_panel(w, &w->rail_open, RAIL_W);
-        else if (hit == CHROME_TRANSFERS)
+        else if (hit == CHROME_TRANSFERS) {
+            w->transfers_unseen = false;
             flip_panel(w, &w->transfers_open, TRANSFERS_W);
+        }
         else if (hit == CHROME_TAB_FILES || hit == CHROME_TAB_CLIP) {
             w->transfer_tab = hit == CHROME_TAB_CLIP;
             ph_window_redraw(w);
