@@ -42,6 +42,7 @@ struct ph_window {
     uint64_t discarded_packets, superseded_frames;
     SDL_Texture *lockup;
     SDL_Texture *mark;
+    SDL_Texture *mark_on_dark; /* the same mark, light, for the dark phone bar */
     char title[320];
     char pull_hint[96];
     char pc_name[64];
@@ -1364,11 +1365,9 @@ static void draw_bar(ph_window *w, int width, int height)
     (void)height;
     paint(w->renderer, (SDL_Rect){0, 0, width, PH_WINDOW_BAR_PX}, live ? 11 : 255, live ? 12 : 255,
           live ? 13 : 255, 255);
-    if (live) {
-        /* The brand mark is ink; on the dark bar draw the porthole ring in white. */
-        ring(w->renderer, 19, 16, 8, 6, color_on_ink, color_stage);
-        paint(w->renderer, (SDL_Rect){15, 13, 8, 2}, 255, 255, 255, 230);
-        paint(w->renderer, (SDL_Rect){16, 17, 6, 2}, 255, 255, 255, 150);
+    if (live && w->mark_on_dark) {
+        SDL_Rect mark = {10, 7, 18, 18};
+        SDL_RenderCopy(w->renderer, w->mark_on_dark, NULL, &mark);
     } else if (w->mark) {
         SDL_Rect mark = {10, 7, 18, 18};
         SDL_RenderCopy(w->renderer, w->mark, NULL, &mark);
@@ -1503,6 +1502,21 @@ ph_window *ph_window_create(const char *title)
         goto fail;
     w->lockup = texture_from_rgba(w->renderer, ph_brand_lockup, ph_brand_lockup_w, ph_brand_lockup_h);
     w->mark = texture_from_rgba(w->renderer, ph_brand_icon, ph_brand_icon_w, ph_brand_icon_h);
+    {
+        /* Inverting keeps the shape and its grey reflection: ink becomes white. */
+        size_t n = (size_t)ph_brand_icon_w * (size_t)ph_brand_icon_h * 4;
+        unsigned char *light = malloc(n);
+        if (light) {
+            for (size_t i = 0; i < n; i += 4) {
+                light[i] = (unsigned char)(255 - ph_brand_icon[i]);
+                light[i + 1] = (unsigned char)(255 - ph_brand_icon[i + 1]);
+                light[i + 2] = (unsigned char)(255 - ph_brand_icon[i + 2]);
+                light[i + 3] = ph_brand_icon[i + 3];
+            }
+            w->mark_on_dark = texture_from_rgba(w->renderer, light, ph_brand_icon_w, ph_brand_icon_h);
+            free(light);
+        }
+    }
     {
         SDL_Surface *icon = SDL_CreateRGBSurfaceWithFormatFrom(
             (void *)ph_brand_icon, ph_brand_icon_w, ph_brand_icon_h, 32, ph_brand_icon_w * 4,
@@ -2584,6 +2598,8 @@ void ph_window_destroy(ph_window *w)
         SDL_DestroyTexture(w->lockup);
     if (w->mark)
         SDL_DestroyTexture(w->mark);
+    if (w->mark_on_dark)
+        SDL_DestroyTexture(w->mark_on_dark);
     if (w->renderer)
         ph_text_detach(w->renderer);
     if (w->renderer)
