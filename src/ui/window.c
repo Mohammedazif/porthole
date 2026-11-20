@@ -44,6 +44,7 @@ struct ph_window {
     char title[320];
     char pull_hint[96];
     bool share_checked, share_available;
+    bool new_code;
     Uint64 copied_until;
     int modal_scroll, modal_max_scroll;
     int chrome_hover;
@@ -60,7 +61,7 @@ static void place_window(ph_window *w, int pic_w, int pic_h, bool center);
 
 enum {
     CHROME_NONE, CHROME_MIN, CHROME_MAX, CHROME_CLOSE, CHROME_DRAG,
-    CHROME_SETUP, CHROME_HELP, CHROME_STATS, CHROME_COPY,
+    CHROME_SETUP, CHROME_HELP, CHROME_STATS, CHROME_COPY, CHROME_NEW_CODE,
     CHROME_RAIL, CHROME_TRANSFERS, CHROME_TAB_FILES, CHROME_TAB_CLIP,
     CHROME_ACT
 };
@@ -134,7 +135,7 @@ static void draw_button(ph_window *w, SDL_Rect box, const char *label, bool prim
 }
 
 typedef struct connect_boxes {
-    SDL_Rect copy, setup, help, stats;
+    SDL_Rect copy, setup, help, stats, fresh;
     int left, inner;
 } connect_boxes;
 
@@ -156,6 +157,7 @@ static connect_boxes connect_layout(int width, int height, int top)
     g.setup = (SDL_Rect){g.left + bw + gap, button_y, inner - bw - gap, 40};
     g.help = (SDL_Rect){g.left, button_y + 48, 56, 22};
     g.stats = (SDL_Rect){g.left + 72, button_y + 48, 56, 22};
+    g.fresh = (SDL_Rect){g.left + inner - 92, button_y + 48, 92, 22};
     return g;
 }
 
@@ -288,6 +290,12 @@ static void draw_waiting(ph_window *w, int width, int height, int top)
     draw_button(w, g.setup, "Set up controls", false, false, w->chrome_hover == CHROME_SETUP);
     draw_text(w->renderer, "F1  Help", g.help.x, g.help.y, 80, 1, color_muted);
     draw_text(w->renderer, "F3  Stats", g.stats.x, g.stats.y, 90, 1, color_muted);
+    if (have) {
+        const char *label = "New code";
+        int tw = ph_text_width(label, 1);
+        SDL_Color ink = w->chrome_hover == CHROME_NEW_CODE ? color_text : color_muted;
+        draw_text(w->renderer, label, g.fresh.x + g.fresh.w - tw, g.fresh.y, tw + 2, 1, ink);
+    }
 }
 
 static int card_height(const char *title, const char *body, int inner, int scale)
@@ -722,6 +730,7 @@ static int chrome_at(const ph_window *w, int win_w, int win_h, int x, int y)
         if (SDL_PointInRect(&point, &g.setup)) return CHROME_SETUP;
         if (SDL_PointInRect(&point, &g.help)) return CHROME_HELP;
         if (SDL_PointInRect(&point, &g.stats)) return CHROME_STATS;
+        if (SDL_PointInRect(&point, &g.fresh)) return address[0] ? CHROME_NEW_CODE : CHROME_NONE;
     }
     return CHROME_NONE;
 }
@@ -936,6 +945,14 @@ void ph_window_set_pull_hint(ph_window *w, const char *hint)
     snprintf(w->pull_hint, sizeof w->pull_hint, "%s", hint ? hint : "");
     if (w->help_visible || !w->has_picture)
         ph_window_redraw(w);
+}
+
+bool ph_window_take_new_code(ph_window *w)
+{
+    if (!w || !w->new_code)
+        return false;
+    w->new_code = false;
+    return true;
 }
 
 void ph_window_set_share_available(ph_window *w, bool available)
@@ -1450,6 +1467,10 @@ bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
             toggle_zoom(w->window);
         else if (hit == CHROME_COPY && w->pull_hint[0]) {
             if (SDL_SetClipboardText(w->pull_hint) == 0) w->copied_until = SDL_GetTicks64() + 1800;
+            ph_window_redraw(w);
+        }
+        else if (hit == CHROME_NEW_CODE && w->pull_hint[0]) {
+            w->new_code = true;
             ph_window_redraw(w);
         }
         else if (hit == CHROME_SETUP)

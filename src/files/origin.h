@@ -9,6 +9,8 @@
 
 /* The phone app connects here and answers a picture hash with the original file. */
 #define PH_PULL_PORT 47731
+/* Bonjour type the iPhone browses to list this PC. The pairing code is not in the advert. */
+#define PH_PULL_SERVICE "_porthole-pc._tcp"
 /* A long 4K video can be several gigabytes. */
 #define PH_PULL_MAX_BYTES (16ull * 1024ull * 1024ull * 1024ull)
 
@@ -25,6 +27,9 @@ typedef enum ph_origin_result {
  * NULL if the socket cannot be opened; dragging still saves the screen picture. */
 ph_origin *ph_origin_start(char *hint, size_t hint_len);
 void ph_origin_stop(ph_origin *origin);
+
+/* Replaces the pairing code, drops the connected phone, and rewrites hint. */
+bool ph_origin_renew(ph_origin *origin, char *hint, size_t hint_len);
 
 /* Asks the connected phone. thumb is PH_PICTURE_THUMB squared luma cells or NULL;
  * detail is PH_PICTURE_DETAIL squared cells of the same picture, or NULL. It is sent

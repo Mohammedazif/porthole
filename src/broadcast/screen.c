@@ -187,7 +187,7 @@ ph_screen *ph_screen_start(const ph_screen_callbacks *callbacks)
         close(s->listen_fd);
         goto fail;
     }
-    s->bonjour = ph_bonjour_advertise("Porthole", PH_SCREEN_SERVICE, PH_SCREEN_PORT);
+    s->bonjour = ph_bonjour_advertise("Porthole", PH_SCREEN_SERVICE, PH_SCREEN_PORT, NULL, 0);
     PH_LOGI("screen broadcast: listening on port %d", PH_SCREEN_PORT);
     return s;
 fail:

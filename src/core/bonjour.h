@@ -8,7 +8,9 @@
  * loads it, so the build needs no extra dependency. NULL when it is unavailable. */
 typedef struct ph_bonjour ph_bonjour;
 
-ph_bonjour *ph_bonjour_advertise(const char *name, const char *type, uint16_t port);
+/* txt is a DNS-SD TXT record (length byte, then text, repeated). NULL advertises none. */
+ph_bonjour *ph_bonjour_advertise(const char *name, const char *type, uint16_t port,
+                                 const void *txt, uint16_t txt_len);
 void ph_bonjour_stop(ph_bonjour *bonjour);
 
 #endif

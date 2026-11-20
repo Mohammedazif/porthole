@@ -2796,6 +2796,11 @@ int ph_app_run(const ph_app_options *opt)
             } while (SDL_PollEvent(&e));
         }
         ph_window_tick(a.win);
+        if (ph_window_take_new_code(a.win) && a.origin) {
+            char hint[96];
+            if (ph_origin_renew(a.origin, hint, sizeof hint) && hint[0])
+                ph_window_set_pull_hint(a.win, hint);
+        }
         sync_clipboard(&a);
         follow_pull(&a);
         ph_transfer_card_tick(a.card, SDL_GetTicks64());

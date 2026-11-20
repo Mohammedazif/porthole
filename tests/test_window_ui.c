@@ -97,6 +97,13 @@ int main(int argc, char **argv)
     char *clipboard = SDL_GetClipboardText();
     CHECK(clipboard && !strcmp(clipboard, "192.0.2.42:47731  SAMPLE42"));
     SDL_free(clipboard);
+    SDL_Event fresh = {.type = SDL_MOUSEBUTTONDOWN};
+    fresh.button.button = SDL_BUTTON_LEFT; fresh.button.x = 394; fresh.button.y = 703;
+    CHECK(ph_window_chrome_event(w, &fresh));
+    fresh.type = SDL_MOUSEBUTTONUP;
+    CHECK(ph_window_chrome_event(w, &fresh));
+    CHECK(ph_window_take_new_code(w));
+    CHECK(!ph_window_take_new_code(w));
 
     SDL_Renderer *renderer = SDL_GetRenderer(native);
     const char *paragraph = "Readable guidance wraps consistently, including longlonglongwords.";

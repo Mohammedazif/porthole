@@ -1,5 +1,6 @@
 #include "files/origin.h"
 
+#include "core/bonjour.h"
 #include "core/config.h"
 #include "core/log.h"
 #include "files/clip.h"
@@ -47,6 +48,7 @@ struct ph_origin {
     char dir[512];
     char path[768];
     char token[16];
+    ph_bonjour *bonjour;
     char peer[64]; /* address of the connection being served */
     char known[64]; /* last phone that gave the right code */
     bool clip_ready;
@@ -88,6 +90,55 @@ static void make_token(char *out, size_t len)
     if (f)
         fclose(f);
     snprintf(out, len, "%02X%02X%02X%02X", bytes[0], bytes[1], bytes[2], bytes[3]);
+}
+
+static void fill_hint(char *hint, size_t hint_len, const char *ip, const char *token)
+{
+    if (hint && hint_len)
+        snprintf(hint, hint_len, "%s:%d  %s", ip, PH_PULL_PORT, token);
+}
+
+static void service_name(char *out, size_t len)
+{
+    char *dot;
+
+    if (!out || len < 2)
+        return;
+    memset(out, 0, len);
+    if (gethostname(out, len - 1) != 0 || !out[0])
+        snprintf(out, len, "Porthole");
+    dot = strchr(out, '.');
+    if (dot == out || !out[0])
+        snprintf(out, len, "Porthole");
+    else if (dot)
+        *dot = 0;
+}
+
+/* DNS-SD TXT: one length byte, then "addr=<ipv4>". Empty when there is no LAN address. */
+static uint16_t txt_addr(uint8_t *out, size_t cap, const char *ip)
+{
+    char item[72];
+    int n;
+
+    if (!ip || !strcmp(ip, "this-pc"))
+        return 0;
+    n = snprintf(item, sizeof item, "addr=%s", ip);
+    if (n < 1 || n > 255 || (size_t)n + 1 > cap)
+        return 0;
+    out[0] = (uint8_t)n;
+    memcpy(out + 1, item, (size_t)n);
+    return (uint16_t)(n + 1);
+}
+
+static void advertise_pc(ph_origin *o, const char *ip)
+{
+    uint8_t txt[80];
+    uint16_t txt_len = txt_addr(txt, sizeof txt, ip);
+    char name[64];
+
+    service_name(name, sizeof name);
+    o->bonjour = ph_bonjour_advertise(name, PH_PULL_SERVICE, PH_PULL_PORT,
+                                      txt_len ? txt : NULL, txt_len);
 }
 
 static void lan_address(char *out, size_t len)
@@ -460,9 +511,16 @@ static void serve_client(ph_origin *o, int fd)
     pthread_mutex_unlock(&o->lock);
     if (!read_line(fd, line, sizeof line))
         goto done;
-    if (strncmp(line, "HELLO ", 6) != 0 || strcmp(line + 6, o->token) != 0) {
-        PH_LOGW("photo pull: rejected a connection");
-        goto done;
+    {
+        char expect[16];
+
+        pthread_mutex_lock(&o->lock);
+        snprintf(expect, sizeof expect, "%s", o->token);
+        pthread_mutex_unlock(&o->lock);
+        if (strncmp(line, "HELLO ", 6) != 0 || strcmp(line + 6, expect) != 0) {
+            PH_LOGW("photo pull: rejected a connection");
+            goto done;
+        }
     }
     /* SYNC asks a current phone to exchange clipboards. An older phone ignores
      * the line. It must not send clipboard bytes first: an older PC treats any
@@ -697,10 +755,33 @@ ph_origin *ph_origin_start(char *hint, size_t hint_len)
         return NULL;
     }
     lan_address(ip, sizeof ip);
-    if (hint && hint_len)
-        snprintf(hint, hint_len, "%s:%d  %s", ip, PH_PULL_PORT, o->token);
+    advertise_pc(o, ip);
+    fill_hint(hint, hint_len, ip, o->token);
     PH_LOGI("photo pull: %s:%d code %s", ip, PH_PULL_PORT, o->token);
     return o;
+}
+
+bool ph_origin_renew(ph_origin *o, char *hint, size_t hint_len)
+{
+    char token[16], ip[64];
+    int client = -1;
+
+    if (!o)
+        return false;
+    make_token(token, sizeof token);
+    if (!ph_config_write_line("pull-token", token))
+        return false;
+    pthread_mutex_lock(&o->lock);
+    snprintf(o->token, sizeof o->token, "%s", token);
+    o->known[0] = 0;
+    client = o->client_fd;
+    pthread_mutex_unlock(&o->lock);
+    if (client >= 0)
+        shutdown(client, SHUT_RDWR);
+    lan_address(ip, sizeof ip);
+    fill_hint(hint, hint_len, ip, token);
+    PH_LOGI("photo pull: new code %s", token);
+    return true;
 }
 
 void ph_origin_stop(ph_origin *o)
@@ -719,6 +800,7 @@ void ph_origin_stop(ph_origin *o)
     shutdown(o->listen_fd, SHUT_RDWR);
     pthread_join(o->thread, NULL);
     close(o->listen_fd);
+    ph_bonjour_stop(o->bonjour);
     free(o->out_data);
     free(o->in_data);
     pthread_mutex_destroy(&o->lock);
@@ -876,6 +958,14 @@ ph_origin *ph_origin_start(char *hint, size_t hint_len)
 void ph_origin_stop(ph_origin *origin)
 {
     (void)origin;
+}
+
+bool ph_origin_renew(ph_origin *origin, char *hint, size_t hint_len)
+{
+    (void)origin;
+    if (hint && hint_len)
+        hint[0] = 0;
+    return false;
 }
 
 bool ph_origin_ask(ph_origin *origin, uint64_t hash, double aspect, const uint8_t *thumb,

@@ -32,6 +32,9 @@ void ph_window_set_detail(ph_window *w, const char *detail);
 /* Shown in help so the iPhone app can connect. Empty hides the line. */
 void ph_window_set_pull_hint(ph_window *w, const char *hint);
 
+/* True once, after New code is clicked on the connect screen. */
+bool ph_window_take_new_code(ph_window *w);
+
 /* Whether both the companion link and the screen-sharing listener started. */
 void ph_window_set_share_available(ph_window *w, bool available);
 

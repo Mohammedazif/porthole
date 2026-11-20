@@ -252,7 +252,7 @@ ph_inbox *ph_inbox_start(const char *dir, const ph_inbox_callbacks *callbacks)
         close(in->listen_fd);
         goto fail;
     }
-    in->bonjour = ph_bonjour_advertise("Porthole", PH_INBOX_SERVICE, PH_INBOX_PORT);
+    in->bonjour = ph_bonjour_advertise("Porthole", PH_INBOX_SERVICE, PH_INBOX_PORT, NULL, 0);
     PH_LOGI("share: listening on port %d", PH_INBOX_PORT);
     return in;
 fail:
