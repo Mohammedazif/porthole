@@ -396,6 +396,8 @@ static void draw_help(ph_window *w, int width, int height, int top)
                        "Alt+L: hold\n"
                        "Alt+U: bottom swipe\n"
                        "Alt+K: on or off\n"
+                       "Alt+V types into the field\n"
+                       "Copy both ways with the app\n"
                        "PC keys use Bluetooth\n"
                        "Esc cancels a hold\n"
                        "Media keys: playback";

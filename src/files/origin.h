@@ -48,4 +48,15 @@ bool ph_origin_peer(ph_origin *origin, char *address, size_t len);
 /* One result for the latest ask. FILE writes the received path. */
 ph_origin_result ph_origin_take(ph_origin *origin, char *path, size_t path_len);
 
+/* Clipboard on the same link. kind is 'T' (UTF-8) or 'P' (PNG).
+ * put keeps the newest item until the phone has asked for clipboard sync.
+ * take hands back one item the phone sent. Caller frees *data. */
+#define PH_ORIGIN_CLIP_SENT 1u
+#define PH_ORIGIN_CLIP_GOT 2u
+#define PH_ORIGIN_CLIP_READY 4u
+
+bool ph_origin_put_clip(ph_origin *origin, char kind, const void *data, size_t len);
+bool ph_origin_take_clip(ph_origin *origin, char *kind, void **data, size_t *len);
+unsigned ph_origin_clip_flags(ph_origin *origin);
+
 #endif

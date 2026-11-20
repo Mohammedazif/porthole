@@ -30,6 +30,7 @@
 #include "control/setup.h"
 #include "core/config.h"
 #include "core/log.h"
+#include "files/hostclip.h"
 #include "files/inbox.h"
 #include "files/origin.h"
 #include "files/picture_hash.h"
@@ -151,6 +152,7 @@ typedef struct app {
     int place_x, place_y;
     Uint64 place_at;
     ph_origin *origin;
+    Uint64 clip_poll_at;
     char pull_dir[640];
     /* Original file for this drag; empty while the phone is looking. */
     char pull_path[1 << 16];
@@ -2556,6 +2558,34 @@ static void *usb_thread_main(void *user)
 #endif
 }
 
+static void sync_clipboard(app *a)
+{
+    unsigned flags;
+    char kind = 0;
+    void *data = NULL;
+    size_t len = 0;
+    Uint64 now;
+
+    ph_hostclip_pump();
+    flags = ph_origin_clip_flags(a->origin);
+    if (ph_origin_take_clip(a->origin, &kind, &data, &len)) {
+        ph_hostclip_apply(kind, data, len);
+        free(data);
+    }
+    if (flags & PH_ORIGIN_CLIP_SENT)
+        ph_window_set_detail(a->win, "On the iPhone, paste with Ctrl+V");
+    if (flags & PH_ORIGIN_CLIP_GOT)
+        ph_window_set_detail(a->win, "iPhone clipboard is on this PC");
+    now = SDL_GetTicks64();
+    if (now - a->clip_poll_at < 400)
+        return;
+    a->clip_poll_at = now;
+    if (!ph_hostclip_changed(&kind, &data, &len))
+        return;
+    ph_origin_put_clip(a->origin, kind, data, len);
+    free(data);
+}
+
 int ph_app_run(const ph_app_options *opt)
 {
     app a = {.opt = opt};
@@ -2636,6 +2666,7 @@ int ph_app_run(const ph_app_options *opt)
     if (a.ev_base == (Uint32)-1 || !frame || !a.view_frame || !a.pointer_baseline || !a.pointer_reference || !a.pointer_after
         || !a.win || !a.dec)
         goto done;
+    ph_hostclip_init();
     a.ghost = ph_drag_ghost_create();
     if (!a.ghost)
         PH_LOGW("photo drag image unavailable");
@@ -2703,6 +2734,7 @@ int ph_app_run(const ph_app_options *opt)
             } while (SDL_PollEvent(&e));
         }
         ph_window_tick(a.win);
+        sync_clipboard(&a);
         follow_pull(&a);
         if (a.keyboard_lift_at && SDL_GetTicks64() >= a.keyboard_lift_at) {
             a.keyboard_lift_at = 0;
@@ -2756,6 +2788,7 @@ done:
     ph_screen_stop(a.screen); /* before the origin its allow callback reads */
     ph_inbox_stop(a.inbox);
     ph_origin_stop(a.origin);
+    ph_hostclip_shutdown();
     if (a.usb_started) {
         atomic_store(&a.usb_stop, true);
         pthread_join(a.usb_thread, NULL);

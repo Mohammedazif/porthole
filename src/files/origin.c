@@ -2,6 +2,7 @@
 
 #include "core/config.h"
 #include "core/log.h"
+#include "files/clip.h"
 #include "files/picture_hash.h"
 #include "files/pull.h"
 
@@ -48,6 +49,16 @@ struct ph_origin {
     char token[16];
     char peer[64]; /* address of the connection being served */
     char known[64]; /* last phone that gave the right code */
+    bool clip_ready;
+    bool out_pending;
+    char out_kind;
+    uint8_t *out_data;
+    size_t out_len;
+    bool in_ready;
+    char in_kind;
+    uint8_t *in_data;
+    size_t in_len;
+    bool note_sent, note_got, note_ready;
 };
 
 static bool token_ok(const char *s)
@@ -189,13 +200,143 @@ static bool save_body(int fd, const char *dir, const char *name, unsigned long l
     return true;
 }
 
-/* The phone sends nothing between requests, so an idle socket that turns
- * readable has been closed or reset. */
-static bool client_gone(int fd)
+static bool read_exact(int fd, void *buf, size_t len)
 {
-    struct pollfd p = {.fd = fd, .events = POLLIN};
+    char *p = buf;
 
-    return poll(&p, 1, 0) > 0;
+    while (len) {
+        ssize_t n = recv(fd, p, len, 0);
+
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return false;
+        }
+        if (n == 0)
+            return false;
+        p += n;
+        len -= (size_t)n;
+    }
+    return true;
+}
+
+/* SYNC and CLIP ride the photo link. *consumed is set when this function
+ * took the line (and, for CLIP, the bytes after it). */
+static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consumed)
+{
+    char kind;
+    size_t size;
+    uint8_t *body;
+
+    *consumed = false;
+    if (strcmp(line, "SYNC") == 0) {
+        pthread_mutex_lock(&o->lock);
+        if (!o->clip_ready)
+            PH_LOGI("clipboard: iPhone will copy and paste");
+        o->clip_ready = true;
+        o->note_ready = true;
+        pthread_mutex_unlock(&o->lock);
+        *consumed = true;
+        return true;
+    }
+    if (strncmp(line, "CLIP ", 5) != 0)
+        return true;
+    *consumed = true;
+    if (!ph_clip_header(line, &kind, &size)) {
+        PH_LOGW("clipboard: ignored a bad item from the iPhone");
+        return false;
+    }
+    body = malloc(size);
+    if (!body || !read_exact(fd, body, size)) {
+        free(body);
+        return false;
+    }
+    pthread_mutex_lock(&o->lock);
+    free(o->in_data);
+    o->in_data = body;
+    o->in_len = size;
+    o->in_kind = kind;
+    o->in_ready = true;
+    o->note_got = true;
+    pthread_mutex_unlock(&o->lock);
+    PH_LOGI("clipboard: received %s from the iPhone (%zu bytes)", kind == 'P' ? "an image" : "text",
+            size);
+    return true;
+}
+
+static bool send_outgoing(ph_origin *o, int fd)
+{
+    uint8_t *data = NULL;
+    size_t len = 0;
+    char kind = 0;
+    char hdr[64];
+    int hdr_len;
+    bool ok;
+
+    pthread_mutex_lock(&o->lock);
+    if (o->clip_ready && o->out_pending && o->out_data) {
+        data = o->out_data;
+        len = o->out_len;
+        kind = o->out_kind;
+        o->out_data = NULL;
+        o->out_len = 0;
+        o->out_pending = false;
+    }
+    pthread_mutex_unlock(&o->lock);
+    if (!data)
+        return true;
+    hdr_len = snprintf(hdr, sizeof hdr, "CLIP %c %zu\n", kind, len);
+    ok = hdr_len > 0 && (size_t)hdr_len < sizeof hdr && send_all(fd, hdr, (size_t)hdr_len)
+         && send_all(fd, data, len);
+    if (!ok) {
+        pthread_mutex_lock(&o->lock);
+        if (!o->out_pending) {
+            o->out_data = data;
+            o->out_len = len;
+            o->out_kind = kind;
+            o->out_pending = true;
+            data = NULL;
+        }
+        pthread_mutex_unlock(&o->lock);
+        free(data);
+        return false;
+    }
+    free(data);
+    pthread_mutex_lock(&o->lock);
+    o->note_sent = true;
+    pthread_mutex_unlock(&o->lock);
+    PH_LOGI("clipboard: sent %s to the iPhone (%zu bytes)", kind == 'P' ? "an image" : "text", len);
+    return true;
+}
+
+/* Reads clipboard messages that arrived while no photo request is in flight,
+ * then sends one waiting PC clipboard item. */
+static bool service_idle(ph_origin *o, int fd)
+{
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        struct pollfd p = {.fd = fd, .events = POLLIN};
+        char line[160];
+        bool consumed = false;
+        int pr = poll(&p, 1, 0);
+
+        if (pr < 0) {
+            if (errno == EINTR)
+                continue;
+            return false;
+        }
+        if (pr == 0)
+            break;
+        if ((p.revents & (POLLERR | POLLHUP | POLLNVAL)) && !(p.revents & POLLIN))
+            return false;
+        if (!read_line(fd, line, sizeof line))
+            return false;
+        if (!accept_clip_line(o, fd, line, &consumed))
+            return false;
+        (void)consumed;
+    }
+    return send_outgoing(o, fd);
 }
 
 static bool client_waiting(int listen_fd)
@@ -212,16 +353,8 @@ static bool wait_for_ask(ph_origin *o, int fd)
     while (!o->ask && !o->stop) {
         struct timespec until;
 
-        clock_gettime(CLOCK_REALTIME, &until);
-        until.tv_nsec += 250 * 1000000L;
-        if (until.tv_nsec >= 1000000000L) {
-            until.tv_sec++;
-            until.tv_nsec -= 1000000000L;
-        }
-        if (pthread_cond_timedwait(&o->cond, &o->lock, &until) != ETIMEDOUT || o->ask || o->stop)
-            continue;
         pthread_mutex_unlock(&o->lock);
-        if (client_gone(fd)) {
+        if (!service_idle(o, fd)) {
             PH_LOGI("photo pull: iPhone disconnected");
             pthread_mutex_lock(&o->lock);
             return false;
@@ -232,6 +365,17 @@ static bool wait_for_ask(ph_origin *o, int fd)
             return false;
         }
         pthread_mutex_lock(&o->lock);
+        if (o->ask || o->stop)
+            break;
+        clock_gettime(CLOCK_REALTIME, &until);
+        until.tv_nsec += 250 * 1000000L;
+        if (until.tv_nsec >= 1000000000L) {
+            until.tv_sec++;
+            until.tv_nsec -= 1000000000L;
+        }
+        if (o->out_pending && o->clip_ready)
+            continue;
+        pthread_cond_timedwait(&o->cond, &o->lock, &until);
     }
     return true;
 }
@@ -320,7 +464,10 @@ static void serve_client(ph_origin *o, int fd)
         PH_LOGW("photo pull: rejected a connection");
         goto done;
     }
-    if (!send_all(fd, "OK\n", 3))
+    /* SYNC asks a current phone to exchange clipboards. An older phone ignores
+     * the line. It must not send clipboard bytes first: an older PC treats any
+     * idle input as a disconnect. */
+    if (!send_all(fd, "OK\n", 3) || !send_all(fd, "SYNC\n", 5))
         goto done;
     pthread_mutex_lock(&o->lock);
     o->have_client = true;
@@ -395,13 +542,33 @@ static void serve_client(ph_origin *o, int fd)
         }
         ask_line[used++] = '\n';
         sent_at = now_ms();
-        if (!send_all(fd, ask_line, used) || !read_line(fd, line, sizeof line)) {
+        if (!send_all(fd, ask_line, used)) {
             PH_LOGW("photo pull: iPhone did not send the file");
             pthread_mutex_lock(&o->lock);
             o->ready = PH_ORIGIN_MISS;
             o->ready_id = id;
             pthread_mutex_unlock(&o->lock);
             break;
+        }
+        {
+            bool consumed = true;
+            bool ok = true;
+
+            /* A clipboard item can arrive before FILE or MISS. */
+            while (consumed) {
+                if (!read_line(fd, line, sizeof line) || !accept_clip_line(o, fd, line, &consumed)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok) {
+                PH_LOGW("photo pull: iPhone did not send the file");
+                pthread_mutex_lock(&o->lock);
+                o->ready = PH_ORIGIN_MISS;
+                o->ready_id = id;
+                pthread_mutex_unlock(&o->lock);
+                break;
+            }
         }
         answer_at = now_ms();
         if (strncmp(line, "MISS", 4) == 0 && (line[4] == '\0' || line[4] == ' ')) {
@@ -449,6 +616,11 @@ done:
     pthread_mutex_lock(&o->lock);
     o->have_client = false;
     o->client_fd = -1;
+    o->clip_ready = false;
+    o->in_ready = false;
+    free(o->in_data);
+    o->in_data = NULL;
+    o->in_len = 0;
     if (o->ask) {
         o->ask = false;
         o->ready = PH_ORIGIN_MISS;
@@ -547,6 +719,8 @@ void ph_origin_stop(ph_origin *o)
     shutdown(o->listen_fd, SHUT_RDWR);
     pthread_join(o->thread, NULL);
     close(o->listen_fd);
+    free(o->out_data);
+    free(o->in_data);
     pthread_mutex_destroy(&o->lock);
     pthread_cond_destroy(&o->cond);
     free(o);
@@ -620,6 +794,72 @@ ph_origin_result ph_origin_take(ph_origin *o, char *path, size_t path_len)
     return result;
 }
 
+bool ph_origin_put_clip(ph_origin *o, char kind, const void *data, size_t len)
+{
+    size_t max;
+    uint8_t *copy;
+
+    if (!o || !data || (kind != 'T' && kind != 'P'))
+        return false;
+    max = kind == 'T' ? PH_CLIP_TEXT_MAX : PH_CLIP_IMAGE_MAX;
+    if (!len || len > max)
+        return false;
+    copy = malloc(len);
+    if (!copy)
+        return false;
+    memcpy(copy, data, len);
+    pthread_mutex_lock(&o->lock);
+    free(o->out_data);
+    o->out_data = copy;
+    o->out_len = len;
+    o->out_kind = kind;
+    o->out_pending = true;
+    pthread_cond_signal(&o->cond);
+    pthread_mutex_unlock(&o->lock);
+    return true;
+}
+
+bool ph_origin_take_clip(ph_origin *o, char *kind, void **data, size_t *len)
+{
+    bool ok = false;
+
+    if (!o || !kind || !data || !len)
+        return false;
+    *data = NULL;
+    pthread_mutex_lock(&o->lock);
+    if (o->in_ready && o->in_data) {
+        *kind = o->in_kind;
+        *data = o->in_data;
+        *len = o->in_len;
+        o->in_data = NULL;
+        o->in_len = 0;
+        o->in_ready = false;
+        ok = true;
+    }
+    pthread_mutex_unlock(&o->lock);
+    return ok;
+}
+
+unsigned ph_origin_clip_flags(ph_origin *o)
+{
+    unsigned flags = 0;
+
+    if (!o)
+        return 0;
+    pthread_mutex_lock(&o->lock);
+    if (o->note_sent)
+        flags |= PH_ORIGIN_CLIP_SENT;
+    if (o->note_got)
+        flags |= PH_ORIGIN_CLIP_GOT;
+    if (o->note_ready)
+        flags |= PH_ORIGIN_CLIP_READY;
+    o->note_sent = false;
+    o->note_got = false;
+    o->note_ready = false;
+    pthread_mutex_unlock(&o->lock);
+    return flags;
+}
+
 #else
 
 struct ph_origin {
@@ -665,6 +905,32 @@ ph_origin_result ph_origin_take(ph_origin *origin, char *path, size_t path_len)
     (void)path;
     (void)path_len;
     return PH_ORIGIN_IDLE;
+}
+
+bool ph_origin_put_clip(ph_origin *origin, char kind, const void *data, size_t len)
+{
+    (void)origin;
+    (void)kind;
+    (void)data;
+    (void)len;
+    return false;
+}
+
+bool ph_origin_take_clip(ph_origin *origin, char *kind, void **data, size_t *len)
+{
+    (void)origin;
+    (void)kind;
+    if (data)
+        *data = NULL;
+    if (len)
+        *len = 0;
+    return false;
+}
+
+unsigned ph_origin_clip_flags(ph_origin *origin)
+{
+    (void)origin;
+    return 0;
 }
 
 #endif

@@ -28,6 +28,7 @@ add_library(porthole_core STATIC
     ui/tray.c
     files/picture_hash.c
     files/pull.c
+    files/clip.c
     broadcast/screen.c
     files/inbox.c
     usb/packet.c
@@ -81,6 +82,7 @@ if(PORTHOLE_WITH_AIRPLAY)
         media/shot.c
         media/record.c
         files/origin.c
+        files/hostclip.c
         files/xdnd.c
         control/paste_sdl.c
         touch/wda_net.c
