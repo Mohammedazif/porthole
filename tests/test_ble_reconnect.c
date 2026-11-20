@@ -38,6 +38,8 @@ ph_window *ph_window_create(const char *title)
 
 void ph_window_set_detail(ph_window *w, const char *detail) { (void)w, (void)detail; }
 void ph_window_set_pull_hint(ph_window *w, const char *hint) { (void)w, (void)hint; }
+void ph_window_set_share_available(ph_window *w, bool available) { (void)w; (void)available; }
+
 void ph_decoder_limit_edge(ph_decoder *d, int long_edge) { (void)d, (void)long_edge; }
 ph_drag_ghost *ph_drag_ghost_create(void) { return NULL; }
 void ph_drag_ghost_destroy(ph_drag_ghost *g) { (void)g; }

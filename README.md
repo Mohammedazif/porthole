@@ -1,10 +1,26 @@
 # Porthole
 
-**Use your iPhone inside Windows.** Porthole shows your iPhone's screen in a window on your PC and
-lets you control it with your mouse and keyboard, over Wi-Fi or USB. Think *scrcpy, but for iPhone*.
+**Share your iPhone screen with your PC.** Connect in the Porthole iPhone app, then tap
+**Share screen** and confirm **Start Broadcast**. The desktop receives the iPhone's actual
+screen over Wi-Fi through ReplayKit, including Photos controls and pop-ups. Bluetooth
+provides mouse and keyboard control separately.
 
-Free and open source (GPL-3.0). Nothing to install on the iPhone: it uses built-in iOS features
-(Screen Mirroring, Bluetooth mouse/keyboard and AssistiveTouch).
+Free and open source (GPL-3.0). The current sharing flow uses the companion iPhone app.
+The older AirPlay Screen Mirroring path remains available as a compatibility feature.
+
+**Platform gap:** the current companion-link and ReplayKit receiver implementations are
+Linux-only; their Windows entry points return unavailable. Windows AirPlay receiving
+still builds, but the new screen-sharing flow is not implemented there yet. The UI reports
+this state instead of presenting connection details that do not exist.
+
+**Version 0.1.0.** The app keeps the original Porthole identity and uses a refreshed native
+interface: a single 32-point title bar without version text, flat screen-sharing instructions,
+visible PC address/code and a Copy details action. Set up controls opens the Bluetooth guide;
+Help and Stats remain available. Help and setup scroll with the wheel or Page Up/Down; Esc
+closes help. The layout adapts to compact portrait and wide windows. The embedded DejaVu
+Sans typeface is rasterized by FreeType at the actual display pixel size; Windows requests
+per-monitor DPI awareness to avoid OS bitmap scaling. The typeface license is in
+`src/ui/fonts/LICENSE`. Re-embed it with `python3 scripts/build-ui-font.py`.
 
 > **Status: Linux prototype.** Wi-Fi mirroring and keyboard forwarding run in Porthole's own
 > window. Keyboard shortcuts and wheel scrolling have been tested on the iPhone. Continuous
@@ -32,8 +48,13 @@ Free and open source (GPL-3.0). Nothing to install on the iPhone: it uses built-
 
 | Direction | Wi-Fi | USB |
 |---|---|---|
-| Screen (iPhone → PC) | PC acts as an AirPlay receiver (built on [UxPlay](https://github.com/FDH2/UxPlay)'s core) | Apple's USB screen-capture protocol |
+| Screen (iPhone → PC) | ReplayKit from the Porthole iPhone app (Linux); legacy AirPlay receiver compatibility | Apple's USB screen-capture protocol |
 | Control (PC → iPhone) | PC acts as a Bluetooth mouse + keyboard; AssistiveTouch shows a pointer | same |
+
+To share the screen, put both devices on the same Wi-Fi. Open Porthole on the PC,
+enter its displayed address and code in the iPhone app, and tap **Connect**. Then tap
+**Share screen**, choose Porthole in the iOS dialog, and confirm **Start Broadcast**.
+Bluetooth controls are optional and have a separate **Set up controls** guide.
 
 ## Building
 
@@ -55,8 +76,9 @@ ctest --preset debug
 ./build/debug/src/porthole --version
 ```
 
-Run the prototype with `./build/debug/src/porthole --verbose`, then select **Porthole** in the
-iPhone's Screen Mirroring list. Bluetooth control requires a Bluetooth adapter available to
+Run the prototype with `./build/debug/src/porthole --verbose` and follow the screen-sharing
+steps above. The legacy AirPlay path is still listed as **Porthole** in Screen Mirroring.
+Bluetooth control requires a Bluetooth adapter available to
 Linux (pass it through to the guest when using VMware), pairing with Porthole, AssistiveTouch
 on, and Dwell Control off. Use `--no-bluetooth` for mirroring only.
 If Bluetooth control is unavailable, the app retries every five seconds while mirroring

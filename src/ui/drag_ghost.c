@@ -10,6 +10,7 @@
 #include <libswscale/swscale.h>
 
 #include "core/log.h"
+#include "ui/text.h"
 #include "ui/window.h"
 
 #if defined(PH_HAVE_X11) && defined(PH_HAVE_XSHAPE)
@@ -229,6 +230,8 @@ ph_drag_ghost *ph_drag_ghost_create(void)
         free(g);
         return NULL;
     }
+    if (!ph_text_attach(g->renderer))
+        PH_LOGW("photo drag caption unavailable");
     return g;
 }
 
@@ -238,6 +241,8 @@ void ph_drag_ghost_destroy(ph_drag_ghost *g)
         return;
     if (g->texture)
         SDL_DestroyTexture(g->texture);
+    if (g->renderer)
+        ph_text_detach(g->renderer);
     if (g->renderer)
         SDL_DestroyRenderer(g->renderer);
     if (g->window)

@@ -58,6 +58,10 @@ if(TARGET PkgConfig::LIBUSB)
 endif()
 
 add_executable(porthole main.c)
+if(WIN32)
+    configure_file(ui/windows.rc.in ${CMAKE_CURRENT_BINARY_DIR}/generated/porthole.rc @ONLY)
+    target_sources(porthole PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated/porthole.rc)
+endif()
 target_link_libraries(porthole PRIVATE porthole_core)
 porthole_set_warnings(porthole)
 
@@ -65,6 +69,7 @@ if(PORTHOLE_WITH_AIRPLAY)
     # The full app: AirPlay receiver -> FFmpeg decoder -> SDL2 window.
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
+    pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
     pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale libswresample libavformat)
     find_package(OpenSSL REQUIRED)
     find_package(Threads REQUIRED)
@@ -75,7 +80,9 @@ if(PORTHOLE_WITH_AIRPLAY)
         audio/player.c
         hid/link.c
         ui/window.c
+        ui/text.c
         ui/drag_ghost.c
+        ui/transfer_card.c
         ui/generated/brand_art.c
         ui/chrome.c
         video/decoder.c
@@ -92,12 +99,13 @@ if(PORTHOLE_WITH_AIRPLAY)
         porthole_core
         porthole_airplay_core
         PkgConfig::SDL2
+        PkgConfig::FREETYPE
         PkgConfig::FFMPEG
         OpenSSL::Crypto
         Threads::Threads
     )
     if(WIN32)
-        target_link_libraries(porthole_app PUBLIC ws2_32)
+        target_link_libraries(porthole_app PUBLIC ws2_32 shell32)
     endif()
     if(UNIX AND NOT APPLE)
         find_package(X11)

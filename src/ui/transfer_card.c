@@ -1,0 +1,866 @@
+#include "ui/transfer_card.h"
+
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <SDL.h>
+
+#include "core/log.h"
+#include "ui/text.h"
+#include "ui/window.h"
+
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
+#if defined(PH_HAVE_X11) && defined(PH_HAVE_XSHAPE)
+#include <SDL_syswm.h>
+#include <X11/Xlib.h>
+#include <X11/extensions/shape.h>
+#endif
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <shellapi.h>
+#endif
+
+#define CARD_W 420
+#define CARD_H 520
+#define CARD_R 28
+#define SLIDE_PX 40
+#define IN_MS 280
+#define OUT_MS 220
+#define POP_MS 240
+#define HOLD_MS 8000
+#define WAIT_MS 14000
+#define PAD 28
+
+enum { PHASE_HIDDEN, PHASE_IN, PHASE_HOLD, PHASE_OUT };
+
+struct ph_transfer_card {
+    SDL_Window *window;
+    SDL_Renderer *renderer;
+    SDL_Cursor *hand;
+    SDL_Cursor *arrow;
+    int phase;
+    Uint64 phase_at;
+    Uint64 touch;
+    Uint64 check_at;
+    Uint64 painted_at;
+    int rest_x, rest_y;
+    int placed_y;
+    int op_milli;
+    bool opacity_ok;
+    bool dirty;
+    bool inside;
+    bool hot_open, hot_show, hot_close;
+    bool received;
+    bool can_show;
+    bool video;
+    int done, total;
+    char path[4096];
+    char name[160];
+    SDL_Rect open_r, show_r, close_r;
+};
+
+static void rgba(SDL_Renderer *renderer, int red, int green, int blue, int alpha)
+{
+    SDL_SetRenderDrawColor(renderer, (Uint8)red, (Uint8)green, (Uint8)blue, (Uint8)alpha);
+}
+
+static void fill_rect(SDL_Renderer *renderer, int x, int y, int w, int h)
+{
+    SDL_Rect rect = {x, y, w, h};
+    if (w > 0 && h > 0)
+        SDL_RenderFillRect(renderer, &rect);
+}
+
+static int isqrt_int(int n)
+{
+    int x = 0;
+    if (n <= 0)
+        return 0;
+    while ((x + 1) <= n / (x + 1))
+        x++;
+    return x;
+}
+
+static void fill_circle(SDL_Renderer *renderer, int cx, int cy, int rad)
+{
+    int dy;
+    if (rad < 1)
+        return;
+    for (dy = -rad; dy <= rad; dy++) {
+        int dx = isqrt_int(rad * rad - dy * dy);
+        fill_rect(renderer, cx - dx, cy + dy, dx * 2 + 1, 1);
+    }
+}
+
+static void fill_round(SDL_Renderer *renderer, int x, int y, int w, int h, int rad)
+{
+    if (w < 1 || h < 1)
+        return;
+    if (rad > w / 2)
+        rad = w / 2;
+    if (rad > h / 2)
+        rad = h / 2;
+    if (rad < 1) {
+        fill_rect(renderer, x, y, w, h);
+        return;
+    }
+    fill_rect(renderer, x + rad, y, w - 2 * rad, h);
+    fill_rect(renderer, x, y + rad, rad, h - 2 * rad);
+    fill_rect(renderer, x + w - rad, y + rad, rad, h - 2 * rad);
+    fill_circle(renderer, x + rad, y + rad, rad);
+    fill_circle(renderer, x + w - rad - 1, y + rad, rad);
+    fill_circle(renderer, x + rad, y + h - rad - 1, rad);
+    fill_circle(renderer, x + w - rad - 1, y + h - rad - 1, rad);
+}
+
+static void span_h(SDL_Renderer *renderer, int x0, int x1, int y)
+{
+    if (x1 < x0) {
+        int swap = x0;
+        x0 = x1;
+        x1 = swap;
+    }
+    fill_rect(renderer, x0, y, x1 - x0 + 1, 1);
+}
+
+static void tri_edge(int y, int x0, int y0, int x1, int y1, int *hits, int *xs)
+{
+    int x;
+    if (y0 == y1)
+        return;
+    if ((y < y0 && y < y1) || (y > y0 && y > y1))
+        return;
+    x = x0 + (x1 - x0) * (y - y0) / (y1 - y0);
+    if (*hits < 2)
+        xs[(*hits)++] = x;
+}
+
+static void fill_tri(SDL_Renderer *renderer, int x0, int y0, int x1, int y1, int x2, int y2)
+{
+    int miny = y0, maxy = y0, y;
+    if (y1 < miny)
+        miny = y1;
+    if (y2 < miny)
+        miny = y2;
+    if (y1 > maxy)
+        maxy = y1;
+    if (y2 > maxy)
+        maxy = y2;
+    for (y = miny; y <= maxy; y++) {
+        int hits = 0, xs[2] = {0, 0};
+        tri_edge(y, x0, y0, x1, y1, &hits, xs);
+        tri_edge(y, x1, y1, x2, y2, &hits, xs);
+        tri_edge(y, x2, y2, x0, y0, &hits, xs);
+        if (hits >= 2)
+            span_h(renderer, xs[0], xs[1], y);
+    }
+}
+
+static void thick_line(SDL_Renderer *renderer, int x0, int y0, int x1, int y1, int rad)
+{
+    int steps = abs(x1 - x0) + abs(y1 - y0);
+    int i;
+    if (steps < 1)
+        steps = 1;
+    for (i = 0; i <= steps; i++)
+        fill_circle(renderer, x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps, rad);
+}
+
+static int lerp(int a, int b, int t, int tmax)
+{
+    if (tmax < 1)
+        return b;
+    if (t < 0)
+        t = 0;
+    if (t > tmax)
+        t = tmax;
+    return a + (b - a) * t / tmax;
+}
+
+static void ring(SDL_Renderer *renderer, int cx, int cy, int outer, int inner)
+{
+    int oy;
+    for (oy = -outer; oy <= outer; oy++) {
+        int remain_o = outer * outer - oy * oy;
+        int remain_i = inner * inner - oy * oy;
+        int dxo, dxi;
+        if (remain_o < 0)
+            continue;
+        dxo = isqrt_int(remain_o);
+        rgba(renderer, lerp(255, 168, oy + outer, outer * 2), lerp(150, 64, oy + outer, outer * 2),
+             lerp(48, 232, oy + outer, outer * 2), 255);
+        if (remain_i <= 0) {
+            span_h(renderer, cx - dxo, cx + dxo, cy + oy);
+            continue;
+        }
+        dxi = isqrt_int(remain_i);
+        span_h(renderer, cx - dxo, cx - dxi, cy + oy);
+        span_h(renderer, cx + dxi, cx + dxo, cy + oy);
+    }
+}
+
+static bool ends_with(const char *text, const char *ext)
+{
+    size_t nt = strlen(text), ne = strlen(ext), i;
+    if (nt < ne)
+        return false;
+    for (i = 0; i < ne; i++) {
+        char a = text[nt - ne + i];
+        if (a >= 'A' && a <= 'Z')
+            a = (char)(a - 'A' + 'a');
+        if (a != ext[i])
+            return false;
+    }
+    return true;
+}
+
+static bool video_name(const char *name)
+{
+    return ends_with(name, ".mp4") || ends_with(name, ".mov") || ends_with(name, ".m4v")
+           || ends_with(name, ".avi") || ends_with(name, ".mkv") || ends_with(name, ".webm");
+}
+
+static void copy_name(ph_transfer_card *c, const char *path)
+{
+    const char *base = path ? path : "";
+    const char *scan;
+    size_t n;
+    c->name[0] = 0;
+    for (scan = base; *scan; scan++)
+        if (*scan == '/' || *scan == '\\')
+            base = scan + 1;
+    n = strlen(base);
+    if (n >= sizeof c->name)
+        n = sizeof c->name - 1;
+    memcpy(c->name, base, n);
+    c->name[n] = 0;
+    if (n > 72) {
+        c->name[69] = '.';
+        c->name[70] = '.';
+        c->name[71] = '.';
+        c->name[72] = 0;
+    }
+    c->video = video_name(c->name);
+}
+
+static SDL_Rect display_bounds(int x, int y)
+{
+    SDL_Rect bounds = {0, 0, 1920, 1080};
+    int i, n = SDL_GetNumVideoDisplays();
+    for (i = 0; i < n; i++) {
+        SDL_Rect area;
+        if (SDL_GetDisplayBounds(i, &area) != 0)
+            continue;
+        if (x >= area.x && y >= area.y && x < area.x + area.w && y < area.y + area.h)
+            return area;
+        if (i == 0)
+            bounds = area;
+    }
+    return bounds;
+}
+
+static void shape_window(SDL_Window *window)
+{
+#if defined(PH_HAVE_X11) && defined(PH_HAVE_XSHAPE)
+    SDL_SysWMinfo info;
+    Region region;
+    int base = 0, err = 0, y;
+
+    SDL_VERSION(&info.version);
+    if (!window || !SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_X11
+        || !info.info.x11.display || !info.info.x11.window)
+        return;
+    if (!XShapeQueryExtension(info.info.x11.display, &base, &err))
+        return;
+    region = XCreateRegion();
+    if (!region)
+        return;
+    for (y = 0; y < CARD_H; y++) {
+        int inset = 0, dy = -1;
+        XRectangle row;
+        if (y < CARD_R)
+            dy = CARD_R - 1 - y;
+        else if (y >= CARD_H - CARD_R)
+            dy = y - (CARD_H - CARD_R);
+        if (dy >= 0)
+            inset = CARD_R - isqrt_int(CARD_R * CARD_R - dy * dy);
+        if (inset < 0)
+            inset = 0;
+        if (CARD_W - 2 * inset <= 0)
+            continue;
+        row.x = (short)inset;
+        row.y = (short)y;
+        row.width = (unsigned short)(CARD_W - 2 * inset);
+        row.height = 1;
+        XUnionRectWithRegion(&row, region, region);
+    }
+    XShapeCombineRegion(info.info.x11.display, info.info.x11.window, ShapeBounding, 0, 0, region,
+                        ShapeSet);
+    XDestroyRegion(region);
+    XFlush(info.info.x11.display);
+#else
+    (void)window;
+#endif
+}
+
+static void place_opacity(ph_transfer_card *c, int y, float opacity)
+{
+    int milli = (int)(opacity * 1000.0f + 0.5f);
+    if (milli < 0)
+        milli = 0;
+    if (milli > 1000)
+        milli = 1000;
+    if (y != c->placed_y) {
+        SDL_SetWindowPosition(c->window, c->rest_x, y);
+        c->placed_y = y;
+    }
+    if (c->opacity_ok && milli != c->op_milli) {
+        if (SDL_SetWindowOpacity(c->window, opacity) != 0) {
+            c->opacity_ok = false;
+            SDL_SetWindowOpacity(c->window, 1);
+        }
+        c->op_milli = milli;
+    }
+}
+
+static void rest_on_display(ph_transfer_card *c)
+{
+    int mx = 0, my = 0;
+    SDL_Rect bounds;
+    SDL_GetGlobalMouseState(&mx, &my);
+    bounds = display_bounds(mx, my);
+    c->rest_x = bounds.x + (bounds.w - CARD_W) / 2;
+    c->rest_y = bounds.y + (bounds.h - CARD_H) / 2;
+    if (c->rest_y < bounds.y + 24)
+        c->rest_y = bounds.y + 24;
+}
+
+static int draw_centered(SDL_Renderer *renderer, const char *text, int y, int scale, SDL_Color color)
+{
+    int box = CARD_W - PAD * 2;
+    int width = ph_text_width(text, scale);
+    int x = (CARD_W - width) / 2;
+    if (width > box) {
+        x = PAD;
+        width = box;
+    }
+    return ph_ui_draw_text(renderer, text, x, y, width, scale, color);
+}
+
+/* Each line is centered. A long name breaks at a space when it has one. */
+static int draw_wrapped_center(SDL_Renderer *renderer, const char *text, int y, int scale,
+                               SDL_Color color)
+{
+    int box = CARD_W - PAD * 2;
+    const char *rest = text;
+    int lines = 0;
+    char line[160];
+
+    if (!text || !text[0])
+        return y;
+    while (*rest && lines < 3) {
+        size_t n = strlen(rest);
+        size_t take = n;
+        size_t i;
+        if (ph_text_width(rest, scale) > box) {
+            size_t lo = 1, hi = n;
+            while (lo < hi) {
+                size_t mid = (lo + hi + 1) / 2;
+                if (mid >= sizeof line)
+                    mid = sizeof line - 1;
+                memcpy(line, rest, mid);
+                line[mid] = 0;
+                if (ph_text_width(line, scale) <= box)
+                    lo = mid;
+                else
+                    hi = mid - 1;
+            }
+            take = lo;
+            for (i = take; i > 0; i--) {
+                if (rest[i] == ' ') {
+                    take = i;
+                    break;
+                }
+            }
+        }
+        if (take < 1)
+            take = 1;
+        if (take >= sizeof line)
+            take = sizeof line - 1;
+        memcpy(line, rest, take);
+        line[take] = 0;
+        while (take > 0 && line[take - 1] == ' ')
+            line[--take] = 0;
+        y = draw_centered(renderer, line, y, scale, color);
+        rest += take;
+        while (*rest == ' ')
+            rest++;
+        lines++;
+    }
+    return y;
+}
+
+static void draw_page(SDL_Renderer *renderer, int x, int y)
+{
+    const int w = 124, h = 156, fold = 34;
+    rgba(renderer, 246, 246, 248, 255);
+    fill_round(renderer, x, y, w, h, 12);
+    rgba(renderer, 214, 214, 220, 255);
+    {
+        int i;
+        for (i = 0; i < fold; i++)
+            span_h(renderer, x + w - fold + i, x + w - 1, y + i);
+    }
+}
+
+static void draw_icon(SDL_Renderer *renderer, const ph_transfer_card *c, int x, int y)
+{
+    int cx = x + 62, cy = y + 78;
+    draw_page(renderer, x, y);
+    if (c->video) {
+        ring(renderer, cx, cy, 34, 22);
+        rgba(renderer, 255, 255, 255, 255);
+        fill_tri(renderer, cx - 8, cy - 14, cx - 8, cy + 14, cx + 14, cy);
+    } else {
+        rgba(renderer, 255, 196, 90, 255);
+        fill_circle(renderer, x + 90, y + 40, 11);
+        rgba(renderer, 126, 170, 214, 255);
+        fill_tri(renderer, x + 18, y + 128, x + 62, y + 78, x + 106, y + 128);
+        rgba(renderer, 90, 142, 196, 255);
+        fill_tri(renderer, x + 48, y + 128, x + 86, y + 92, x + 112, y + 128);
+    }
+}
+
+static void draw_check(SDL_Renderer *renderer, int cx, int cy, int scale)
+{
+    int rad = 22 * scale / 100;
+    if (rad < 1)
+        return;
+    rgba(renderer, 48, 209, 88, 255);
+    fill_circle(renderer, cx, cy, rad);
+    rgba(renderer, 255, 255, 255, 255);
+    thick_line(renderer, cx + (-11 * scale / 100), cy + (1 * scale / 100), cx + (-4 * scale / 100),
+               cy + (8 * scale / 100), scale >= 80 ? 2 : 1);
+    thick_line(renderer, cx + (-4 * scale / 100), cy + (8 * scale / 100), cx + (12 * scale / 100),
+               cy + (-8 * scale / 100), scale >= 80 ? 2 : 1);
+}
+
+static void draw_button(SDL_Renderer *renderer, SDL_Rect rect, const char *label, bool hot)
+{
+    SDL_Color ink = {255, 255, 255, 255};
+    int tw, th;
+    if (rect.w < 1)
+        return;
+    rgba(renderer, hot ? 66 : 44, hot ? 66 : 44, hot ? 72 : 48, 255);
+    fill_round(renderer, rect.x, rect.y, rect.w, rect.h, rect.h / 2);
+    tw = ph_text_width(label, 2);
+    th = ph_text_line_height(2);
+    ph_ui_draw_text(renderer, label, rect.x + (rect.w - tw) / 2, rect.y + (rect.h - th) / 2,
+                    tw + 4, 2, ink);
+}
+
+static void layout_buttons(ph_transfer_card *c)
+{
+    int y = CARD_H - PAD - 52;
+    int w = (CARD_W - PAD * 2 - 12) / 2;
+    c->close_r = (SDL_Rect){CARD_W - PAD - 36, 16, 36, 36};
+    if (!c->received || !c->path[0]) {
+        c->open_r = (SDL_Rect){0, 0, 0, 0};
+        c->show_r = (SDL_Rect){0, 0, 0, 0};
+        return;
+    }
+    if (!c->can_show) {
+        c->open_r = (SDL_Rect){(CARD_W - 200) / 2, y, 200, 52};
+        c->show_r = (SDL_Rect){0, 0, 0, 0};
+        return;
+    }
+    c->open_r = (SDL_Rect){PAD, y, w, 52};
+    c->show_r = (SDL_Rect){PAD + w + 12, y, w, 52};
+}
+
+static int check_scale(const ph_transfer_card *c, Uint64 now)
+{
+    Uint64 elapsed;
+    if (!c->received)
+        return 0;
+    if (!c->check_at)
+        return 100;
+    elapsed = now - c->check_at;
+    if (elapsed >= POP_MS)
+        return 100;
+    return 55 + (int)(elapsed * 45 / POP_MS);
+}
+
+static void paint(ph_transfer_card *c, Uint64 now)
+{
+    SDL_Color white = {255, 255, 255, 255};
+    SDL_Color gray = {174, 174, 178, 255};
+    char sub[96];
+    char frac[32];
+    int y, scale;
+    int page_x = (CARD_W - 124) / 2;
+    int page_y = 92;
+
+    if (!c->renderer || c->phase == PHASE_HIDDEN)
+        return;
+    c->dirty = false;
+    c->painted_at = now;
+    layout_buttons(c);
+    rgba(c->renderer, 28, 28, 30, 255);
+    SDL_RenderClear(c->renderer);
+    rgba(c->renderer, 255, 255, 255, 255);
+    fill_circle(c->renderer, PAD + 8, 34, 8);
+    ph_ui_draw_text(c->renderer, "Porthole", PAD + 24, 22, 200, 2, white);
+    if (c->hot_close) {
+        rgba(c->renderer, 58, 58, 62, 255);
+        fill_circle(c->renderer, c->close_r.x + c->close_r.w / 2, c->close_r.y + c->close_r.h / 2,
+                    14);
+    }
+    rgba(c->renderer, 210, 210, 214, 255);
+    thick_line(c->renderer, c->close_r.x + 11, c->close_r.y + 11, c->close_r.x + 25,
+               c->close_r.y + 25, 1);
+    thick_line(c->renderer, c->close_r.x + 25, c->close_r.y + 11, c->close_r.x + 11,
+               c->close_r.y + 25, 1);
+
+    draw_icon(c->renderer, c, page_x, page_y);
+    scale = check_scale(c, now);
+    if (scale > 0)
+        draw_check(c->renderer, page_x + 62, page_y + 156 - 8, scale);
+    else if (c->total > 0) {
+        int track = 180;
+        int fill = c->done > 0 ? track * c->done / c->total : 0;
+        int bx = (CARD_W - track) / 2;
+        int by = page_y + 156 + 16;
+        if (fill > track)
+            fill = track;
+        rgba(c->renderer, 58, 58, 62, 255);
+        fill_round(c->renderer, bx, by, track, 6, 3);
+        rgba(c->renderer, 168, 85, 247, 255);
+        if (fill > 0)
+            fill_round(c->renderer, bx, by, fill < 6 ? 6 : fill, 6, 3);
+    }
+
+    y = page_y + 156 + 36;
+    if (c->name[0])
+        y = draw_wrapped_center(c->renderer, c->name, y, 3, white) + 8;
+    if (!c->received)
+        snprintf(sub, sizeof sub, "Receiving from iPhone");
+    else if (c->total > 1)
+        snprintf(sub, sizeof sub, "Received %d items from iPhone", c->total);
+    else
+        snprintf(sub, sizeof sub, "Received from iPhone");
+    y = draw_centered(c->renderer, sub, y, 2, gray) + 6;
+    if (!c->received && c->total > 0) {
+        snprintf(frac, sizeof frac, "%d of %d", c->done, c->total);
+        draw_centered(c->renderer, frac, y, 2, gray);
+    }
+    if (c->received) {
+        draw_button(c->renderer, c->open_r, "Open", c->hot_open);
+        draw_button(c->renderer, c->show_r, "Show", c->hot_show);
+    }
+    SDL_RenderPresent(c->renderer);
+}
+
+static bool hit(SDL_Rect rect, int x, int y)
+{
+    return rect.w > 0 && rect.h > 0 && x >= rect.x && y >= rect.y && x < rect.x + rect.w
+           && y < rect.y + rect.h;
+}
+
+static void open_external(const char *path)
+{
+    if (!path || !path[0])
+        return;
+#ifdef _WIN32
+    ShellExecuteA(NULL, "open", path, NULL, NULL, SW_SHOWNORMAL);
+#else
+    pid_t pid = fork();
+    if (pid < 0)
+        return;
+    if (pid == 0) {
+        if (fork() == 0) {
+            setsid();
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+            closefrom(3);
+#else
+            for (int fd = 3, max = (int)sysconf(_SC_OPEN_MAX); fd < max && fd < 65536; fd++)
+                close(fd);
+#endif
+            execlp("xdg-open", "xdg-open", path, (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+        ;
+#endif
+    PH_LOGI("transfer: open %s", path);
+}
+
+static void open_folder(const char *path)
+{
+    char dir[4096];
+    const char *slash = path ? strrchr(path, '/') : NULL;
+    size_t n;
+    if (!slash || slash == path)
+        return;
+    n = (size_t)(slash - path);
+    if (n >= sizeof dir)
+        n = sizeof dir - 1;
+    memcpy(dir, path, n);
+    dir[n] = 0;
+    open_external(dir);
+}
+
+static void hide_card(ph_transfer_card *c)
+{
+    c->phase = PHASE_HIDDEN;
+    c->op_milli = 0;
+    c->inside = false;
+    c->hot_open = c->hot_show = c->hot_close = false;
+    if (c->arrow)
+        SDL_SetCursor(c->arrow);
+    if (c->window)
+        SDL_HideWindow(c->window);
+}
+
+static float ease(Uint64 elapsed, Uint64 duration)
+{
+    float t;
+    if (duration == 0 || elapsed >= duration)
+        return 1;
+    t = (float)elapsed / (float)duration;
+    return t * t * (3.0f - 2.0f * t);
+}
+
+ph_transfer_card *ph_transfer_card_create(void)
+{
+    ph_transfer_card *c = calloc(1, sizeof *c);
+    Uint32 flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_BORDERLESS | SDL_WINDOW_ALWAYS_ON_TOP
+                   | SDL_WINDOW_SKIP_TASKBAR | SDL_WINDOW_TOOLTIP;
+
+    if (!c)
+        return NULL;
+    c->window = SDL_CreateWindow("Porthole", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, CARD_W,
+                                 CARD_H, flags);
+    if (!c->window)
+        goto fail;
+    c->renderer = SDL_CreateRenderer(c->window, -1, SDL_RENDERER_SOFTWARE);
+    if (!c->renderer || !ph_text_attach(c->renderer))
+        goto fail;
+    c->hand = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_HAND);
+    c->arrow = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW);
+    c->opacity_ok = true;
+    c->placed_y = -100000;
+    shape_window(c->window);
+    return c;
+
+fail:
+    ph_transfer_card_destroy(c);
+    return NULL;
+}
+
+void ph_transfer_card_destroy(ph_transfer_card *c)
+{
+    if (!c)
+        return;
+    if (c->renderer)
+        ph_text_detach(c->renderer);
+    if (c->renderer)
+        SDL_DestroyRenderer(c->renderer);
+    if (c->window)
+        SDL_DestroyWindow(c->window);
+    if (c->hand)
+        SDL_FreeCursor(c->hand);
+    if (c->arrow)
+        SDL_FreeCursor(c->arrow);
+    free(c);
+}
+
+void ph_transfer_card_show(ph_transfer_card *c, const char *path, int done, int total,
+                           bool can_show, Uint64 now)
+{
+    bool same_path = false;
+    if (!c || !c->window)
+        return;
+    if (done < 0)
+        done = 0;
+    if (total < done)
+        total = done;
+    if (path && path[0] && strcmp(path, c->path) == 0)
+        same_path = true;
+    if (path && path[0]) {
+        snprintf(c->path, sizeof c->path, "%s", path);
+        copy_name(c, c->path);
+    } else {
+        c->path[0] = 0;
+        c->name[0] = 0;
+        c->video = false;
+    }
+    c->done = done;
+    c->total = total;
+    c->can_show = can_show;
+    c->received = total > 0 && done >= total && c->path[0];
+    c->touch = now;
+    c->dirty = true;
+    if (c->received && !same_path)
+        c->check_at = now;
+    else if (!c->received)
+        c->check_at = 0;
+    if (c->phase == PHASE_HIDDEN || c->phase == PHASE_OUT) {
+        rest_on_display(c);
+        c->phase = PHASE_IN;
+        c->phase_at = now;
+        c->placed_y = -100000;
+        SDL_ShowWindow(c->window);
+        shape_window(c->window);
+        place_opacity(c, c->rest_y + SLIDE_PX, 0);
+    }
+    paint(c, now);
+    if (c->received)
+        PH_LOGI("transfer: received %s", c->name[0] ? c->name : "a file");
+    else
+        PH_LOGI("transfer: receiving %d of %d", done, total);
+}
+
+void ph_transfer_card_dismiss(ph_transfer_card *c, Uint64 now)
+{
+    if (!c || c->phase == PHASE_HIDDEN || c->phase == PHASE_OUT)
+        return;
+    c->phase = PHASE_OUT;
+    c->phase_at = now;
+}
+
+void ph_transfer_card_tick(ph_transfer_card *c, Uint64 now)
+{
+    float t;
+    int y;
+    float opacity;
+    Uint64 limit;
+    bool popping;
+
+    if (!c || c->phase == PHASE_HIDDEN)
+        return;
+    if (c->phase == PHASE_IN) {
+        t = ease(now - c->phase_at, IN_MS);
+        y = c->rest_y + (int)((1.0f - t) * SLIDE_PX);
+        opacity = t;
+        if (now - c->phase_at >= IN_MS) {
+            c->phase = PHASE_HOLD;
+            c->phase_at = now;
+            y = c->rest_y;
+            opacity = 1;
+        }
+    } else if (c->phase == PHASE_OUT) {
+        t = ease(now - c->phase_at, OUT_MS);
+        y = c->rest_y + (int)(t * SLIDE_PX);
+        opacity = 1.0f - t;
+        if (now - c->phase_at >= OUT_MS) {
+            hide_card(c);
+            return;
+        }
+    } else {
+        y = c->rest_y;
+        opacity = 1;
+        if (c->inside)
+            c->touch = now;
+        limit = c->received ? HOLD_MS : WAIT_MS;
+        if (!c->inside && c->touch && now - c->touch > limit) {
+            c->phase = PHASE_OUT;
+            c->phase_at = now;
+        }
+    }
+    place_opacity(c, y, opacity);
+    popping = c->check_at && now - c->check_at < POP_MS + 40;
+    if (c->check_at && now - c->check_at >= POP_MS)
+        c->check_at = 0;
+    if (c->dirty || (popping && now - c->painted_at >= 32))
+        paint(c, now);
+}
+
+bool ph_transfer_card_animating(const ph_transfer_card *c)
+{
+    if (!c)
+        return false;
+    if (c->phase == PHASE_IN || c->phase == PHASE_OUT)
+        return true;
+    return c->check_at != 0;
+}
+
+bool ph_transfer_card_event(ph_transfer_card *c, const SDL_Event *event, Uint64 now)
+{
+    Uint32 window_id = 0;
+    int x = 0, y = 0;
+    bool open, show, close, changed;
+    if (!c || !c->window || !event || c->phase == PHASE_HIDDEN)
+        return false;
+    if (event->type == SDL_MOUSEMOTION)
+        window_id = event->motion.windowID;
+    else if (event->type == SDL_MOUSEBUTTONDOWN || event->type == SDL_MOUSEBUTTONUP)
+        window_id = event->button.windowID;
+    else if (event->type == SDL_WINDOWEVENT)
+        window_id = event->window.windowID;
+    else
+        return false;
+    if (window_id != SDL_GetWindowID(c->window))
+        return false;
+
+    if (event->type == SDL_WINDOWEVENT) {
+        if (event->window.event == SDL_WINDOWEVENT_LEAVE) {
+            c->inside = false;
+            c->hot_open = c->hot_show = c->hot_close = false;
+            if (c->arrow)
+                SDL_SetCursor(c->arrow);
+            c->dirty = true;
+            paint(c, now);
+        } else if (event->window.event == SDL_WINDOWEVENT_EXPOSED
+                   || event->window.event == SDL_WINDOWEVENT_SHOWN) {
+            c->dirty = true;
+            paint(c, now);
+        }
+        return true;
+    }
+
+    if (event->type == SDL_MOUSEMOTION) {
+        x = event->motion.x;
+        y = event->motion.y;
+    } else {
+        x = event->button.x;
+        y = event->button.y;
+    }
+    c->inside = true;
+    c->touch = now;
+    open = hit(c->open_r, x, y);
+    show = hit(c->show_r, x, y);
+    close = hit(c->close_r, x, y);
+    changed = open != c->hot_open || show != c->hot_show || close != c->hot_close;
+    c->hot_open = open;
+    c->hot_show = show;
+    c->hot_close = close;
+    if (c->hand && c->arrow)
+        SDL_SetCursor((open || show || close) ? c->hand : c->arrow);
+    if (changed) {
+        c->dirty = true;
+        paint(c, now);
+    }
+    if (event->type == SDL_MOUSEBUTTONDOWN && event->button.button == SDL_BUTTON_LEFT) {
+        if (close) {
+            ph_transfer_card_dismiss(c, now);
+        } else if (open) {
+            open_external(c->path);
+            c->touch = now;
+        } else if (show) {
+            open_folder(c->path);
+            c->touch = now;
+        }
+    }
+    return true;
+}

@@ -38,6 +38,7 @@
 #include "files/pull.h"
 #include "files/xdnd.h"
 #include "ui/drag_ghost.h"
+#include "ui/transfer_card.h"
 #include "core/metrics.h"
 #include "core/version.h"
 #include "hid/link.h"
@@ -149,6 +150,7 @@ typedef struct app {
     bool usb_started;
     ph_pull pull;
     ph_drag_ghost *ghost;
+    ph_transfer_card *card;
     int place_x, place_y;
     Uint64 place_at;
     ph_origin *origin;
@@ -359,7 +361,7 @@ static void on_ble_status(void *user, const char *line)
 
 static void update_title(app *a)
 {
-    char title[256];
+    char title[320];
     const char *control = a->opt->bluetooth && a->opt->ble_helper ? a->ble_status : "off";
 
     /* The relative pointer has to see the AssistiveTouch dot, so a photo or
@@ -372,8 +374,7 @@ static void update_title(app *a)
                                        : a->feed_mode ? " [Feed wheel]" : "");
     else
         snprintf(title, sizeof title,
-                 "%s - on your iPhone: Control Center > Screen Mirroring > %s", PORTHOLE_NAME,
-                 a->opt->name);
+                 "%s - Connect in the iPhone app, then tap Share screen", PORTHOLE_NAME);
     {
         char pin[8];
         size_t used = strlen(title);
@@ -955,33 +956,48 @@ static bool copy_file(const char *src, const char *dest)
     return true;
 }
 
-static bool desktop_copy(const char *src)
+static bool desktop_copy(const char *src, char *dest, size_t cap)
 {
     const char *home = getenv("HOME");
     const char *base = strrchr(src, '/');
-    char dest[1024];
 
+    if (!dest || cap < 2)
+        return false;
+    dest[0] = 0;
     if (!home || !home[0] || !base || !base[1])
         return false;
-    if (snprintf(dest, sizeof dest, "%s/Desktop/%s", home, base + 1) >= (int)sizeof dest)
+    if (snprintf(dest, cap, "%s/Desktop/%s", home, base + 1) >= (int)cap) {
+        dest[0] = 0;
         return false;
+    }
     if (!strcmp(src, dest))
         return true;
-    return copy_file(src, dest);
+    if (!copy_file(src, dest)) {
+        dest[0] = 0;
+        return false;
+    }
+    return true;
 }
 
-/* Copies each file, one per line, to the Desktop. Returns how many arrived there. */
-static int desktop_copy_all(char *paths)
+/* Copies each file, one per line, to the Desktop. Returns how many arrived there.
+ * first receives the path of the first one that landed. */
+static int desktop_copy_all(char *paths, char *first, size_t first_cap)
 {
     int copied = 0;
 
+    if (first && first_cap)
+        first[0] = 0;
     for (char *line = paths, *next; line && *line; line = next) {
+        char dest[1024];
+
         next = strchr(line, '\n');
         if (next)
             *next++ = 0;
-        if (desktop_copy(line)) {
+        if (desktop_copy(line, dest, sizeof dest)) {
             copied++;
-            PH_LOGI("photo pull: original on the Desktop (%s)", line);
+            if (first && first_cap && !first[0])
+                snprintf(first, first_cap, "%s", dest);
+            PH_LOGI("photo pull: original on the Desktop (%s)", dest);
         } else {
             PH_LOGW("photo pull: original stayed at %s", line);
         }
@@ -990,13 +1006,16 @@ static int desktop_copy_all(char *paths)
 }
 
 /* Moves each file, one per line, into Downloads without replacing anything there:
- * a name already taken gets 2-, 3-, ... in front. Returns how many arrived. */
-static int downloads_move_all(char *paths)
+ * a name already taken gets 2-, 3-, ... in front. Returns how many arrived.
+ * first receives the path of the first one that landed. */
+static int downloads_move_all(char *paths, char *first, size_t first_cap)
 {
     const char *home = getenv("HOME");
     char dir[1024];
     int moved = 0;
 
+    if (first && first_cap)
+        first[0] = 0;
     if (!home || !home[0] || snprintf(dir, sizeof dir, "%s/Downloads", home) >= (int)sizeof dir)
         return 0;
 #ifdef _WIN32
@@ -1031,6 +1050,8 @@ static int downloads_move_all(char *paths)
         }
         if (ok) {
             moved++;
+            if (first && first_cap && !first[0])
+                snprintf(first, first_cap, "%s", dest);
             PH_LOGI("share: in Downloads: %s", dest);
         } else {
             PH_LOGW("share: stayed at %s", line);
@@ -1042,14 +1063,22 @@ static int downloads_move_all(char *paths)
 static void end_pull(app *a)
 {
     bool placed = false;
+    bool landed = false;
     int note = a->pull_note;
     static char saved[sizeof ((app *)0)->pull_path];
+    char shown[1024];
+    const char *offer = NULL;
 
+    shown[0] = 0;
     snprintf(saved, sizeof saved, "%s", a->pull_path);
     if (ph_xdnd_busy())
         placed = ph_xdnd_drop();
     if (saved[0] && note == 3 && !placed)
-        desktop_copy_all(saved);
+        landed = desktop_copy_all(saved, shown, sizeof shown) > 0;
+    if (note == 3 && landed)
+        offer = shown;
+    else if (note == 3 && saved[0])
+        offer = saved;
     ph_pull_release(&a->pull);
     drop_pull_snapshot(a);
     hide_ghost(a);
@@ -1057,6 +1086,8 @@ static void end_pull(app *a)
     a->pull_hold = false;
     a->pull_path[0] = 0;
     update_title(a);
+    if (offer && a->card)
+        ph_transfer_card_show(a->card, offer, 1, 1, landed, SDL_GetTicks64());
     if (note == 3)
         ph_window_set_detail(a->win, placed ? "Pulled the original photo"
                                             : "Original photo saved on the Desktop");
@@ -1713,8 +1744,13 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         }
         return;
     }
-    if (ph_window_help_visible(a->win))
+    if (ph_window_help_visible(a->win)) {
+        if (down && sc == SDL_SCANCODE_ESCAPE && !e->repeat) {
+            a->gesture_keys[sc] = true;
+            ph_window_toggle_help(a->win);
+        }
         return;
+    }
     if (down && sc == SDL_SCANCODE_F4 && plain && !a->input.down[sc]) {
         a->gesture_keys[sc] = true;
         if (down && !e->repeat) {
@@ -2282,12 +2318,20 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
         handle_ble_status(a, (const char *)e->user.data1);
         free(e->user.data1);
         break;
-    case EV_INBOX_NOTE:
-        ph_window_set_detail(a->win, (const char *)e->user.data1);
+    case EV_INBOX_NOTE: {
+        int done = 0, total = 0;
+        const char *text = e->user.data1;
+
+        if (text && sscanf(text, "Receiving %d of %d", &done, &total) == 2 && total > 0 && a->card
+            && done < total)
+            ph_transfer_card_show(a->card, NULL, done, total, false, SDL_GetTicks64());
+        ph_window_set_detail(a->win, text);
         free(e->user.data1);
         break;
+    }
     case EV_INBOX: {
         char line[128];
+        char dest[1024];
         int count = 0, saved;
 
         if (!e->user.data1)
@@ -2296,8 +2340,14 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
             count += *c == '\n';
         count++;
         /* Shared from the iPhone's Share sheet: straight into Downloads, like AirDrop. */
-        saved = downloads_move_all(e->user.data1);
+        saved = downloads_move_all(e->user.data1, dest, sizeof dest);
         free(e->user.data1);
+        if (a->card) {
+            if (saved > 0 && dest[0])
+                ph_transfer_card_show(a->card, dest, saved, saved, true, SDL_GetTicks64());
+            else
+                ph_transfer_card_dismiss(a->card, SDL_GetTicks64());
+        }
         snprintf(line, sizeof line, "Saved %d item%s from the iPhone in Downloads", saved,
                  saved == 1 ? "" : "s");
         ph_window_set_detail(a->win, line);
@@ -2339,6 +2389,9 @@ static void start_bluetooth(app *a)
 static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *seq)
 {
     unsigned int win_id = ph_window_id(a->win);
+
+    if (a->card && ph_transfer_card_event(a->card, e, SDL_GetTicks64()))
+        return true;
 
     switch (e->type) {
     case SDL_QUIT:
@@ -2390,11 +2443,11 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
         break;
     case SDL_KEYDOWN:
     case SDL_KEYUP:
-        if (e->key.windowID == win_id)
+        if (e->key.windowID == win_id && !ph_window_chrome_event(a->win, e))
             handle_key(a, &e->key);
         break;
     case SDL_MOUSEWHEEL:
-        if (e->wheel.windowID == win_id)
+        if (e->wheel.windowID == win_id && !ph_window_chrome_event(a->win, e))
             scroll(a, &e->wheel);
         break;
     case SDL_MOUSEMOTION:
@@ -2636,6 +2689,10 @@ int ph_app_run(const ph_app_options *opt)
 
     SDL_SetMainReady();
     SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
+#ifdef _WIN32
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_SCALING, "1");
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
         PH_LOGE("couldn't initialise SDL: %s", SDL_GetError());
         return 1;
@@ -2670,6 +2727,9 @@ int ph_app_run(const ph_app_options *opt)
     a.ghost = ph_drag_ghost_create();
     if (!a.ghost)
         PH_LOGW("photo drag image unavailable");
+    a.card = ph_transfer_card_create();
+    if (!a.card)
+        PH_LOGW("transfer card unavailable");
     if (a.polish)
         ph_polish_apply_saved(a.polish, SDL_GetWindowFromID(ph_window_id(a.win)));
     update_title(&a);
@@ -2690,6 +2750,7 @@ int ph_app_run(const ph_app_options *opt)
         atomic_init(&a.screen_on, false);
         atomic_init(&a.airplay_on, false);
         a.screen = ph_screen_start(&screen_cb);
+        ph_window_set_share_available(a.win, a.origin && a.screen);
     }
     if (ensure_pull_dir(&a)) {
         ph_inbox_callbacks inbox_cb = {
@@ -2710,7 +2771,7 @@ int ph_app_run(const ph_app_options *opt)
     a.rx = ph_receiver_start(&rx_opt, &rx_cb);
     if (!a.rx)
         goto done;
-    PH_LOGI("waiting for the iPhone: Control Center > Screen Mirroring > %s", opt->name);
+    PH_LOGI("waiting for the iPhone: connect in Porthole, then tap Share screen");
     start_bluetooth(&a);
     update_title(&a);
     if (opt->usb && pthread_create(&a.usb_thread, NULL, usb_thread_main, &a) == 0)
@@ -2727,7 +2788,8 @@ int ph_app_run(const ph_app_options *opt)
                     || a.keyboard_lift_at
                     || (a.absolute && (ph_abs_busy(&a.abs) || a.abs.wheel != 0
                                        || (a.abs.want_valid && (a.abs.x != a.abs.want_x
-                                                                || a.abs.y != a.abs.want_y))));
+                                                                || a.abs.y != a.abs.want_y))))
+                    || ph_transfer_card_animating(a.card);
         if (SDL_WaitEventTimeout(&e, busy ? 4 : 16)) {
             do {
                 running = handle_event(&a, &e, frame, &seq) && running;
@@ -2736,6 +2798,7 @@ int ph_app_run(const ph_app_options *opt)
         ph_window_tick(a.win);
         sync_clipboard(&a);
         follow_pull(&a);
+        ph_transfer_card_tick(a.card, SDL_GetTicks64());
         if (a.keyboard_lift_at && SDL_GetTicks64() >= a.keyboard_lift_at) {
             a.keyboard_lift_at = 0;
             send_consumer(&a, 0);
@@ -2783,6 +2846,8 @@ int ph_app_run(const ph_app_options *opt)
 done:
     ph_xdnd_cancel();
     hide_ghost(&a);
+    ph_transfer_card_destroy(a.card);
+    a.card = NULL;
     ph_drag_ghost_destroy(a.ghost);
     a.ghost = NULL;
     ph_screen_stop(a.screen); /* before the origin its allow callback reads */

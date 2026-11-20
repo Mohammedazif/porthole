@@ -151,6 +151,12 @@ if(UNIX AND PORTHOLE_WITH_AIRPLAY)
 endif()
 
 if(PORTHOLE_WITH_AIRPLAY)
+    add_executable(test_window_ui test_window_ui.c)
+    target_link_libraries(test_window_ui PRIVATE porthole_app)
+    porthole_set_warnings(test_window_ui)
+    add_test(NAME window_ui COMMAND test_window_ui)
+    set_tests_properties(window_ui PROPERTIES TIMEOUT 15)
+
     add_executable(test_app_pointer test_app_pointer.c)
     target_link_libraries(test_app_pointer PRIVATE porthole_app)
     porthole_set_warnings(test_app_pointer)

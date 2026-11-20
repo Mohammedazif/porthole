@@ -22,7 +22,7 @@ static void print_usage(FILE *out, const char *argv0)
             "Show your iPhone's screen on this PC and control it with your mouse and keyboard.\n"
             "\n"
             "Options:\n"
-            "  -n, --name NAME   Name shown in the iPhone's Screen Mirroring list (default: %s)\n"
+            "  -n, --name NAME   Legacy AirPlay receiver name (default: %s)\n"
             "      --random-ports  Let the system pick network ports instead of the fixed\n"
             "                    TCP 7000/7001/7100 and UDP 6000/6001/7011\n"
             "      --no-bluetooth  View only: don't control the phone over Bluetooth\n"
@@ -31,7 +31,7 @@ static void print_usage(FILE *out, const char *argv0)
             "      --absolute-pointer  Exact absolute pointer (default on Linux)\n"
             "      --no-audio     Mute audio playback on the PC\n"
             "      --setup        Open guided pairing and calibration setup\n"
-            "      --no-setup     Skip automatic first-run setup (F2 still opens it)\n"
+            "      --no-setup     Start on the connection screen (default; F2 opens setup)\n"
             "      --diagnostics  Show local timing diagnostics and log summaries\n"
             "      --pin          Require a 4-digit PIN the first time a device connects\n"
             "      --four-k       Advertise a 3840x2160 H.264 or H.265 picture\n"
@@ -78,7 +78,7 @@ int main(int argc, char **argv)
     bool bluetooth = true;
 #endif
     bool audio = true;
-    bool diagnostics = false, setup = false, auto_setup = true;
+    bool diagnostics = false, setup = false, auto_setup = false;
     bool pin_required = false, four_k = false, autostart = false, usb = true;
 #ifdef _WIN32
     bool absolute_pointer = false; /* the WinRT helper does not publish it yet */

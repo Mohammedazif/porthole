@@ -13,7 +13,7 @@
 #include "core/metrics.h"
 
 /* Client pixels reserved above the picture for the branded title bar. */
-#define PH_WINDOW_BAR_PX 80
+#define PH_WINDOW_BAR_PX 32
 
 struct AVFrame;
 
@@ -31,6 +31,9 @@ void ph_window_set_detail(ph_window *w, const char *detail);
 
 /* Shown in help so the iPhone app can connect. Empty hides the line. */
 void ph_window_set_pull_hint(ph_window *w, const char *hint);
+
+/* Whether both the companion link and the screen-sharing listener started. */
+void ph_window_set_share_available(ph_window *w, bool available);
 
 /* F1 opens/closes local help. Picture coordinates are rejected while it is open. */
 void ph_window_toggle_help(ph_window *w);
@@ -68,7 +71,8 @@ bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy
  * dragging a photo out, never for sending input to the phone. */
 bool ph_window_picture_point(const ph_window *w, int x, int y, double *vx, double *vy);
 
-/* True when the event is on the title bar. The phone does not see those events. */
+/* Consumes local toolbar/button interactions and modal scrolling. The phone never
+ * sees these events. Button actions queue the same shortcuts as F1/F2/F3. */
 bool ph_window_chrome_event(ph_window *w, const SDL_Event *event);
 
 /* Size of the phone screen in stream pixels (0x0 if none yet). */
