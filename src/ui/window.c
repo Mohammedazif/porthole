@@ -11,14 +11,16 @@
 
 #include "core/log.h"
 #include "core/version.h"
+#include "files/places.h"
 #include "ui/text.h"
 #include "ui/brand_art.h"
 #include "ui/placement.h"
 #include "ui/vendor/qrcodegen.h"
 
 #define RESIZE_SETTLE_MS 400 /* a new picture size must last this long before resizing */
-#define WAITING_W 960
-#define WAITING_H 680
+#define WAITING_W 460
+#define WAITING_H 740
+#define RESIZE_EDGE_PX 12
 #define RAIL_W 60
 #define TRANSFERS_W 300
 
@@ -54,6 +56,9 @@ struct ph_window {
     bool media_keys;
     bool feed_on, paused, sound_on; /* app state shown in Settings */
     bool next_relative;
+    char save_label[128];
+    char save_about[256];
+    bool save_custom;
     ph_window_action pending_action;
     char transfer_lines[6][72];
     int transfer_count;
@@ -75,6 +80,7 @@ struct ph_window {
 };
 
 static void place_window(ph_window *w, int pic_w, int pic_h, bool center);
+static void place_waiting(ph_window *w);
 static SDL_HitTestResult hit_edges(SDL_Window *window, const SDL_Point *p, void *data);
 
 enum {
@@ -332,7 +338,7 @@ static void draw_qr(SDL_Renderer *renderer, const char *text, SDL_Rect box)
 enum { SET_SWITCH, SET_CHOICE, SET_BUTTON };
 enum {
     SET_POINTER, SET_WHEEL, SET_PAUSE, SET_GUIDE, SET_CTRL, SET_MEDIA, SET_BLUR, SET_SOUND,
-    SET_COPY, SET_FORGET, SET_QUIT, SET_ROWS
+    SET_SAVE, SET_COPY, SET_FORGET, SET_QUIT, SET_ROWS
 };
 
 typedef struct setting_row {
@@ -361,6 +367,7 @@ static const setting_row setting_rows[SET_ROWS] = {
                   SET_SWITCH, NULL, NULL},
     [SET_SOUND] = {"SOUND", "Play iPhone sound on this PC", "Uses this PC's default speakers.",
                    SET_SWITCH, NULL, NULL},
+    [SET_SAVE] = {"FILES", "Save files from the iPhone", NULL, SET_CHOICE, "Downloads", "Folder"},
     [SET_COPY] = {"PAIRING", "Pairing details", NULL, SET_BUTTON, "Copy", NULL},
     [SET_FORGET] = {NULL, "Forget this iPhone", "It needs the pairing code again to connect.",
                     SET_BUTTON, "Forget", NULL},
@@ -378,8 +385,23 @@ static bool setting_on(const ph_window *w, int row)
     case SET_MEDIA: return w->media_keys;
     case SET_BLUR: return w->release_blur;
     case SET_SOUND: return w->sound_on;
+    case SET_SAVE: return w->save_custom;
     default: return false;
     }
+}
+
+/* The save-folder line changes the height of that settings row, so refresh it
+ * before laying the rows out. */
+static void load_save_place(ph_window *w)
+{
+    char label[128];
+
+    if (!ph_place_save_label(label, sizeof label))
+        snprintf(label, sizeof label, "Downloads");
+    snprintf(w->save_label, sizeof w->save_label, "%s", label);
+    w->save_custom = ph_place_save_is_custom();
+    if (w->save_custom)
+        snprintf(w->save_about, sizeof w->save_about, "Saving in %s.", label);
 }
 
 typedef struct setting_box {
@@ -400,6 +422,9 @@ static const char *setting_about(const ph_window *w, int row)
 {
     if (row == SET_COPY)
         return w->pull_hint[0] ? w->pull_hint : "Shown once the iPhone connection starts.";
+    if (row == SET_SAVE)
+        return w->save_custom && w->save_about[0] ? w->save_about
+                                                  : "Downloads, unless you choose another folder.";
     return setting_rows[row].about;
 }
 
@@ -475,6 +500,8 @@ static void draw_settings(ph_window *w, int width, int height)
 {
     SDL_Renderer *r = w->renderer;
     int left, inner = settings_column(width, &left);
+
+    load_save_place(w);
     int y = settings_top() - w->modal_scroll, content;
     SDL_Rect done = settings_done_box(width), clip = {0, settings_top() - 8, width, height};
 
@@ -813,7 +840,7 @@ static void draw_help(ph_window *w, int width, int height, int top)
                        "Alt+L: hold\n"
                        "Alt+U: bottom swipe\n"
                        "Alt+K: iPhone keyboard\n"
-                       "Alt+V types into the field\n"
+                       "Ctrl+V pastes plain text into the field\n"
                        "Copy both ways with the app\n"
                        "PC keys use Bluetooth\n"
                        "Esc cancels a hold\n"
@@ -830,7 +857,7 @@ static void draw_help(ph_window *w, int width, int height, int top)
                         "Alt+Enter  Fullscreen\n"
                         "Alt+T  Always on top\n"
                         "Alt+1  Actual pixels\n"
-                        "Alt+V  Paste clipboard\n"
+                        "Ctrl+V  Paste text into the field\n"
                         "Alt+M  Mute PC audio\n"
                         "Alt+minus / equals  Volume\n"
                         "Alt+comma / period  Audio sync";
@@ -1471,13 +1498,17 @@ ph_window *ph_window_create(const char *title)
     w->media_keys = true;
     w->sound_on = true;
     w->transfer_percent = -1;
+#ifdef _WIN32
+    /* Without this, a borderless window gets no thick frame and Windows will not resize it. */
+    SDL_SetHint("SDL_BORDERLESS_RESIZABLE_STYLE", "1");
+#endif
     w->window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WAITING_W,
                                  WAITING_H,
-                                 SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_BORDERLESS);
+                                 SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_BORDERLESS |
+                                     SDL_WINDOW_HIDDEN);
     snprintf(w->title, sizeof w->title, "%s", title ? title : "Porthole");
     if (!w->window)
         goto fail;
-    place_window(w, WAITING_W, WAITING_H - PH_WINDOW_BAR_PX, true);
     /* No vsync: presenting a frame must not block this thread, which also forwards
      * mouse and keyboard input, for up to a whole display refresh. */
 #if !defined(_WIN32)
@@ -1529,7 +1560,8 @@ ph_window *ph_window_create(const char *title)
         }
     }
     SDL_SetWindowMinimumSize(w->window, 320, 480);
-    if (SDL_SetWindowHitTest(w->window, hit_edges, NULL) != 0)
+    place_waiting(w);
+    if (SDL_SetWindowHitTest(w->window, hit_edges, w) != 0)
         PH_LOGW("window edges cannot resize: %s", SDL_GetError());
     ph_window_redraw(w);
     return w;
@@ -1538,6 +1570,14 @@ fail:
     PH_LOGE("couldn't create the window: %s", SDL_GetError());
     ph_window_destroy(w);
     return NULL;
+}
+
+void ph_window_show(ph_window *w)
+{
+    if (!w || !w->window)
+        return;
+    ph_window_redraw(w);
+    SDL_ShowWindow(w->window);
 }
 
 void ph_window_set_title(ph_window *w, const char *title)
@@ -1660,6 +1700,7 @@ bool ph_window_settings_target(ph_window *w, int row, int side, int *x, int *y)
 
     if (!w || !x || !y || row < -1 || row >= SET_ROWS)
         return false;
+    load_save_place(w);
     SDL_GetWindowSize(w->window, &width, &height);
     if (row == -1) {
         SDL_Rect done = settings_done_box(width);
@@ -1897,6 +1938,28 @@ static void usable_bounds(SDL_Window *window, SDL_Rect *usable)
     }
 }
 
+static void place_waiting(ph_window *w)
+{
+    SDL_Rect usable;
+    int client_w = WAITING_W;
+    int client_h = WAITING_H;
+    int x, y;
+
+    usable_bounds(w->window, &usable);
+    if (usable.w < 1)
+        usable.w = client_w;
+    if (usable.h < 1)
+        usable.h = client_h;
+    if (client_w > usable.w)
+        client_w = usable.w;
+    if (client_h > usable.h)
+        client_h = usable.h;
+    x = usable.x + (usable.w - client_w) / 2;
+    y = usable.y + (usable.h - client_h) / 2;
+    SDL_SetWindowSize(w->window, client_w, client_h);
+    SDL_SetWindowPosition(w->window, x, y);
+}
+
 static void place_window(ph_window *w, int pic_w, int pic_h, bool center)
 {
     SDL_Rect usable;
@@ -1974,20 +2037,47 @@ void ph_window_keep_aspect(ph_window *w)
     w->sized_h = wh;
 }
 
-/* Resizing the frameless window: the right edge and the bottom-right corner only. The
- * left and bottom edges stay with the phone, where Back and Home are swipes from the
- * edge; the other side follows to keep the phone's shape (ph_window_keep_aspect). */
+/* While the phone picture is showing, only the right edge and bottom-right corner
+ * resize. The left and bottom edges stay free for Back and Home. The connect screen
+ * resizes from every edge. */
 static SDL_HitTestResult hit_edges(SDL_Window *window, const SDL_Point *p, void *data)
 {
+    const ph_window *w = data;
     int ww, wh;
+    bool left, right, top, bottom;
 
-    (void)data;
-    if (SDL_GetWindowFlags(window) & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP))
+    if (!p || (SDL_GetWindowFlags(window) &
+               (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)))
         return SDL_HITTEST_NORMAL;
     SDL_GetWindowSize(window, &ww, &wh);
-    if (p->x >= ww - 14 && p->y >= wh - 14)
+    if (ww < 1 || wh < 1)
+        return SDL_HITTEST_NORMAL;
+    right = p->x >= ww - RESIZE_EDGE_PX;
+    bottom = p->y >= wh - RESIZE_EDGE_PX;
+    if (w && mirror_chrome(w)) {
+        if (right && bottom)
+            return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
+        if (right && p->y >= PH_WINDOW_BAR_PX)
+            return SDL_HITTEST_RESIZE_RIGHT;
+        return SDL_HITTEST_NORMAL;
+    }
+    left = p->x < RESIZE_EDGE_PX;
+    top = p->y < RESIZE_EDGE_PX;
+    if (top && left)
+        return SDL_HITTEST_RESIZE_TOPLEFT;
+    if (top && right)
+        return SDL_HITTEST_RESIZE_TOPRIGHT;
+    if (bottom && left)
+        return SDL_HITTEST_RESIZE_BOTTOMLEFT;
+    if (bottom && right)
         return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
-    if (p->x >= ww - 5 && p->y >= PH_WINDOW_BAR_PX)
+    if (top)
+        return SDL_HITTEST_RESIZE_TOP;
+    if (bottom)
+        return SDL_HITTEST_RESIZE_BOTTOM;
+    if (left)
+        return SDL_HITTEST_RESIZE_LEFT;
+    if (right)
         return SDL_HITTEST_RESIZE_RIGHT;
     return SDL_HITTEST_NORMAL;
 }
@@ -2190,8 +2280,14 @@ static transfer_row read_transfer(const char *line)
         row.sub = "Could not send";
         row.sub_color = color_warn;
     } else if (!strncmp(line, "Received ", 9)) {
+        static char sub[96];
+        char label[64];
+
         row.title = line + 9;
-        row.sub = "From iPhone, in Downloads";
+        if (!ph_place_save_label(label, sizeof label))
+            snprintf(label, sizeof label, "Downloads");
+        snprintf(sub, sizeof sub, "From iPhone, in %s", label);
+        row.sub = sub;
     }
     return row;
 }
@@ -2321,8 +2417,8 @@ static void draw_transfers(ph_window *w, int width, int height)
         list_end = height - 12;
     if (!w->transfer_count) {
         if (!w->transfer_active[0])
-            draw_text(r, "Nothing sent yet. Share from any app on the iPhone to save files in Downloads, "
-                         "or drop files here to send them to the iPhone.",
+            draw_text(r, "Nothing sent yet. Share from the iPhone to save files in the folder from "
+                         "Settings, or drop files here to send them to the iPhone.",
                       t.x + 16, y, inner, 1, color_muted);
     } else {
         draw_text(r, "RECENT", t.x + 16, y, inner, 1, color_muted);
@@ -2491,6 +2587,8 @@ bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
         }
     }
     SDL_GetWindowSize(w->window, &win_w, &win_h);
+    if (w->settings_visible)
+        load_save_place(w);
     if (event->type == SDL_MOUSEMOTION) {
         Uint32 held;
         x = event->motion.x;
@@ -2603,6 +2701,12 @@ bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
             case SET_SOUND:
                 w->sound_on = !w->sound_on;
                 w->pending_action = PH_WINDOW_ACTION_MUTE;
+                break;
+            case SET_SAVE:
+                if (side == 1)
+                    w->pending_action = PH_WINDOW_ACTION_PICK_FOLDER;
+                else if (w->save_custom)
+                    w->pending_action = PH_WINDOW_ACTION_SAVE_DOWNLOADS;
                 break;
             case SET_COPY:
                 if (w->pull_hint[0] && SDL_SetClipboardText(w->pull_hint) == 0)

@@ -84,4 +84,9 @@ bool ph_origin_put_clip(ph_origin *origin, char kind, const void *data, size_t l
 bool ph_origin_take_clip(ph_origin *origin, char *kind, void **data, size_t *len);
 unsigned ph_origin_clip_flags(ph_origin *origin);
 
+/* Asks the connected phone to send its pasteboard. Phones that do not know CLIP? ignore it.
+ * waiting is true until that answer is taken, or for about two seconds. */
+void ph_origin_ask_clip(ph_origin *origin);
+bool ph_origin_clip_waiting(ph_origin *origin);
+
 #endif

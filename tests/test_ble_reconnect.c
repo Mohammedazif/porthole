@@ -29,6 +29,8 @@ static void quit(void)
     SDL_PushEvent(&event);
 }
 
+void ph_window_show(ph_window *w) { (void)w; }
+
 ph_window *ph_window_create(const char *title)
 {
     (void)title;

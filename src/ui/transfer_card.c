@@ -29,8 +29,8 @@
 #include <SDL_syswm.h>
 #endif
 
-#define CARD_W 420
-#define CARD_H 520
+#define CARD_W 400
+#define CARD_H 280
 #define CARD_R 28
 #define SLIDE_PX 40
 #define IN_MS 280
@@ -66,6 +66,7 @@ struct ph_transfer_card {
     int done, total;
     char path[4096];
     char name[160];
+    char place[64]; /* folder name shown under the file, such as Downloads */
     SDL_Rect open_r, show_r, close_r;
 };
 
@@ -123,49 +124,6 @@ static void fill_round(SDL_Renderer *renderer, int x, int y, int w, int h, int r
     fill_circle(renderer, x + w - rad - 1, y + h - rad - 1, rad);
 }
 
-static void span_h(SDL_Renderer *renderer, int x0, int x1, int y)
-{
-    if (x1 < x0) {
-        int swap = x0;
-        x0 = x1;
-        x1 = swap;
-    }
-    fill_rect(renderer, x0, y, x1 - x0 + 1, 1);
-}
-
-static void tri_edge(int y, int x0, int y0, int x1, int y1, int *hits, int *xs)
-{
-    int x;
-    if (y0 == y1)
-        return;
-    if ((y < y0 && y < y1) || (y > y0 && y > y1))
-        return;
-    x = x0 + (x1 - x0) * (y - y0) / (y1 - y0);
-    if (*hits < 2)
-        xs[(*hits)++] = x;
-}
-
-static void fill_tri(SDL_Renderer *renderer, int x0, int y0, int x1, int y1, int x2, int y2)
-{
-    int miny = y0, maxy = y0, y;
-    if (y1 < miny)
-        miny = y1;
-    if (y2 < miny)
-        miny = y2;
-    if (y1 > maxy)
-        maxy = y1;
-    if (y2 > maxy)
-        maxy = y2;
-    for (y = miny; y <= maxy; y++) {
-        int hits = 0, xs[2] = {0, 0};
-        tri_edge(y, x0, y0, x1, y1, &hits, xs);
-        tri_edge(y, x1, y1, x2, y2, &hits, xs);
-        tri_edge(y, x2, y2, x0, y0, &hits, xs);
-        if (hits >= 2)
-            span_h(renderer, xs[0], xs[1], y);
-    }
-}
-
 static void thick_line(SDL_Renderer *renderer, int x0, int y0, int x1, int y1, int rad)
 {
     int steps = abs(x1 - x0) + abs(y1 - y0);
@@ -174,39 +132,6 @@ static void thick_line(SDL_Renderer *renderer, int x0, int y0, int x1, int y1, i
         steps = 1;
     for (i = 0; i <= steps; i++)
         fill_circle(renderer, x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps, rad);
-}
-
-static int lerp(int a, int b, int t, int tmax)
-{
-    if (tmax < 1)
-        return b;
-    if (t < 0)
-        t = 0;
-    if (t > tmax)
-        t = tmax;
-    return a + (b - a) * t / tmax;
-}
-
-static void ring(SDL_Renderer *renderer, int cx, int cy, int outer, int inner)
-{
-    int oy;
-    for (oy = -outer; oy <= outer; oy++) {
-        int remain_o = outer * outer - oy * oy;
-        int remain_i = inner * inner - oy * oy;
-        int dxo, dxi;
-        if (remain_o < 0)
-            continue;
-        dxo = isqrt_int(remain_o);
-        rgba(renderer, lerp(255, 168, oy + outer, outer * 2), lerp(150, 64, oy + outer, outer * 2),
-             lerp(48, 232, oy + outer, outer * 2), 255);
-        if (remain_i <= 0) {
-            span_h(renderer, cx - dxo, cx + dxo, cy + oy);
-            continue;
-        }
-        dxi = isqrt_int(remain_i);
-        span_h(renderer, cx - dxo, cx - dxi, cy + oy);
-        span_h(renderer, cx + dxi, cx + dxo, cy + oy);
-    }
 }
 
 static bool ends_with(const char *text, const char *ext)
@@ -345,6 +270,29 @@ static void rest_on_display(ph_transfer_card *c)
         c->rest_y = bounds.y + 24;
 }
 
+/* One line. A long name keeps its ending, so the extension stays visible. */
+static void fit_name(char *out, size_t cap, const char *text, int width, int scale)
+{
+    size_t n, tail, head;
+
+    if (!text)
+        text = "";
+    snprintf(out, cap, "%s", text);
+    if (width < 1 || ph_text_width(out, scale) <= width)
+        return;
+    n = strlen(text);
+    tail = n > 12 ? 12 : n / 2;
+    for (head = n > tail ? n - tail : 0; head > 0; head--) {
+        char probe[180];
+        int len = snprintf(probe, sizeof probe, "%.*s...%s", (int)head, text, text + (n - tail));
+        if (len > 0 && len < (int)sizeof probe && ph_text_width(probe, scale) <= width) {
+            snprintf(out, cap, "%s", probe);
+            return;
+        }
+    }
+    snprintf(out, cap, "%s", "...");
+}
+
 static int draw_centered(SDL_Renderer *renderer, const char *text, int y, int scale, SDL_Color color)
 {
     int box = CARD_W - PAD * 2;
@@ -355,90 +303,6 @@ static int draw_centered(SDL_Renderer *renderer, const char *text, int y, int sc
         width = box;
     }
     return ph_ui_draw_text(renderer, text, x, y, width, scale, color);
-}
-
-/* Each line is centered. A long name breaks at a space when it has one. */
-static int draw_wrapped_center(SDL_Renderer *renderer, const char *text, int y, int scale,
-                               SDL_Color color)
-{
-    int box = CARD_W - PAD * 2;
-    const char *rest = text;
-    int lines = 0;
-    char line[160];
-
-    if (!text || !text[0])
-        return y;
-    while (*rest && lines < 3) {
-        size_t n = strlen(rest);
-        size_t take = n;
-        size_t i;
-        if (ph_text_width(rest, scale) > box) {
-            size_t lo = 1, hi = n;
-            while (lo < hi) {
-                size_t mid = (lo + hi + 1) / 2;
-                if (mid >= sizeof line)
-                    mid = sizeof line - 1;
-                memcpy(line, rest, mid);
-                line[mid] = 0;
-                if (ph_text_width(line, scale) <= box)
-                    lo = mid;
-                else
-                    hi = mid - 1;
-            }
-            take = lo;
-            for (i = take; i > 0; i--) {
-                if (rest[i] == ' ') {
-                    take = i;
-                    break;
-                }
-            }
-        }
-        if (take < 1)
-            take = 1;
-        if (take >= sizeof line)
-            take = sizeof line - 1;
-        memcpy(line, rest, take);
-        line[take] = 0;
-        while (take > 0 && line[take - 1] == ' ')
-            line[--take] = 0;
-        y = draw_centered(renderer, line, y, scale, color);
-        rest += take;
-        while (*rest == ' ')
-            rest++;
-        lines++;
-    }
-    return y;
-}
-
-static void draw_page(SDL_Renderer *renderer, int x, int y)
-{
-    const int w = 124, h = 156, fold = 34;
-    rgba(renderer, 246, 246, 248, 255);
-    fill_round(renderer, x, y, w, h, 12);
-    rgba(renderer, 214, 214, 220, 255);
-    {
-        int i;
-        for (i = 0; i < fold; i++)
-            span_h(renderer, x + w - fold + i, x + w - 1, y + i);
-    }
-}
-
-static void draw_icon(SDL_Renderer *renderer, const ph_transfer_card *c, int x, int y)
-{
-    int cx = x + 62, cy = y + 78;
-    draw_page(renderer, x, y);
-    if (c->video) {
-        ring(renderer, cx, cy, 34, 22);
-        rgba(renderer, 255, 255, 255, 255);
-        fill_tri(renderer, cx - 8, cy - 14, cx - 8, cy + 14, cx + 14, cy);
-    } else {
-        rgba(renderer, 255, 196, 90, 255);
-        fill_circle(renderer, x + 90, y + 40, 11);
-        rgba(renderer, 126, 170, 214, 255);
-        fill_tri(renderer, x + 18, y + 128, x + 62, y + 78, x + 106, y + 128);
-        rgba(renderer, 90, 142, 196, 255);
-        fill_tri(renderer, x + 48, y + 128, x + 86, y + 92, x + 112, y + 128);
-    }
 }
 
 static void draw_check(SDL_Renderer *renderer, int cx, int cy, int scale)
@@ -508,8 +372,6 @@ static void paint(ph_transfer_card *c, Uint64 now)
     char sub[96];
     char frac[32];
     int y, scale;
-    int page_x = (CARD_W - 124) / 2;
-    int page_y = 92;
 
     if (!c->renderer || c->phase == PHASE_HIDDEN)
         return;
@@ -555,35 +417,43 @@ static void paint(ph_transfer_card *c, Uint64 now)
     thick_line(c->renderer, c->close_r.x + 25, c->close_r.y + 11, c->close_r.x + 11,
                c->close_r.y + 25, 1);
 
-    draw_icon(c->renderer, c, page_x, page_y);
     scale = check_scale(c, now);
-    if (scale > 0)
-        draw_check(c->renderer, page_x + 62, page_y + 156 - 8, scale);
-    else if (c->total > 0) {
-        int track = 180;
-        int fill = c->done > 0 ? track * c->done / c->total : 0;
-        int bx = (CARD_W - track) / 2;
-        int by = page_y + 156 + 16;
-        if (fill > track)
-            fill = track;
-        rgba(c->renderer, 58, 58, 62, 255);
-        fill_round(c->renderer, bx, by, track, 6, 3);
-        rgba(c->renderer, 168, 85, 247, 255);
-        if (fill > 0)
-            fill_round(c->renderer, bx, by, fill < 6 ? 6 : fill, 6, 3);
+    y = 78;
+    if (c->name[0]) {
+        char shown[180];
+        int text_x = PAD + 56;
+        int text_w = CARD_W - text_x - PAD;
+        rgba(c->renderer, 246, 246, 248, 255);
+        fill_round(c->renderer, PAD, y, 40, 50, 6);
+        if (scale > 0)
+            draw_check(c->renderer, PAD + 32, y + 42, scale > 36 ? 36 : scale);
+        fit_name(shown, sizeof shown, c->name, text_w, 2);
+        y = ph_ui_draw_text(c->renderer, shown, text_x, y + 14, text_w, 2, white);
+        y += 2;
     }
-
-    y = page_y + 156 + 36;
-    if (c->name[0])
-        y = draw_wrapped_center(c->renderer, c->name, y, 3, white) + 8;
     if (!c->received)
         snprintf(sub, sizeof sub, "Receiving from iPhone");
+    else if (c->place[0] && c->total > 1)
+        snprintf(sub, sizeof sub, "Saved %d items in %s", c->total, c->place);
+    else if (c->place[0])
+        snprintf(sub, sizeof sub, "Saved in %s", c->place);
     else if (c->total > 1)
         snprintf(sub, sizeof sub, "Received %d items from iPhone", c->total);
     else
         snprintf(sub, sizeof sub, "Received from iPhone");
-    y = draw_centered(c->renderer, sub, y, 2, gray) + 6;
+    y = ph_ui_draw_text(c->renderer, sub, c->name[0] ? PAD + 56 : PAD, y, CARD_W - PAD * 2 - (c->name[0] ? 56 : 0),
+                        2, gray) + 10;
     if (!c->received && c->total > 0) {
+        int track = CARD_W - PAD * 2;
+        int fill = c->done > 0 ? track * c->done / c->total : 0;
+        if (fill > track)
+            fill = track;
+        rgba(c->renderer, 58, 58, 62, 255);
+        fill_round(c->renderer, PAD, y, track, 6, 3);
+        rgba(c->renderer, 255, 255, 255, 255);
+        if (fill > 0)
+            fill_round(c->renderer, PAD, y, fill < 6 ? 6 : fill, 6, 3);
+        y += 16;
         snprintf(frac, sizeof frac, "%d of %d", c->done, c->total);
         draw_centered(c->renderer, frac, y, 2, gray);
     }
@@ -708,6 +578,14 @@ void ph_transfer_card_destroy(ph_transfer_card *c)
     if (c->arrow)
         SDL_FreeCursor(c->arrow);
     free(c);
+}
+
+void ph_transfer_card_place(ph_transfer_card *c, const char *place)
+{
+    if (!c)
+        return;
+    snprintf(c->place, sizeof c->place, "%s", place ? place : "");
+    c->dirty = true;
 }
 
 void ph_transfer_card_show(ph_transfer_card *c, const char *path, int done, int total,

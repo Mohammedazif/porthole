@@ -126,7 +126,8 @@ ph_codec_advertise ph_codec_advertise_for(bool four_k)
     } else {
         out.width = 1920;
         out.height = 1080;
-        out.max_fps = 60;
+        /* The iPhone encodes every advertised frame, so 60 fps runs the encoder hot. */
+        out.max_fps = 30;
     }
     return out;
 }

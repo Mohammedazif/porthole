@@ -1,5 +1,6 @@
 #include "files/places.h"
 
+#include "core/config.h"
 #include "core/log.h"
 #include "core/sock.h"
 #include "core/upath.h"
@@ -8,6 +9,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 /* The local port the running Porthole takes "SEND <path>" on (files/origin.c). */
 #define PH_PLACE_SEND_PORT 47734
@@ -130,6 +135,199 @@ void ph_place_install_send_to(void)
 }
 
 #endif
+
+static bool is_dir(const char *path)
+{
+#ifdef _WIN32
+    wchar_t *wide = ph_wide(path);
+    DWORD attr = wide ? GetFileAttributesW(wide) : INVALID_FILE_ATTRIBUTES;
+    free(wide);
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    struct stat st;
+    return path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
+static bool same_dir(const char *a, const char *b)
+{
+#ifdef _WIN32
+    return _stricmp(a, b) == 0;
+#else
+    return strcmp(a, b) == 0;
+#endif
+}
+
+static void trim_slash(char *path)
+{
+    size_t n = strlen(path);
+
+    while (n > 1 && (path[n - 1] == '/' || path[n - 1] == '\\')) {
+        if (n == 3 && path[1] == ':')
+            break; /* keep C:\ */
+        path[--n] = 0;
+    }
+}
+
+static bool read_save(char *out, size_t cap)
+{
+    char path[1100];
+    FILE *file;
+
+    if (!ph_config_path("save-dir", path, sizeof path))
+        return false;
+    file = ph_fopen(path, "r");
+    if (!file)
+        return false;
+    if (!fgets(out, (int)cap, file)) {
+        fclose(file);
+        return false;
+    }
+    fclose(file);
+    out[strcspn(out, "\r\n")] = 0;
+    return out[0] != 0;
+}
+
+static bool write_save(const char *line)
+{
+    char path[1100];
+    FILE *file;
+
+    if (!ph_config_path("save-dir", path, sizeof path))
+        return false;
+    file = ph_fopen(path, "w");
+    if (!file)
+        return false;
+    fputs(line, file);
+    fputc('\n', file);
+    fclose(file);
+    return true;
+}
+
+bool ph_place_save_dir(char *out, size_t cap)
+{
+    char line[1024];
+
+    if (!out || cap < 4)
+        return false;
+    if (read_save(line, sizeof line)) {
+        if (!strcmp(line, "desktop"))
+            return ph_place_dir(PH_PLACE_DESKTOP, out, cap);
+        if (strcmp(line, "downloads") != 0 && is_dir(line) && strlen(line) < cap) {
+            snprintf(out, cap, "%s", line);
+            return true;
+        }
+    }
+    return ph_place_dir(PH_PLACE_DOWNLOADS, out, cap);
+}
+
+bool ph_place_save_label(char *out, size_t cap)
+{
+    char dir[1024], known[1024];
+    const char *base;
+
+    if (!out || cap < 12 || !ph_place_save_dir(dir, sizeof dir))
+        return false;
+    if (ph_place_dir(PH_PLACE_DOWNLOADS, known, sizeof known) && same_dir(dir, known)) {
+        snprintf(out, cap, "Downloads");
+        return true;
+    }
+    if (ph_place_dir(PH_PLACE_DESKTOP, known, sizeof known) && same_dir(dir, known)) {
+        snprintf(out, cap, "Desktop");
+        return true;
+    }
+    base = ph_path_base(dir);
+    snprintf(out, cap, "%s", base[0] ? base : dir);
+    return out[0] != 0;
+}
+
+bool ph_place_save_is_custom(void)
+{
+    char label[64];
+    return ph_place_save_label(label, sizeof label) && strcmp(label, "Downloads") != 0;
+}
+
+bool ph_place_set_save_dir(const char *dir)
+{
+    char clean[1024], known[1024];
+
+    if (!dir || !dir[0])
+        return write_save("downloads");
+    if (strlen(dir) >= sizeof clean || strchr(dir, '\n') || strchr(dir, '\r'))
+        return false;
+    snprintf(clean, sizeof clean, "%s", dir);
+    trim_slash(clean);
+    if (ph_place_dir(PH_PLACE_DOWNLOADS, known, sizeof known) && same_dir(clean, known))
+        return write_save("downloads");
+    if (ph_place_dir(PH_PLACE_DESKTOP, known, sizeof known) && same_dir(clean, known))
+        return write_save("desktop");
+    if (!is_dir(clean))
+        return false;
+    return write_save(clean);
+}
+
+bool ph_place_pick_folder(char *out, size_t cap)
+{
+    if (!out || cap < 4)
+        return false;
+#ifdef _WIN32
+    {
+        IFileOpenDialog *dialog = NULL;
+        IShellItem *item = NULL;
+        PWSTR wide = NULL;
+        DWORD options = 0;
+        HRESULT init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+        bool ok = false;
+
+        if (SUCCEEDED(CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
+                                       &IID_IFileOpenDialog, (void **)&dialog))) {
+            IFileOpenDialog_GetOptions(dialog, &options);
+            IFileOpenDialog_SetOptions(dialog, options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM
+                                                    | FOS_PATHMUSTEXIST);
+            IFileOpenDialog_SetTitle(dialog, L"Save files from the iPhone");
+            if (SUCCEEDED(IFileOpenDialog_Show(dialog, NULL))
+                && SUCCEEDED(IFileOpenDialog_GetResult(dialog, &item))
+                && SUCCEEDED(IShellItem_GetDisplayName(item, SIGDN_FILESYSPATH, &wide)) && wide
+                && ph_narrow(wide, out, cap) && is_dir(out))
+                ok = true;
+        }
+        CoTaskMemFree(wide);
+        if (item)
+            IShellItem_Release(item);
+        if (dialog)
+            IFileOpenDialog_Release(dialog);
+        if (init == S_OK)
+            CoUninitialize();
+        return ok;
+    }
+#else
+    {
+        const char *cmd = NULL;
+        FILE *pipe;
+        char buf[1024];
+
+        if (access("/usr/bin/zenity", X_OK) == 0)
+            cmd = "zenity --file-selection --directory --title=\"Save files from the iPhone\" 2>/dev/null";
+        else if (access("/usr/bin/kdialog", X_OK) == 0)
+            cmd = "kdialog --getexistingdirectory \"$HOME\" --title \"Save files from the iPhone\" 2>/dev/null";
+        if (!cmd)
+            return false;
+        pipe = popen(cmd, "r");
+        if (!pipe)
+            return false;
+        if (!fgets(buf, sizeof buf, pipe)) {
+            pclose(pipe);
+            return false;
+        }
+        pclose(pipe);
+        buf[strcspn(buf, "\r\n")] = 0;
+        if (!buf[0] || strlen(buf) >= cap || !is_dir(buf))
+            return false;
+        snprintf(out, cap, "%s", buf);
+        return true;
+    }
+#endif
+}
 
 int ph_place_send_to_running(int count, char **paths)
 {

@@ -270,6 +270,8 @@ static void publish_frame(void)
     frame_ready(frame_user);
 }
 
+void ph_window_show(ph_window *w) { (void)w; }
+
 ph_window *ph_window_create(const char *title)
 {
     (void)title;

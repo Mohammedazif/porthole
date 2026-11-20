@@ -17,6 +17,7 @@
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -267,6 +268,122 @@ bool ph_winclip_write_png(const void *png, size_t len)
     return ok;
 }
 
+/* OpenClipboard(NULL): a window handle can fail while the caller still reports success. */
+bool ph_winclip_read_text(char **out, size_t *len, size_t max)
+{
+    HANDLE data;
+    const wchar_t *wide;
+    char *utf8, *norm;
+    int bytes;
+    size_t n, j, k;
+
+    if (out)
+        *out = NULL;
+    if (len)
+        *len = 0;
+    if (!out || !len || !max || !open_board())
+        return false;
+    data = GetClipboardData(CF_UNICODETEXT);
+    wide = data ? GlobalLock(data) : NULL;
+    if (!wide || !wide[0]) {
+        if (wide)
+            GlobalUnlock(data);
+        CloseClipboard();
+        return false;
+    }
+    bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1, NULL, 0, NULL, NULL);
+    if (bytes <= 1 || (size_t)bytes > max + 1) {
+        GlobalUnlock(data);
+        CloseClipboard();
+        return false;
+    }
+    utf8 = malloc((size_t)bytes);
+    if (!utf8 || WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1, utf8, bytes, NULL, NULL)
+                   != bytes) {
+        free(utf8);
+        GlobalUnlock(data);
+        CloseClipboard();
+        return false;
+    }
+    GlobalUnlock(data);
+    CloseClipboard();
+    n = (size_t)bytes - 1;
+    norm = malloc(n + 1);
+    if (!norm) {
+        free(utf8);
+        return false;
+    }
+    k = 0;
+    for (j = 0; j < n; j++) {
+        if (utf8[j] == '\r') {
+            norm[k++] = '\n';
+            if (j + 1 < n && utf8[j + 1] == '\n')
+                j++;
+            continue;
+        }
+        norm[k++] = utf8[j];
+    }
+    norm[k] = 0;
+    free(utf8);
+    if (k == 0 || k > max) {
+        free(norm);
+        return false;
+    }
+    *out = norm;
+    *len = k;
+    return true;
+}
+
+bool ph_winclip_write_text(const char *utf8, size_t len)
+{
+    char *crlf;
+    wchar_t *wide = NULL;
+    HGLOBAL mem = NULL;
+    size_t i, out = 0;
+    int wchars;
+    bool ok = false;
+
+    if (!utf8 || !len || len > (SIZE_MAX / 2) - 1)
+        return false;
+    crlf = malloc(len * 2 + 1);
+    if (!crlf)
+        return false;
+    for (i = 0; i < len; i++) {
+        if (utf8[i] == '\r') {
+            crlf[out++] = '\r';
+            crlf[out++] = '\n';
+            if (i + 1 < len && utf8[i + 1] == '\n')
+                i++;
+            continue;
+        }
+        if (utf8[i] == '\n') {
+            crlf[out++] = '\r';
+            crlf[out++] = '\n';
+            continue;
+        }
+        crlf[out++] = utf8[i];
+    }
+    crlf[out] = 0;
+    wchars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, crlf, -1, NULL, 0);
+    if (wchars > 1)
+        wide = calloc((size_t)wchars, sizeof *wide);
+    if (wide && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, crlf, -1, wide, wchars) == wchars)
+        mem = global_copy(wide, (size_t)wchars * sizeof *wide);
+    if (mem && open_board()) {
+        EmptyClipboard();
+        if (SetClipboardData(CF_UNICODETEXT, mem)) {
+            mem = NULL;
+            ok = true;
+        }
+        CloseClipboard();
+    }
+    if (mem)
+        GlobalFree(mem);
+    free(wide);
+    free(crlf);
+    return ok;
+}
+
 #else
 
 bool ph_winclip_read_png(uint8_t **out, size_t *len, size_t max)
@@ -282,6 +399,23 @@ bool ph_winclip_read_png(uint8_t **out, size_t *len, size_t max)
 bool ph_winclip_write_png(const void *png, size_t len)
 {
     (void)png;
+    (void)len;
+    return false;
+}
+
+bool ph_winclip_read_text(char **out, size_t *len, size_t max)
+{
+    (void)max;
+    if (out)
+        *out = NULL;
+    if (len)
+        *len = 0;
+    return false;
+}
+
+bool ph_winclip_write_text(const char *utf8, size_t len)
+{
+    (void)utf8;
     (void)len;
     return false;
 }

@@ -56,6 +56,16 @@ int main(void)
     CHECK(ev[0].usage == 0x04 && ev[0].modifiers == PH_HID_MOD_LSHIFT);
     CHECK(ev[1].usage == 0x05 && ev[1].modifiers == 0);
     CHECK(ph_paste_encode(only_high, ev, 4) == 0);
+    CHECK(ph_paste_encode("A\r\nB", ev, 4) == 3);
+    CHECK(ev[0].usage == 0x04 && ev[1].usage == 0x28 && ev[2].usage == 0x05);
+
+    CHECK(ph_paste_typeable("Hi\r\n"));
+    CHECK(ph_paste_typeable("A\r\nB"));
+    CHECK(!ph_paste_typeable(""));
+    CHECK(!ph_paste_typeable(NULL));
+    CHECK(!ph_paste_typeable("\r"));
+    CHECK(!ph_paste_typeable(non_ascii));
+    CHECK(!ph_paste_typeable(only_high));
 
     if (g_failures) {
         fprintf(stderr, "%d check(s) failed\n", g_failures);

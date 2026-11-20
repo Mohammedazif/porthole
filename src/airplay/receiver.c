@@ -359,8 +359,8 @@ ph_receiver *ph_receiver_start(const ph_receiver_options *opt, const ph_receiver
     }
     raop_set_plist(r->raop, "width", opt->width ? opt->width : 1920);
     raop_set_plist(r->raop, "height", opt->height ? opt->height : 1080);
-    raop_set_plist(r->raop, "refreshRate", 60);
-    raop_set_plist(r->raop, "maxFPS", opt->max_fps ? opt->max_fps : 60);
+    raop_set_plist(r->raop, "refreshRate", opt->max_fps ? opt->max_fps : 30);
+    raop_set_plist(r->raop, "maxFPS", opt->max_fps ? opt->max_fps : 30);
     raop_set_plist(r->raop, "overscanned", 0);
 
     if (opt->fixed_ports) {

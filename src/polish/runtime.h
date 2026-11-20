@@ -50,6 +50,9 @@ bool ph_polish_key(ph_polish *polish, const SDL_KeyboardEvent *event, ph_input *
                    bool hotkeys);
 
 void ph_polish_tick(ph_polish *polish, ph_input *input);
+
+/* Types the PC clipboard into the focused field when it is plain US-QWERTY. */
+bool ph_polish_type_clipboard(ph_polish *polish);
 bool ph_polish_quit(const ph_polish *polish);
 bool ph_polish_precise(const ph_polish *polish);
 

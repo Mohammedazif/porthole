@@ -106,6 +106,8 @@ typedef struct app {
     bool controls_paused;
     uint8_t mouse_abs_down; /* phone buttons pressed by the PC mouse, not by shortcuts */
     bool gesture_keys[256];
+    bool paste_when_ready; /* Ctrl+V is waiting for the iPhone copy, then types it */
+    Uint64 paste_armed_at;
     Uint64 feed_wheel_at;
     AVFrame *view_frame, *pointer_baseline, *pointer_reference, *pointer_after;
     /* The picture under the press. A drag inside the picture swipes the phone,
@@ -1016,17 +1018,21 @@ static int desktop_copy_all(char *paths, char *first, size_t first_cap)
     return copied;
 }
 
-/* Moves each file, one per line, into Downloads without replacing anything there:
- * a name already taken gets 2-, 3-, ... in front. Returns how many arrived.
- * first receives the path of the first one that landed. */
-static int downloads_move_all(char *paths, char *first, size_t first_cap)
+/* Moves each file, one per line, into the folder chosen in Settings (Downloads
+ * until the user picks another) without replacing anything there: a name already
+ * taken gets 2-, 3-, ... in front. Returns how many arrived.
+ * first receives the path of the first one that landed. names receives each
+ * saved file's own name, one per line, when it fits. */
+static int downloads_move_all(char *paths, char *first, size_t first_cap, char *names, size_t names_cap)
 {
     char dir[1024];
     int moved = 0;
 
     if (first && first_cap)
         first[0] = 0;
-    if (!ph_place_dir(PH_PLACE_DOWNLOADS, dir, sizeof dir))
+    if (names && names_cap)
+        names[0] = 0;
+    if (!ph_place_save_dir(dir, sizeof dir))
         return 0;
 
     for (char *line = paths, *next; line && *line; line = next) {
@@ -1055,7 +1061,13 @@ static int downloads_move_all(char *paths, char *first, size_t first_cap)
             moved++;
             if (first && first_cap && !first[0])
                 snprintf(first, first_cap, "%s", dest);
-            PH_LOGI("share: in Downloads: %s", dest);
+            if (names && names_cap) {
+                size_t used = strlen(names);
+                const char *saved_name = ph_path_base(dest);
+                if (used + 1 < names_cap && saved_name[0])
+                    snprintf(names + used, names_cap - used, "%s\n", saved_name);
+            }
+            PH_LOGI("share: saved %s", dest);
         } else {
             PH_LOGW("share: stayed at %s", line);
         }
@@ -1108,8 +1120,10 @@ static void end_pull(app *a)
     a->pull_hold = false;
     a->pull_path[0] = 0;
     update_title(a);
-    if (offer && !(landed && tray_notice(a, offer, 1, "the Desktop")) && a->card)
+    if (offer && !(landed && tray_notice(a, offer, 1, "the Desktop")) && a->card) {
+        ph_transfer_card_place(a->card, landed ? "Desktop" : NULL);
         ph_transfer_card_show(a->card, offer, 1, 1, landed, SDL_GetTicks64());
+    }
     if (note == 3)
         ph_window_set_detail(a->win, placed ? "Pulled the original photo"
                                             : "Original photo saved on the Desktop");
@@ -1726,6 +1740,9 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
             a->gesture_keys[sc] = false;
         return;
     }
+    if (down && !(sc == SDL_SCANCODE_V && (e->keysym.mod & KMOD_CTRL)
+                  && !(e->keysym.mod & (KMOD_ALT | KMOD_GUI))))
+        a->paste_when_ready = false;
     if (down && sc == SDL_SCANCODE_F2 && plain && !a->input.down[sc]) {
         a->gesture_keys[sc] = true;
         if (e->type == SDL_KEYDOWN && !e->repeat) {
@@ -1956,14 +1973,32 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         if (down && !e->repeat && sc == SDL_SCANCODE_V && (e->keysym.mod & KMOD_CTRL)
             && !(e->keysym.mod & (KMOD_ALT | KMOD_GUI))) {
             char path[1024];
+            a->paste_when_ready = false;
             if (clipboard_file(path, sizeof path)) {
                 a->gesture_keys[sc] = true;
                 queue_pc_file(a, path);
                 return;
             }
+            if (ph_origin_clip_waiting(a->origin)) {
+                a->gesture_keys[sc] = true;
+                a->paste_when_ready = true;
+                a->paste_armed_at = SDL_GetTicks64();
+                ph_window_set_detail(a->win, "Pasting the iPhone copy");
+                return;
+            }
+            if (a->polish && ph_polish_type_clipboard(a->polish)) {
+                a->gesture_keys[sc] = true;
+                ph_window_set_detail(a->win, "Pasted into the iPhone");
+                return;
+            }
         }
         ph_input_key(&a->input, (uint8_t)sc, e->type == SDL_KEYDOWN, e->repeat != 0,
                      pc_modifiers(a, (SDL_Keymod)e->keysym.mod));
+        if (down && !e->repeat && sc == SDL_SCANCODE_C && (e->keysym.mod & KMOD_CTRL)
+            && !(e->keysym.mod & (KMOD_ALT | KMOD_GUI)) && a->origin) {
+            ph_origin_ask_clip(a->origin);
+            ph_window_set_detail(a->win, "Copying from the iPhone");
+        }
     }
 }
 
@@ -1974,6 +2009,7 @@ static void release_everything(app *a)
     ph_gesture_cancel(&a->gesture, SDL_GetTicks64());
     a->feed_mode = a->feed_have_wheel = false;
     memset(a->gesture_keys, 0, sizeof a->gesture_keys);
+    a->paste_when_ready = false;
     reset_mouse_input(a);
     ph_input_release_all(&a->input);
     ph_pointer_reset(&a->pointer, SDL_GetTicks64());
@@ -2372,6 +2408,7 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
     case EV_INBOX: {
         char line[128];
         char dest[1024];
+        char names[512];
         int count = 0, saved;
 
         if (!e->user.data1)
@@ -2379,27 +2416,46 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
         for (const char *c = e->user.data1; *c; c++)
             count += *c == '\n';
         count++;
-        /* Shared from the iPhone's Share sheet: straight into Downloads, like AirDrop. */
-        saved = downloads_move_all(e->user.data1, dest, sizeof dest);
+        /* Shared from the iPhone's Share sheet, into the folder from Settings. */
+        saved = downloads_move_all(e->user.data1, dest, sizeof dest, names, sizeof names);
         free(e->user.data1);
-        if (saved > 0 && dest[0] && tray_notice(a, dest, saved, "Downloads")) {
-            if (a->card)
-                ph_transfer_card_dismiss(a->card, SDL_GetTicks64());
-        } else if (a->card) {
-            if (saved > 0 && dest[0])
-                ph_transfer_card_show(a->card, dest, saved, saved, true, SDL_GetTicks64());
-            else
-                ph_transfer_card_dismiss(a->card, SDL_GetTicks64());
+        {
+            char where[64];
+            if (!ph_place_save_label(where, sizeof where))
+                snprintf(where, sizeof where, "Downloads");
+            if (saved > 0 && dest[0] && tray_notice(a, dest, saved, where)) {
+                if (a->card)
+                    ph_transfer_card_dismiss(a->card, SDL_GetTicks64());
+            } else if (a->card) {
+                if (saved > 0 && dest[0]) {
+                    ph_transfer_card_place(a->card, where);
+                    ph_transfer_card_show(a->card, dest, saved, saved, true, SDL_GetTicks64());
+                } else
+                    ph_transfer_card_dismiss(a->card, SDL_GetTicks64());
+            }
+            snprintf(line, sizeof line, "Saved %d item%s from the iPhone in %s", saved,
+                     saved == 1 ? "" : "s", where);
+            ph_window_set_detail(a->win, line);
+            PH_LOGI("share: saved %d of %d item(s) in %s", saved, count, where);
         }
-        snprintf(line, sizeof line, "Saved %d item%s from the iPhone in Downloads", saved,
-                 saved == 1 ? "" : "s");
-        ph_window_set_detail(a->win, line);
         if (saved > 0) {
-            char note[64];
-            snprintf(note, sizeof note, "Received %d item%s", saved, saved == 1 ? "" : "s");
-            ph_window_note_transfer(a->win, note);
+            char note[96];
+            bool named = false;
+            for (char *file = names, *next; file && *file; file = next) {
+                next = strchr(file, '\n');
+                if (next)
+                    *next++ = 0;
+                if (!file[0])
+                    continue;
+                snprintf(note, sizeof note, "Received %.80s", file);
+                ph_window_note_transfer(a->win, note);
+                named = true;
+            }
+            if (!named) {
+                snprintf(note, sizeof note, "Received %d item%s", saved, saved == 1 ? "" : "s");
+                ph_window_note_transfer(a->win, note);
+            }
         }
-        PH_LOGI("share: saved %d of %d item(s) in Downloads", saved, count);
         break;
     }
     default:
@@ -2516,6 +2572,8 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
         break;
     case SDL_MOUSEBUTTONDOWN:
     case SDL_MOUSEBUTTONUP:
+        if (e->type == SDL_MOUSEBUTTONDOWN)
+            a->paste_when_ready = false;
         if (e->button.windowID == win_id) {
             if (ph_window_chrome_event(a->win, e))
                 break;
@@ -2683,7 +2741,20 @@ static void sync_clipboard(app *a)
     flags = ph_origin_clip_flags(a->origin);
     if (ph_origin_take_clip(a->origin, &kind, &data, &len)) {
         ph_hostclip_apply(kind, data, len);
+        if (a->paste_when_ready && !ph_origin_clip_waiting(a->origin)) {
+            a->paste_when_ready = false;
+            if (kind == 'T' && a->polish && ph_polish_type_clipboard(a->polish))
+                ph_window_set_detail(a->win, "Pasted into the iPhone");
+            else if (kind == 'P')
+                ph_window_set_detail(a->win, "The iPhone copy is a picture");
+            else
+                ph_window_set_detail(a->win, "That copy cannot be typed in");
+        }
         free(data);
+    }
+    if (a->paste_when_ready && SDL_GetTicks64() - a->paste_armed_at > 2000) {
+        a->paste_when_ready = false;
+        ph_window_set_detail(a->win, "The iPhone copy did not arrive");
     }
     if (flags & PH_ORIGIN_CLIP_SENT)
         ph_window_set_detail(a->win, "On the iPhone, paste with Ctrl+V");
@@ -2871,6 +2942,30 @@ static void do_window_action(app *a, ph_window_action action, bool *running)
         break;
     case PH_WINDOW_ACTION_SAVE:
         save_window_prefs(a);
+        break;
+    case PH_WINDOW_ACTION_PICK_FOLDER: {
+        char dir[1024], label[64];
+        if (!ph_place_pick_folder(dir, sizeof dir)) {
+            ph_window_set_detail(a->win, "Still saving in the current folder");
+            break;
+        }
+        if (!ph_place_set_save_dir(dir) || !ph_place_save_label(label, sizeof label)) {
+            ph_window_set_detail(a->win, "That folder cannot be used");
+            break;
+        }
+        if (a->inbox)
+            ph_inbox_set_save_label(a->inbox, label);
+        snprintf(dir, sizeof dir, "Files from the iPhone save in %s", label);
+        ph_window_set_detail(a->win, dir);
+        ph_window_redraw(a->win);
+        break;
+    }
+    case PH_WINDOW_ACTION_SAVE_DOWNLOADS:
+        ph_place_set_save_dir(NULL);
+        if (a->inbox)
+            ph_inbox_set_save_label(a->inbox, "Downloads");
+        ph_window_set_detail(a->win, "Files from the iPhone save in Downloads");
+        ph_window_redraw(a->win);
         break;
     }
 }
@@ -3065,7 +3160,12 @@ int ph_app_run(const ph_app_options *opt)
             .progress = inbox_progress,
             .received = inbox_received,
         };
-        a.inbox = ph_inbox_start(a.pull_dir, &inbox_cb);
+        {
+            char label[64];
+            if (!ph_place_save_label(label, sizeof label))
+                snprintf(label, sizeof label, "Downloads");
+            a.inbox = ph_inbox_start(a.pull_dir, label, &inbox_cb);
+        }
     }
     if (opt->diagnostics)
         ph_window_toggle_diagnostics(a.win);
@@ -3080,6 +3180,7 @@ int ph_app_run(const ph_app_options *opt)
     PH_LOGI("waiting for the iPhone: connect in Porthole, then tap Share screen");
     start_bluetooth(&a);
     update_title(&a);
+    ph_window_show(a.win);
     if (opt->usb && pthread_create(&a.usb_thread, NULL, usb_thread_main, &a) == 0)
         a.usb_started = true;
     else if (opt->usb)

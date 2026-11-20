@@ -15,6 +15,19 @@ typedef enum ph_place {
  * separator. Windows asks the shell, so a moved Downloads folder is honoured. */
 bool ph_place_dir(ph_place place, char *out, size_t cap);
 
+/* Where files shared from the iPhone are saved. Downloads until the user picks
+ * a folder. The choice is remembered. */
+bool ph_place_save_dir(char *out, size_t cap);
+/* "Downloads", "Desktop", or the chosen folder's own name. */
+bool ph_place_save_label(char *out, size_t cap);
+/* True when the saved place is not Downloads. */
+bool ph_place_save_is_custom(void);
+/* NULL restores Downloads. An absolute folder is remembered; Downloads and Desktop
+ * are remembered as those places, so a moved system folder still follows. */
+bool ph_place_set_save_dir(const char *dir);
+/* Modal folder picker. False if the user cancels or this system has no picker. */
+bool ph_place_pick_folder(char *out, size_t cap);
+
 /* One regular file the user copied (Ctrl+C in Explorer or a file manager). UTF-8. */
 bool ph_place_clipboard_file(char *out, size_t cap);
 

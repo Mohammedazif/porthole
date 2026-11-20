@@ -74,7 +74,7 @@ int main(void)
 
     def = ph_codec_advertise_for(false);
     four_k = ph_codec_advertise_for(true);
-    CHECK(def.width == 1920 && def.height == 1080 && def.max_fps == 60);
+    CHECK(def.width == 1920 && def.height == 1080 && def.max_fps == 30);
     CHECK(four_k.width == 3840 && four_k.height == 2160 && four_k.max_fps == 30);
 
     CHECK(ph_device_kind_from_model(NULL) == PH_DEVICE_UNKNOWN);

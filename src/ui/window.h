@@ -21,6 +21,9 @@ typedef struct ph_window ph_window;
 
 ph_window *ph_window_create(const char *title);
 
+/* Creation stays hidden until the connect screen has its address and name. */
+void ph_window_show(ph_window *w);
+
 void ph_window_set_title(ph_window *w, const char *title);
 
 /* Local connection/setup guidance; this never sends input to the phone. */
@@ -43,7 +46,9 @@ typedef enum ph_window_action {
     PH_WINDOW_ACTION_PAUSE,
     PH_WINDOW_ACTION_MUTE,
     PH_WINDOW_ACTION_QUIT,
-    PH_WINDOW_ACTION_SAVE
+    PH_WINDOW_ACTION_SAVE,
+    PH_WINDOW_ACTION_PICK_FOLDER,
+    PH_WINDOW_ACTION_SAVE_DOWNLOADS
 } ph_window_action;
 
 ph_window_action ph_window_take_action(ph_window *w);
@@ -63,8 +68,8 @@ void ph_window_set_live_state(ph_window *w, bool feed, bool paused, bool sound_o
 bool ph_window_media_keys(const ph_window *w);
 void ph_window_set_media_keys(ph_window *w, bool on);
 /* Settings rows, top to bottom: pointer, wheel, pause, guide, Ctrl, media keys,
- * release keys, sound, copy pairing, forget, quit. side picks a two-way choice's half.
- * Row -1 is Done. Centre of that control, for tests. */
+ * release keys, sound, save folder, copy pairing, forget, quit. side picks a
+ * two-way choice's half. Row -1 is Done. Centre of that control, for tests. */
 bool ph_window_settings_target(ph_window *w, int row, int side, int *x, int *y);
 
 /* The name the iPhone lists this PC under. */

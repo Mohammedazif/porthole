@@ -218,9 +218,36 @@ void ph_polish_set_audio(ph_polish *polish, ph_audio *audio)
 
 void ph_polish_apply_saved(ph_polish *polish, SDL_Window *window)
 {
-    if (!polish || !polish->place.valid)
+    SDL_Rect usable;
+    SDL_Point saved;
+    int x, y, w, h, display;
+
+    if (!polish || !polish->place.valid || !window)
         return;
-    ph_chrome_apply(window, &polish->place);
+    /* Connect opens at its own size. The saved rect only contributes a position. */
+    if (polish->place.always_on_top)
+        SDL_SetWindowAlwaysOnTop(window, SDL_TRUE);
+    SDL_GetWindowSize(window, &w, &h);
+    if (w < 1 || h < 1)
+        return;
+    x = polish->place.x;
+    y = polish->place.y;
+    saved.x = x;
+    saved.y = y;
+    display = SDL_GetPointDisplayIndex(&saved);
+    if (display < 0)
+        display = SDL_GetWindowDisplayIndex(window);
+    if (display < 0 || SDL_GetDisplayUsableBounds(display, &usable) != 0)
+        return;
+    if (x < usable.x)
+        x = usable.x;
+    if (y < usable.y)
+        y = usable.y;
+    if (x > usable.x + usable.w - w)
+        x = usable.x + usable.w - w;
+    if (y > usable.y + usable.h - h)
+        y = usable.y + usable.h - h;
+    SDL_SetWindowPosition(window, x, y);
 }
 
 void ph_polish_save_window(ph_polish *polish, SDL_Window *window)
@@ -441,6 +468,13 @@ static void toggle_pixels(ph_polish *polish, SDL_Window *window, int video_w, in
         ph_chrome_apply(window, &polish->place);
 }
 
+static void queue_paste_text(ph_polish *polish, const char *text, int n)
+{
+    polish->paste_n = ph_paste_encode(text, polish->paste, PASTE_MAX);
+    polish->paste_i = 0;
+    PH_LOGI("pasting %d clipboard characters", n);
+}
+
 static void queue_paste(ph_polish *polish)
 {
     char text[8192];
@@ -450,9 +484,21 @@ static void queue_paste(ph_polish *polish)
         PH_LOGW("clipboard paste unavailable");
         return;
     }
-    polish->paste_n = ph_paste_encode(text, polish->paste, PASTE_MAX);
-    polish->paste_i = 0;
-    PH_LOGI("pasting %d clipboard characters", n);
+    queue_paste_text(polish, text, n);
+}
+
+bool ph_polish_type_clipboard(ph_polish *polish)
+{
+    char text[8192];
+    int n;
+
+    if (!polish)
+        return false;
+    n = ph_paste_clipboard(text, sizeof text);
+    if (n <= 0 || !ph_paste_typeable(text))
+        return false;
+    queue_paste_text(polish, text, n);
+    return polish->paste_n > 0;
 }
 
 static bool take_pin_digit(ph_polish *polish, SDL_Keycode key)

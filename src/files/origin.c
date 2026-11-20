@@ -71,6 +71,9 @@ struct ph_origin {
     char peer[64]; /* address of the connection being served */
     char known[64]; /* last phone that gave the right code */
     bool clip_ready;
+    bool ask_clip;     /* send CLIP? once the phone has enabled clipboard sync */
+    bool clip_wait;    /* Ctrl+C is waiting for that answer */
+    double ask_clip_ms;
     bool out_pending;
     char out_kind;
     uint8_t *out_data;
@@ -571,6 +574,9 @@ static bool send_push(ph_origin *o, int fd)
     return true;
 }
 
+static bool send_clip_ask(ph_origin *o, int fd);
+static double now_ms(void);
+
 /* Reads clipboard messages that arrived while no photo request is in flight,
  * then sends one waiting PC clipboard item. */
 static bool service_idle(ph_origin *o, int fd)
@@ -601,7 +607,26 @@ static bool service_idle(ph_origin *o, int fd)
             return false;
         (void)consumed;
     }
-    return send_outgoing(o, fd);
+    return send_clip_ask(o, fd) && send_outgoing(o, fd);
+}
+
+/* One line. A phone that does not know CLIP? ignores it. */
+static bool send_clip_ask(ph_origin *o, int fd)
+{
+    bool due = false;
+
+    pthread_mutex_lock(&o->lock);
+    if (o->ask_clip && o->clip_ready && now_ms() - o->ask_clip_ms >= 250.0) {
+        o->ask_clip = false;
+        due = true;
+    }
+    pthread_mutex_unlock(&o->lock);
+    if (!due)
+        return true;
+    if (!send_all(fd, "CLIP?\n", 6))
+        return false;
+    PH_LOGI("clipboard: asked the iPhone for its copy");
+    return true;
 }
 
 static bool client_waiting(int listen_fd)
@@ -893,6 +918,8 @@ done:
     o->files_ok = false;
     o->client_fd = -1;
     o->clip_ready = false;
+    o->ask_clip = false;
+    o->clip_wait = false;
     o->in_ready = false;
     free(o->in_data);
     o->in_data = NULL;
@@ -1312,6 +1339,8 @@ bool ph_origin_take_clip(ph_origin *o, char *kind, void **data, size_t *len)
         o->in_data = NULL;
         o->in_len = 0;
         o->in_ready = false;
+        if (!o->ask_clip)
+            o->clip_wait = false;
         ok = true;
     }
     pthread_mutex_unlock(&o->lock);
@@ -1336,5 +1365,34 @@ unsigned ph_origin_clip_flags(ph_origin *o)
     o->note_ready = false;
     pthread_mutex_unlock(&o->lock);
     return flags;
+}
+
+void ph_origin_ask_clip(ph_origin *o)
+{
+    if (!o)
+        return;
+    pthread_mutex_lock(&o->lock);
+    o->ask_clip = true;
+    o->clip_wait = true;
+    o->ask_clip_ms = now_ms();
+    pthread_cond_signal(&o->cond);
+    pthread_mutex_unlock(&o->lock);
+}
+
+bool ph_origin_clip_waiting(ph_origin *o)
+{
+    bool waiting = false;
+
+    if (!o)
+        return false;
+    pthread_mutex_lock(&o->lock);
+    if (o->clip_wait) {
+        if (now_ms() - o->ask_clip_ms < 2000.0)
+            waiting = true;
+        else
+            o->clip_wait = false;
+    }
+    pthread_mutex_unlock(&o->lock);
+    return waiting;
 }
 

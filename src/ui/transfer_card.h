@@ -16,6 +16,8 @@ void ph_transfer_card_destroy(ph_transfer_card *c);
  * can_show adds the button that opens the folder the file landed in. */
 void ph_transfer_card_show(ph_transfer_card *c, const char *path, int done, int total,
                            bool can_show, Uint64 now);
+/* Folder name under the file. NULL clears it. */
+void ph_transfer_card_place(ph_transfer_card *c, const char *place);
 void ph_transfer_card_dismiss(ph_transfer_card *c, Uint64 now);
 void ph_transfer_card_tick(ph_transfer_card *c, Uint64 now);
 bool ph_transfer_card_animating(const ph_transfer_card *c);

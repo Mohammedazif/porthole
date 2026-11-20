@@ -468,28 +468,47 @@ void ph_hostclip_pump(void)
 
 bool ph_hostclip_changed(char *kind, void **data, size_t *len)
 {
-    char *text;
-    size_t n;
+    char *text = NULL;
+    size_t n = 0;
 
     if (!kind || !data || !len)
         return false;
     *data = NULL;
+#if defined(_WIN32)
+    if (!ph_winclip_read_text(&text, &n, PH_CLIP_TEXT_MAX)) {
+        text = NULL;
+        n = 0;
+    }
+#else
     text = SDL_GetClipboardText();
     n = text ? strlen(text) : 0;
+#endif
     if (text && n > 0 && n <= PH_CLIP_TEXT_MAX && !memchr(text, 0, n) && !already('T', text, n)) {
         *data = malloc(n);
         if (!*data) {
+#if defined(_WIN32)
+            free(text);
+#else
             SDL_free(text);
+#endif
             return false;
         }
         memcpy(*data, text, n);
         *len = n;
         *kind = 'T';
         remember('T', text, n, &seen_kind, &seen, &seen_len);
+#if defined(_WIN32)
+        free(text);
+#else
         SDL_free(text);
+#endif
         return true;
     }
+#if defined(_WIN32)
+    free(text);
+#else
     SDL_free(text);
+#endif
 #if defined(PH_HAVE_X11)
     if (dpy) {
         uint8_t *png = NULL;
@@ -536,6 +555,14 @@ void ph_hostclip_apply(char kind, const void *data, size_t len)
             return;
         memcpy(text, data, len);
         text[len] = 0;
+#if defined(_WIN32)
+        if (ph_winclip_write_text(text, len)) {
+            remember('T', data, len, &seen_kind, &seen, &seen_len);
+            remember('T', data, len, &applied_kind, &applied, &applied_len);
+        } else {
+            PH_LOGW("clipboard text was not accepted");
+        }
+#else
         if (SDL_SetClipboardText(text) == 0) {
             remember('T', data, len, &seen_kind, &seen, &seen_len);
             remember('T', data, len, &applied_kind, &applied, &applied_len);
@@ -545,6 +572,7 @@ void ph_hostclip_apply(char kind, const void *data, size_t len)
         } else {
             PH_LOGW("clipboard text was not accepted");
         }
+#endif
         free(text);
         return;
     }

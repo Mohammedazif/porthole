@@ -26,9 +26,9 @@
 #include <X11/extensions/shape.h>
 #endif
 
-#define GHOST_LONG 200
-#define GHOST_MIN_W 360
-#define GHOST_SCALE 3
+#define GHOST_LONG 112
+#define GHOST_MIN_W 168
+#define GHOST_SCALE 2
 
 struct ph_drag_ghost {
     SDL_Window *window;
