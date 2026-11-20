@@ -21,7 +21,19 @@ struct ph_wintray {
     UINT taskbar_created;
     bool feed, paused, sound_on, can_copy;
     ph_wintray_command pending;
+    wchar_t shown[1024]; /* the file the last notification was about */
 };
+
+static void show_in_folder(const wchar_t *path)
+{
+    wchar_t args[1100];
+
+    if (!path[0])
+        return;
+    _snwprintf(args, sizeof args / sizeof args[0], L"/select,\"%ls\"", path);
+    args[sizeof args / sizeof args[0] - 1] = 0;
+    ShellExecuteW(NULL, L"open", L"explorer.exe", args, NULL, SW_SHOWNORMAL);
+}
 
 static void show_menu(ph_wintray *t)
 {
@@ -67,6 +79,8 @@ static LRESULT CALLBACK tray_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             t->pending = PH_WINTRAY_SHOW;
         else if (event == WM_RBUTTONUP || event == WM_CONTEXTMENU)
             show_menu(t);
+        else if (event == NIN_BALLOONUSERCLICK)
+            show_in_folder(t->shown);
         return 0;
     }
     /* Explorer restarted: the icon must be added again. */
@@ -152,6 +166,32 @@ void ph_wintray_set_state(ph_wintray *t, bool feed, bool paused, bool sound_on, 
     t->icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
 }
 
+bool ph_wintray_notify(ph_wintray *t, const char *title, const char *text, const char *path)
+{
+    NOTIFYICONDATAW n;
+
+    if (!t)
+        return false;
+    n = t->icon;
+    n.uFlags = NIF_INFO;
+    n.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+    if (!MultiByteToWideChar(CP_UTF8, 0, title ? title : "Porthole", -1, n.szInfoTitle,
+                             (int)(sizeof n.szInfoTitle / sizeof n.szInfoTitle[0])))
+        n.szInfoTitle[0] = 0;
+    if (!MultiByteToWideChar(CP_UTF8, 0, text ? text : "", -1, n.szInfo,
+                             (int)(sizeof n.szInfo / sizeof n.szInfo[0])))
+        n.szInfo[0] = 0;
+    t->shown[0] = 0;
+    if (path && path[0]) {
+        if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, t->shown, (int)(sizeof t->shown / sizeof t->shown[0])))
+            t->shown[0] = 0;
+        for (wchar_t *c = t->shown; *c; c++)
+            if (*c == L'/')
+                *c = L'\\';
+    }
+    return Shell_NotifyIconW(NIM_MODIFY, &n) != FALSE;
+}
+
 ph_wintray_command ph_wintray_take(ph_wintray *t)
 {
     ph_wintray_command c;
@@ -190,6 +230,15 @@ ph_wintray_command ph_wintray_take(ph_wintray *tray)
 {
     (void)tray;
     return PH_WINTRAY_NONE;
+}
+
+bool ph_wintray_notify(ph_wintray *tray, const char *title, const char *text, const char *path)
+{
+    (void)tray;
+    (void)title;
+    (void)text;
+    (void)path;
+    return false;
 }
 
 #endif

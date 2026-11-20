@@ -26,6 +26,10 @@ void ph_wintray_destroy(ph_wintray *tray);
 void ph_wintray_set_state(ph_wintray *tray, bool feed, bool paused, bool sound_on,
                           bool can_copy, const char *tip);
 
+/* A Windows notification from the tray icon. Clicking it shows path in its folder.
+ * False when there is no tray icon. */
+bool ph_wintray_notify(ph_wintray *tray, const char *title, const char *text, const char *path);
+
 /* The command picked since the last call. Messages arrive while SDL pumps events. */
 ph_wintray_command ph_wintray_take(ph_wintray *tray);
 

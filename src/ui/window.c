@@ -59,6 +59,7 @@ struct ph_window {
     int transfer_count;
     char transfer_active[72];
     int transfer_percent;
+    int sized_w, sized_h; /* window size after the last aspect fit */
     bool transfer_cancel;
     Uint64 copied_until;
     int modal_scroll, modal_max_scroll;
@@ -74,6 +75,7 @@ struct ph_window {
 };
 
 static void place_window(ph_window *w, int pic_w, int pic_h, bool center);
+static SDL_HitTestResult hit_edges(SDL_Window *window, const SDL_Point *p, void *data);
 
 enum {
     CHROME_NONE, CHROME_MIN, CHROME_MAX, CHROME_CLOSE, CHROME_DRAG,
@@ -1527,6 +1529,8 @@ ph_window *ph_window_create(const char *title)
         }
     }
     SDL_SetWindowMinimumSize(w->window, 320, 480);
+    if (SDL_SetWindowHitTest(w->window, hit_edges, NULL) != 0)
+        PH_LOGW("window edges cannot resize: %s", SDL_GetError());
     ph_window_redraw(w);
     return w;
 
@@ -1928,6 +1932,64 @@ static void fit_window_to_picture(ph_window *w, int pic_w, int pic_h)
     w->fit_h = pic_h;
     w->pending_w = w->pending_h = 0;
     place_window(w, pic_w, pic_h, first || turned);
+}
+
+/* After a resize from an edge, the other side follows so the phone keeps its shape:
+ * dragging the right edge sets the height, the bottom edge sets the width. */
+void ph_window_keep_aspect(ph_window *w)
+{
+    int ww, wh, panels, content_w, content_h;
+    Uint32 flags;
+    bool width_moved;
+
+    if (!w || !w->has_picture || !w->texture || w->screen.w < 2 || w->screen.h < 2)
+        return;
+    flags = SDL_GetWindowFlags(w->window);
+    SDL_GetWindowSize(w->window, &ww, &wh);
+    if (flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) {
+        w->sized_w = ww;
+        w->sized_h = wh;
+        return;
+    }
+    panels = side_panels_w(w);
+    width_moved = w->sized_w && abs(ww - w->sized_w) > abs(wh - w->sized_h);
+    if (width_moved) {
+        content_w = ww - panels;
+        content_h = (int)lround((double)content_w * w->screen.h / w->screen.w);
+        wh = content_h + PH_WINDOW_BAR_PX;
+    } else {
+        content_h = wh - PH_WINDOW_BAR_PX;
+        content_w = (int)lround((double)content_h * w->screen.w / w->screen.h);
+        ww = content_w + panels;
+    }
+    if (ww < 320 || wh < 480)
+        return;
+    {
+        int cw, ch;
+        SDL_GetWindowSize(w->window, &cw, &ch);
+        if (abs(cw - ww) > 2 || abs(ch - wh) > 2)
+            SDL_SetWindowSize(w->window, ww, wh);
+    }
+    w->sized_w = ww;
+    w->sized_h = wh;
+}
+
+/* Resizing the frameless window: the right edge and the bottom-right corner only. The
+ * left and bottom edges stay with the phone, where Back and Home are swipes from the
+ * edge; the other side follows to keep the phone's shape (ph_window_keep_aspect). */
+static SDL_HitTestResult hit_edges(SDL_Window *window, const SDL_Point *p, void *data)
+{
+    int ww, wh;
+
+    (void)data;
+    if (SDL_GetWindowFlags(window) & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP))
+        return SDL_HITTEST_NORMAL;
+    SDL_GetWindowSize(window, &ww, &wh);
+    if (p->x >= ww - 14 && p->y >= wh - 14)
+        return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
+    if (p->x >= ww - 5 && p->y >= PH_WINDOW_BAR_PX)
+        return SDL_HITTEST_RESIZE_RIGHT;
+    return SDL_HITTEST_NORMAL;
 }
 
 static SDL_YUV_CONVERSION_MODE yuv_mode_for(const AVFrame *f)

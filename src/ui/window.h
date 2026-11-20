@@ -55,6 +55,9 @@ void ph_window_set_prefs(ph_window *w, bool ctrl_command, bool release_blur, boo
 /* A line in the Transfers panel. active is the one in progress; NULL clears it.
  * set_active returns true when the line changed. show_transfers opens that panel. */
 void ph_window_note_transfer(ph_window *w, const char *line);
+/* After the user resized the phone window, fit the other side to the phone's shape. */
+void ph_window_keep_aspect(ph_window *w);
+
 /* Feed scrolling, paused controls and PC sound, shown in Settings. */
 void ph_window_set_live_state(ph_window *w, bool feed, bool paused, bool sound_on);
 bool ph_window_media_keys(const ph_window *w);

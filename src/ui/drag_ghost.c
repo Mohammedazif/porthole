@@ -13,6 +13,12 @@
 #include "ui/text.h"
 #include "ui/window.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <SDL_syswm.h>
+#endif
+
 #if defined(PH_HAVE_X11) && defined(PH_HAVE_XSHAPE)
 #include <SDL_syswm.h>
 #include <X11/Xlib.h>
@@ -56,6 +62,17 @@ static void punch_input(SDL_Window *window)
                         ShapeSet);
     XDestroyRegion(empty);
     XFlush(info.info.x11.display);
+#elif defined(_WIN32)
+    /* Clicks and the release go through to whatever is under the card, as on Linux:
+     * a release landing on the card left the drag stuck to the mouse. */
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (window && SDL_GetWindowWMInfo(window, &info) && info.subsystem == SDL_SYSWM_WINDOWS) {
+        HWND hwnd = info.info.win.window;
+        LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE);
+        SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+    }
 #else
     (void)window;
 #endif
@@ -125,6 +142,13 @@ static void paint(ph_drag_ghost *g)
         return;
     SDL_SetRenderDrawColor(g->renderer, 28, 28, 30, 255);
     SDL_RenderClear(g->renderer);
+    /* Draw in window points; at 150% or 200% the window has more pixels than that. */
+    {
+        int ww = 0, wh = 0, ow = 0, oh = 0;
+        SDL_GetWindowSize(g->window, &ww, &wh);
+        if (ww > 0 && wh > 0 && SDL_GetRendererOutputSize(g->renderer, &ow, &oh) == 0 && ow > 0)
+            SDL_RenderSetScale(g->renderer, (float)ow / (float)ww, (float)oh / (float)wh);
+    }
     frame = (SDL_Rect){0, 0, g->win_w, g->win_h};
     SDL_SetRenderDrawColor(g->renderer, 92, 92, 96, 255);
     SDL_RenderDrawRect(g->renderer, &frame);

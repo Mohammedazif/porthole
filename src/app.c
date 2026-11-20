@@ -104,6 +104,7 @@ typedef struct app {
     ph_gesture gesture;
     bool feed_mode, feed_have_wheel;
     bool controls_paused;
+    uint8_t mouse_abs_down; /* phone buttons pressed by the PC mouse, not by shortcuts */
     bool gesture_keys[256];
     Uint64 feed_wheel_at;
     AVFrame *view_frame, *pointer_baseline, *pointer_reference, *pointer_after;
@@ -1062,6 +1063,25 @@ static int downloads_move_all(char *paths, char *first, size_t first_cap)
     return moved;
 }
 
+/* A Windows notification for files that arrived; false where there is no tray icon,
+ * and the card shows instead. where is "Downloads" or "the Desktop". */
+static bool tray_notice(app *a, const char *path, int count, const char *where)
+{
+    char title[128], text[256];
+    const char *name = path ? ph_path_base(path) : "";
+
+    if (!a->tray || !path || !path[0])
+        return false;
+    if (count > 1) {
+        snprintf(title, sizeof title, "%d files received from iPhone", count);
+        snprintf(text, sizeof text, "%s and %d more, in %s", name, count - 1, where);
+    } else {
+        snprintf(title, sizeof title, "%s received from iPhone", name);
+        snprintf(text, sizeof text, "Saved in %s. Click to show it.", where);
+    }
+    return ph_wintray_notify(a->tray, title, text, path);
+}
+
 static void end_pull(app *a)
 {
     bool placed = false;
@@ -1088,7 +1108,7 @@ static void end_pull(app *a)
     a->pull_hold = false;
     a->pull_path[0] = 0;
     update_title(a);
-    if (offer && a->card)
+    if (offer && !(landed && tray_notice(a, offer, 1, "the Desktop")) && a->card)
         ph_transfer_card_show(a->card, offer, 1, 1, landed, SDL_GetTicks64());
     if (note == 3)
         ph_window_set_detail(a->win, placed ? "Pulled the original photo"
@@ -1417,7 +1437,12 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
             a->press_phone_y = y;
         }
         ph_abs_button(&a->abs, button, down, x, y, SDL_GetTicks64());
-        SDL_CaptureMouse(a->abs.held ? SDL_TRUE : SDL_FALSE);
+        a->mouse_abs_down = down ? (uint8_t)(a->mouse_abs_down | button)
+                                 : (uint8_t)(a->mouse_abs_down & ~button);
+        /* Keep the mouse captured from the press itself. The phone press is sent about
+         * 120 ms later, and releasing capture until then let Windows hand a release
+         * outside the window to another app, leaving the iPhone pressed. */
+        SDL_CaptureMouse(a->mouse_abs_down || a->abs.held ? SDL_TRUE : SDL_FALSE);
         return;
     }
     if (ph_gesture_active(&a->gesture)) {
@@ -2338,7 +2363,7 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
         const char *text = e->user.data1;
 
         if (text && sscanf(text, "Receiving %d of %d", &done, &total) == 2 && total > 0 && a->card
-            && done < total)
+            && !a->tray && done < total)
             ph_transfer_card_show(a->card, NULL, done, total, false, SDL_GetTicks64());
         ph_window_set_detail(a->win, text);
         free(e->user.data1);
@@ -2357,7 +2382,10 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
         /* Shared from the iPhone's Share sheet: straight into Downloads, like AirDrop. */
         saved = downloads_move_all(e->user.data1, dest, sizeof dest);
         free(e->user.data1);
-        if (a->card) {
+        if (saved > 0 && dest[0] && tray_notice(a, dest, saved, "Downloads")) {
+            if (a->card)
+                ph_transfer_card_dismiss(a->card, SDL_GetTicks64());
+        } else if (a->card) {
             if (saved > 0 && dest[0])
                 ph_transfer_card_show(a->card, dest, saved, saved, true, SDL_GetTicks64());
             else
@@ -2426,6 +2454,8 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
     case SDL_WINDOWEVENT:
         if (e->window.windowID != win_id)
             break;
+        if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+            ph_window_keep_aspect(a->win);
         if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
             e->window.event == SDL_WINDOWEVENT_EXPOSED)
             ph_window_redraw(a->win);
@@ -3079,6 +3109,25 @@ int ph_app_run(const ph_app_options *opt)
         }
         apply_window_action(&a, &running);
         follow_tray(&a, &running);
+#ifdef _WIN32
+        /* A release Windows gave to another window must still lift the phone's
+         * button and end a photo drag. Shortcut gestures hold buttons without the
+         * mouse, so only presses that came from the mouse are lifted here. */
+        {
+            Uint32 held = SDL_GetGlobalMouseState(NULL, NULL)
+                          & (SDL_BUTTON_LMASK | SDL_BUTTON_MMASK | SDL_BUTTON_RMASK);
+            if (a.absolute && a.mouse_abs_down && !held) {
+                for (uint8_t bit = 1; bit <= 4; bit <<= 1)
+                    if (a.mouse_abs_down & bit)
+                        ph_abs_button(&a.abs, bit, false, a.abs.want_x, a.abs.want_y, SDL_GetTicks64());
+                a.mouse_abs_down = 0;
+                SDL_CaptureMouse(SDL_FALSE);
+                PH_LOGW("pointer: the release went to another window; lifted the iPhone button");
+            }
+            if (a.pull.pulling && !a.pull_hold && !(held & SDL_BUTTON_LMASK))
+                finish_pull(&a);
+        }
+#endif
         {
             struct ph_audio_settings sound;
             bool sound_on = !a.audio || !ph_audio_settings(a.audio, &sound) || !sound.muted;
