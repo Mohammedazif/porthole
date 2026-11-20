@@ -6,6 +6,7 @@
 #include "core/config.h"
 #include "core/log.h"
 #include "core/version.h"
+#include "files/places.h"
 
 #ifdef PORTHOLE_HAVE_AIRPLAY
 #include <SDL.h>
@@ -41,6 +42,7 @@ static void print_usage(FILE *out, const char *argv0)
             "      --autostart    Write a Linux autostart entry for this executable\n"
             "      --no-usb       Leave a plugged-in iPhone on its normal USB driver\n"
             "      --ble-helper PATH  Bluetooth helper (Windows executable or Linux Python script)\n"
+            "      --send FILE...  Send files to the iPhone through the Porthole already open\n"
             "      --debug       Log AirPlay protocol details\n"
             "  -v, --verbose     Show debug messages\n"
             "  -V, --version     Print version and build features, then exit\n"
@@ -95,6 +97,10 @@ int main(int argc, char **argv)
     const char *ble_helper = NULL;
 #endif
     int i;
+
+    /* Explorer's Send to, or a terminal: hand files to the Porthole already running. */
+    if (argc >= 2 && !strcmp(argv[1], "--send"))
+        return ph_place_send_command(argc - 2, argv + 2);
 
     for (i = 1; i < argc; i++) {
         const char *arg = argv[i];

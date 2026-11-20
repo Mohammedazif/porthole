@@ -124,7 +124,8 @@ static enum photo_case photo_mode;
 static unsigned int photo_stage, photo_requests, photo_presses, photo_releases;
 static Uint64 photo_at;
 static int photo_x = TARGET_X, photo_y = TARGET_Y;
-static uint8_t photo_buttons, photo_phone_buttons;
+/* Read only by the Linux-only SDL_GetMouseState wrap. */
+static __attribute__((unused)) uint8_t photo_buttons, photo_phone_buttons;
 static double photo_release_x, photo_release_y;
 #ifdef PH_TEST_WRAP_GLOBAL_MOUSE
 static SDL_Window *coordinate_window;
@@ -302,6 +303,15 @@ bool ph_window_next_relative(const ph_window *w) { (void)w; return false; }
 void ph_window_set_prefs(ph_window *w, bool ctrl, bool blur, bool relative)
 { (void)w; (void)ctrl; (void)blur; (void)relative; }
 void ph_window_note_transfer(ph_window *w, const char *line) { (void)w; (void)line; }
+void ph_window_copy_pairing(ph_window *w) { (void)w; }
+void ph_window_set_live_state(ph_window *w, bool feed, bool paused, bool sound_on)
+{ (void)w; (void)feed; (void)paused; (void)sound_on; }
+bool ph_window_media_keys(const ph_window *w) { (void)w; return true; }
+void ph_window_set_media_keys(ph_window *w, bool on) { (void)w; (void)on; }
+void ph_window_set_pc_name(ph_window *w, const char *name) { (void)w; (void)name; }
+bool ph_window_has_pairing(const ph_window *w) { (void)w; return false; }
+void ph_window_open_settings(ph_window *w) { (void)w; }
+void ph_window_set_transfer_percent(ph_window *w, int percent) { (void)w; (void)percent; }
 bool ph_window_set_active_transfer(ph_window *w, const char *line)
 { (void)w; (void)line; return false; }
 void ph_window_show_transfers(ph_window *w) { (void)w; }

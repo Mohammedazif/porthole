@@ -42,6 +42,9 @@ void ph_origin_cancel_push(ph_origin *origin);
 /* True while a file is queued or still moving. name receives the file name. */
 bool ph_origin_push_busy(ph_origin *origin, char *name, size_t name_len);
 
+/* How much of the file moving now has gone, 0 to 100; -1 when nothing is moving. */
+int ph_origin_push_percent(ph_origin *origin);
+
 /* 0 none, 1 sent, 2 failed, 3 cancelled. name receives the file name. */
 int ph_origin_take_push(ph_origin *origin, char *name, size_t name_len);
 
@@ -60,6 +63,9 @@ typedef struct ph_origin_screen {
 
 bool ph_origin_ask(ph_origin *origin, uint64_t hash, double aspect, const uint8_t *thumb,
                    const uint8_t *detail, const ph_origin_screen *screen, const char *dir);
+
+/* The name this PC is listed under in the iPhone app (the computer's host name). */
+void ph_origin_pc_name(char *out, size_t len);
 
 /* IPv4 address of the phone that last gave the right code, kept after it disconnects. */
 bool ph_origin_peer(ph_origin *origin, char *address, size_t len);

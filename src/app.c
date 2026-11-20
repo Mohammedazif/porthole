@@ -33,11 +33,19 @@
 #include "files/inbox.h"
 #include "files/origin.h"
 #include "files/picture_hash.h"
+#include "files/places.h"
+#include "core/upath.h"
+#ifdef _WIN32
+/* windows.h (via upath.h) defines these as old segment keywords. */
+#undef near
+#undef far
+#endif
 #include "broadcast/screen.h"
 #include "files/pull.h"
 #include "files/xdnd.h"
 #include "ui/drag_ghost.h"
 #include "ui/transfer_card.h"
+#include "ui/wintray.h"
 #include "core/metrics.h"
 #include "core/version.h"
 #include "hid/link.h"
@@ -151,6 +159,7 @@ typedef struct app {
     ph_pull pull;
     ph_drag_ghost *ghost;
     ph_transfer_card *card;
+    ph_wintray *tray;
     int place_x, place_y;
     Uint64 place_at;
     ph_origin *origin;
@@ -929,14 +938,14 @@ static void snap_pull(app *a)
 
 static bool copy_file(const char *src, const char *dest)
 {
-    FILE *in = fopen(src, "rb");
+    FILE *in = ph_fopen(src, "rb");
     FILE *out;
     char buf[65536];
     size_t n;
 
     if (!in)
         return false;
-    out = fopen(dest, "wb");
+    out = ph_fopen(dest, "wb");
     if (!out) {
         fclose(in);
         return false;
@@ -945,13 +954,13 @@ static bool copy_file(const char *src, const char *dest)
         if (fwrite(buf, 1, n, out) != n) {
             fclose(in);
             fclose(out);
-            remove(dest);
+            ph_remove(dest);
             return false;
         }
     }
     fclose(in);
     if (fclose(out) != 0) {
-        remove(dest);
+        ph_remove(dest);
         return false;
     }
     return true;
@@ -959,15 +968,15 @@ static bool copy_file(const char *src, const char *dest)
 
 static bool desktop_copy(const char *src, char *dest, size_t cap)
 {
-    const char *home = getenv("HOME");
-    const char *base = strrchr(src, '/');
+    const char *base = ph_path_base(src);
+    char desktop[1024];
 
     if (!dest || cap < 2)
         return false;
     dest[0] = 0;
-    if (!home || !home[0] || !base || !base[1])
+    if (!base[0] || !ph_place_dir(PH_PLACE_DESKTOP, desktop, sizeof desktop))
         return false;
-    if (snprintf(dest, cap, "%s/Desktop/%s", home, base + 1) >= (int)cap) {
+    if (snprintf(dest, cap, "%s/%s", desktop, base) >= (int)cap) {
         dest[0] = 0;
         return false;
     }
@@ -1011,42 +1020,34 @@ static int desktop_copy_all(char *paths, char *first, size_t first_cap)
  * first receives the path of the first one that landed. */
 static int downloads_move_all(char *paths, char *first, size_t first_cap)
 {
-    const char *home = getenv("HOME");
     char dir[1024];
     int moved = 0;
 
     if (first && first_cap)
         first[0] = 0;
-    if (!home || !home[0] || snprintf(dir, sizeof dir, "%s/Downloads", home) >= (int)sizeof dir)
+    if (!ph_place_dir(PH_PLACE_DOWNLOADS, dir, sizeof dir))
         return 0;
-#ifdef _WIN32
-    _mkdir(dir);
-#else
-    mkdir(dir, 0755);
-#endif
 
     for (char *line = paths, *next; line && *line; line = next) {
-        const char *base = strrchr(line, '/');
+        const char *base;
         char dest[1024];
         bool ok = false;
 
         next = strchr(line, '\n');
         if (next)
             *next++ = 0;
-        if (!base || !base[1])
+        base = ph_path_base(line);
+        if (!base[0])
             continue;
         for (int n = 1; n < 1000 && !ok; n++) {
-            FILE *taken;
-            int len = n == 1 ? snprintf(dest, sizeof dest, "%s/%s", dir, base + 1)
-                             : snprintf(dest, sizeof dest, "%s/%d-%s", dir, n, base + 1);
+            int len = n == 1 ? snprintf(dest, sizeof dest, "%s/%s", dir, base)
+                             : snprintf(dest, sizeof dest, "%s/%d-%s", dir, n, base);
 
             if (len >= (int)sizeof dest)
                 break;
-            if ((taken = fopen(dest, "rb"))) {
-                fclose(taken);
+            if (ph_path_exists(dest))
                 continue;
-            }
-            ok = rename(line, dest) == 0 || (copy_file(line, dest) && remove(line) == 0);
+            ok = ph_rename(line, dest) == 0 || (copy_file(line, dest) && ph_remove(line) == 0);
             break;
         }
         if (ok) {
@@ -1917,7 +1918,7 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
             SDL_CaptureMouse(SDL_FALSE);
         }
     }
-    uint16_t consumer = pc_consumer_usage(sc);
+    uint16_t consumer = ph_window_media_keys(a->win) ? pc_consumer_usage(sc) : 0;
     if (a->phone_name[0] && consumer) {
         if (!down || !(e->keysym.mod & KMOD_LALT)) {
             mark_input(a, e->timestamp);
@@ -2698,7 +2699,12 @@ static void percent_decode(const char *in, char *out, size_t cap)
 
 static bool clipboard_file(char *out, size_t cap)
 {
-    char *text = SDL_GetClipboardText();
+    char *text;
+
+    /* Explorer copies files as a file list, not as text. */
+    if (ph_place_clipboard_file(out, cap))
+        return true;
+    text = SDL_GetClipboardText();
     char *start, *end, decoded[1024];
     bool ok = false;
 
@@ -2768,6 +2774,7 @@ static void track_push(app *a)
         return;
     snprintf(line, sizeof line, "Sending %s", name[0] ? name : "file");
     ph_window_show_transfers(a->win);
+    ph_window_set_transfer_percent(a->win, ph_origin_push_percent(a->origin));
     if (ph_window_set_active_transfer(a->win, line))
         ph_window_set_detail(a->win, line);
 }
@@ -2779,15 +2786,16 @@ static void save_window_prefs(app *a)
         && ph_config_write_line("release-on-blur",
                                 ph_window_release_on_blur(a->win) ? "1" : "0")
         && ph_config_write_line("pointer-mode",
-                                ph_window_next_relative(a->win) ? "relative" : "absolute");
+                                ph_window_next_relative(a->win) ? "relative" : "absolute")
+        && ph_config_write_line("media-keys", ph_window_media_keys(a->win) ? "1" : "0");
     ph_window_set_detail(a->win, ok
         ? "Saved. Pointer direction applies the next time Porthole opens."
         : "Could not save these settings");
 }
 
-static void apply_window_action(app *a, bool *running)
+static void do_window_action(app *a, ph_window_action action, bool *running)
 {
-    switch (ph_window_take_action(a->win)) {
+    switch (action) {
     case PH_WINDOW_ACTION_NONE:
         break;
     case PH_WINDOW_ACTION_FEED:
@@ -2832,6 +2840,58 @@ static void apply_window_action(app *a, bool *running)
         save_window_prefs(a);
         break;
     }
+}
+
+static void apply_window_action(app *a, bool *running)
+{
+    do_window_action(a, ph_window_take_action(a->win), running);
+}
+
+/* The notification-area menu on Windows: same actions as the window's Settings. */
+static void follow_tray(app *a, bool *running)
+{
+    struct ph_audio_settings settings;
+    bool sound_on = true;
+    char tip[96];
+    SDL_Window *native = SDL_GetWindowFromID(ph_window_id(a->win));
+
+    if (!a->tray)
+        return;
+    switch (ph_wintray_take(a->tray)) {
+    case PH_WINTRAY_NONE:
+        break;
+    case PH_WINTRAY_SHOW:
+        SDL_ShowWindow(native);
+        SDL_RestoreWindow(native);
+        SDL_RaiseWindow(native);
+        break;
+    case PH_WINTRAY_FEED:
+        do_window_action(a, PH_WINDOW_ACTION_FEED, running);
+        break;
+    case PH_WINTRAY_PAUSE:
+        do_window_action(a, PH_WINDOW_ACTION_PAUSE, running);
+        break;
+    case PH_WINTRAY_SOUND:
+        do_window_action(a, PH_WINDOW_ACTION_MUTE, running);
+        break;
+    case PH_WINTRAY_COPY:
+        ph_window_copy_pairing(a->win);
+        break;
+    case PH_WINTRAY_SETTINGS:
+        SDL_ShowWindow(native);
+        SDL_RestoreWindow(native);
+        SDL_RaiseWindow(native);
+        ph_window_open_settings(a->win);
+        break;
+    case PH_WINTRAY_QUIT:
+        *running = false;
+        break;
+    }
+    if (a->audio && ph_audio_settings(a->audio, &settings))
+        sound_on = !settings.muted;
+    snprintf(tip, sizeof tip, "Porthole%s", a->phone_name[0] ? " - iPhone connected" : "");
+    ph_wintray_set_state(a->tray, a->feed_mode, a->controls_paused, sound_on,
+                         ph_window_has_pairing(a->win), tip);
 }
 
 int ph_app_run(const ph_app_options *opt)
@@ -2914,6 +2974,8 @@ int ph_app_run(const ph_app_options *opt)
         if (ph_config_read_line("pointer-mode", line, sizeof line))
             next_relative = strcmp(line, "relative") == 0;
         ph_window_set_prefs(a.win, ctrl, blur, next_relative);
+        if (ph_config_read_line("media-keys", line, sizeof line) && line[0])
+            ph_window_set_media_keys(a.win, strcmp(line, "0") != 0);
     }
     a.dec = ph_decoder_start(on_frame, &a);
     if (opt->audio)
@@ -2930,6 +2992,8 @@ int ph_app_run(const ph_app_options *opt)
         || !a.win || !a.dec)
         goto done;
     ph_hostclip_init();
+    ph_place_install_send_to();
+    a.tray = ph_wintray_create();
     a.ghost = ph_drag_ghost_create();
     if (!a.ghost)
         PH_LOGW("photo drag image unavailable");
@@ -2941,9 +3005,12 @@ int ph_app_run(const ph_app_options *opt)
     update_title(&a);
     {
         char hint[96];
+        char pc[64];
         a.origin = ph_origin_start(hint, sizeof hint);
         if (a.origin && hint[0])
             ph_window_set_pull_hint(a.win, hint);
+        ph_origin_pc_name(pc, sizeof pc);
+        ph_window_set_pc_name(a.win, pc);
     }
     {
         ph_screen_callbacks screen_cb = {
@@ -3008,6 +3075,12 @@ int ph_app_run(const ph_app_options *opt)
                 ph_window_set_pull_hint(a.win, hint);
         }
         apply_window_action(&a, &running);
+        follow_tray(&a, &running);
+        {
+            struct ph_audio_settings sound;
+            bool sound_on = !a.audio || !ph_audio_settings(a.audio, &sound) || !sound.muted;
+            ph_window_set_live_state(a.win, a.feed_mode, a.controls_paused, sound_on);
+        }
         if (ph_window_take_cancel(a.win) && a.origin)
             ph_origin_cancel_push(a.origin);
         track_push(&a);
@@ -3062,6 +3135,7 @@ done:
     ph_xdnd_cancel();
     hide_ghost(&a);
     ph_transfer_card_destroy(a.card);
+    ph_wintray_destroy(a.tray);
     a.card = NULL;
     ph_drag_ghost_destroy(a.ghost);
     a.ghost = NULL;

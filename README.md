@@ -8,19 +8,23 @@ provides mouse and keyboard control separately.
 Free and open source (GPL-3.0). The current sharing flow uses the companion iPhone app.
 The older AirPlay Screen Mirroring path remains available as a compatibility feature.
 
-**Platform gap:** the current companion-link and ReplayKit receiver implementations are
-Linux-only; their Windows entry points return unavailable. Windows AirPlay receiving
-still builds, but the new screen-sharing flow is not implemented there yet. The UI reports
-this state instead of presenting connection details that do not exist.
+**Windows and Linux:** the companion link (pairing, clipboard text and pictures, files both
+ways) and the ReplayKit screen receiver share one implementation on both systems. On
+Windows the PC advertises itself with the system DNS-SD (Windows 10 1809 or later), adds
+**Send to › iPhone (Porthole)** to Explorer, takes files copied in Explorer with Ctrl+V, saves
+shares in the user's Downloads folder, and shows a notification-area menu. Run the bundled
+`windows-firewall.ps1` once if Windows blocks TCP 47731-47733 on a Private network.
+`porthole --send FILE...` hands files to the running window from a terminal.
 
 **Version 0.1.0.** The app keeps the original Porthole identity and uses a refreshed native
 interface: a single 32-point title bar without version text, flat screen-sharing instructions,
 visible PC address/code and a Copy details action. Set up controls opens the Bluetooth guide;
 Help and Stats remain available. Help and setup scroll with the wheel or Page Up/Down; Esc
-closes help. The layout adapts to compact portrait and wide windows. The embedded DejaVu
-Sans typeface is rasterized by FreeType at the actual display pixel size; Windows requests
-per-monitor DPI awareness to avoid OS bitmap scaling. The typeface license is in
-`src/ui/fonts/LICENSE`. Re-embed it with `python3 scripts/build-ui-font.py`.
+closes help. The layout adapts to compact portrait and wide windows. The embedded Geist and
+Geist Mono variable typefaces are rasterized by FreeType at the actual display pixel size and
+weight; Windows requests per-monitor DPI awareness to avoid OS bitmap scaling. The typeface
+license (SIL OFL 1.1) is in `src/ui/fonts/LICENSE`. Re-embed them with
+`python3 scripts/build-ui-font.py`.
 
 > **Status: Linux prototype.** Wi-Fi mirroring and keyboard forwarding run in Porthole's own
 > window. Keyboard shortcuts and wheel scrolling have been tested on the iPhone. Continuous

@@ -1,4 +1,5 @@
 #include "files/hostclip.h"
+#include "files/winclip.h"
 
 #include "core/log.h"
 #include "files/clip.h"
@@ -503,6 +504,20 @@ bool ph_hostclip_changed(char *kind, void **data, size_t *len)
         }
         free(png);
     }
+#elif defined(_WIN32)
+    {
+        uint8_t *png = NULL;
+        size_t png_len = 0;
+
+        if (ph_winclip_read_png(&png, &png_len, PH_CLIP_IMAGE_MAX) && !already('P', png, png_len)) {
+            *data = png;
+            *len = png_len;
+            *kind = 'P';
+            remember('P', png, png_len, &seen_kind, &seen, &seen_len);
+            return true;
+        }
+        free(png);
+    }
 #endif
     return false;
 }
@@ -544,6 +559,11 @@ void ph_hostclip_apply(char kind, const void *data, size_t len)
             return;
         remember('P', data, len, &seen_kind, &seen, &seen_len);
         remember('P', data, len, &applied_kind, &applied, &applied_len);
+#elif defined(_WIN32)
+        if (ph_winclip_write_png(data, len)) {
+            remember('P', data, len, &seen_kind, &seen, &seen_len);
+            remember('P', data, len, &applied_kind, &applied, &applied_len);
+        }
 #else
         PH_LOGW("clipboard image was not accepted");
 #endif

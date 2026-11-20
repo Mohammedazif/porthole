@@ -21,7 +21,7 @@ mkdir -p "$package_dir/licenses" "$source_dir"
 cp "$binary" "$package_dir/porthole.exe"
 cp "$repo_root/LICENSE" "$package_dir/LICENSE"
 cp "$repo_root/third_party/UxPlay/LICENSE" "$package_dir/licenses/UxPlay-LICENSE"
-cp "$repo_root/src/ui/fonts/LICENSE" "$package_dir/licenses/DejaVu-Sans-LICENSE"
+cp "$repo_root/src/ui/fonts/LICENSE" "$package_dir/licenses/Geist-OFL-LICENSE"
 cp "$repo_root/scripts/windows-firewall.ps1" "$package_dir/windows-firewall.ps1"
 helper_dir="$(dirname -- "$binary")/ble-winrt"
 if [[ -f "$helper_dir/porthole-ble-winrt.exe" ]]; then

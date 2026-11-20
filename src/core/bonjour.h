@@ -1,6 +1,7 @@
 #ifndef PORTHOLE_CORE_BONJOUR_H
 #define PORTHOLE_CORE_BONJOUR_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Advertises one TCP service on the LAN so the iPhone app can find this PC. Bonjour
@@ -12,5 +13,9 @@ typedef struct ph_bonjour ph_bonjour;
 ph_bonjour *ph_bonjour_advertise(const char *name, const char *type, uint16_t port,
                                  const void *txt, uint16_t txt_len);
 void ph_bonjour_stop(ph_bonjour *bonjour);
+
+/* This computer's name without any domain, as the iPhone lists it. "Porthole" when
+ * there is none. */
+void ph_bonjour_host_name(char *out, size_t len);
 
 #endif

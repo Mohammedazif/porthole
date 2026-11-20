@@ -1,0 +1,176 @@
+#ifndef PORTHOLE_CORE_UPATH_H
+#define PORTHOLE_CORE_UPATH_H
+
+/* File calls on UTF-8 paths. Windows' narrow C calls read paths in the ANSI code
+ * page, so a file the iPhone names "Résumé.pdf" would not open there. */
+
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <direct.h>
+#include <wchar.h>
+
+static inline wchar_t *ph_wide(const char *utf8)
+{
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+    wchar_t *w;
+
+    if (n <= 0)
+        return NULL;
+    w = malloc((size_t)n * sizeof *w);
+    if (w && !MultiByteToWideChar(CP_UTF8, 0, utf8, -1, w, n)) {
+        free(w);
+        return NULL;
+    }
+    return w;
+}
+
+/* Wide to UTF-8 into out. False when it does not fit. */
+static inline bool ph_narrow(const wchar_t *wide, char *out, size_t cap)
+{
+    int n = WideCharToMultiByte(CP_UTF8, 0, wide, -1, out, (int)cap, NULL, NULL);
+    return n > 0;
+}
+
+static inline FILE *ph_fopen(const char *path, const char *mode)
+{
+    wchar_t *wp = ph_wide(path), *wm = ph_wide(mode);
+    FILE *f = wp && wm ? _wfopen(wp, wm) : NULL;
+    free(wp);
+    free(wm);
+    return f;
+}
+
+static inline int ph_remove(const char *path)
+{
+    wchar_t *wp = ph_wide(path);
+    int r = wp ? _wremove(wp) : -1;
+    free(wp);
+    return r;
+}
+
+/* Replaces an existing to, as rename does on Linux. */
+static inline int ph_rename(const char *from, const char *to)
+{
+    wchar_t *wf = ph_wide(from), *wt = ph_wide(to);
+    int r = wf && wt && MoveFileExW(wf, wt, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) ? 0 : -1;
+    free(wf);
+    free(wt);
+    return r;
+}
+
+static inline int ph_mkdir(const char *path)
+{
+    wchar_t *wp = ph_wide(path);
+    int r = wp ? _wmkdir(wp) : -1;
+    free(wp);
+    return r;
+}
+
+static inline int ph_rmdir(const char *path)
+{
+    wchar_t *wp = ph_wide(path);
+    int r = wp ? _wrmdir(wp) : -1;
+    free(wp);
+    return r;
+}
+
+/* Size of a regular file, or -1. */
+static inline long long ph_file_size(const char *path)
+{
+    wchar_t *wp = ph_wide(path);
+    struct _stat64 st;
+    long long size = -1;
+
+    if (wp && _wstat64(wp, &st) == 0 && (st.st_mode & _S_IFMT) == _S_IFREG)
+        size = st.st_size;
+    free(wp);
+    return size;
+}
+
+static inline bool ph_path_exists(const char *path)
+{
+    wchar_t *wp = ph_wide(path);
+    bool ok = wp && GetFileAttributesW(wp) != INVALID_FILE_ATTRIBUTES;
+    free(wp);
+    return ok;
+}
+
+static inline bool ph_path_absolute(const char *path)
+{
+    return path && ((((path[0] | 32) >= 'a' && (path[0] | 32) <= 'z') && path[1] == ':'
+                     && (path[2] == '\\' || path[2] == '/'))
+                    || (path[0] == '\\' && path[1] == '\\'));
+}
+
+#else
+
+static inline FILE *ph_fopen(const char *path, const char *mode)
+{
+    return fopen(path, mode);
+}
+
+static inline int ph_remove(const char *path)
+{
+    return remove(path);
+}
+
+static inline int ph_rename(const char *from, const char *to)
+{
+    return rename(from, to);
+}
+
+static inline int ph_mkdir(const char *path)
+{
+    return mkdir(path, 0700);
+}
+
+#include <unistd.h>
+static inline int ph_rmdir(const char *path)
+{
+    return rmdir(path);
+}
+
+static inline long long ph_file_size(const char *path)
+{
+    struct stat st;
+
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+        return -1;
+    return (long long)st.st_size;
+}
+
+static inline bool ph_path_exists(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+static inline bool ph_path_absolute(const char *path)
+{
+    return path && path[0] == '/';
+}
+
+#endif
+
+/* The last part of a path, after '/' or (on Windows) '\'. */
+static inline const char *ph_path_base(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+#ifdef _WIN32
+    const char *back = strrchr(path, '\\');
+    if (back && (!slash || back > slash))
+        slash = back;
+#endif
+    return slash ? slash + 1 : path;
+}
+
+#endif

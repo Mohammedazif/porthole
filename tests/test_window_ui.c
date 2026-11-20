@@ -82,16 +82,22 @@ int main(int argc, char **argv)
     SDL_Window *native = SDL_GetWindowFromID(ph_window_id(w));
     SDL_SetWindowSize(native, 460, 740);
     ph_window_set_pull_hint(w, "192.0.2.42:47731  SAMPLE42");
+    ph_window_set_pc_name(w, "Porthole Windows");
     ph_window_set_share_available(w, true);
     ph_window_redraw(w);
     screenshot(w, dir, "01-connect");
 
+    int tx, ty;
     click_shortcut(w, 320, 16, SDL_SCANCODE_F1);
-    click_shortcut(w, 337, 664, SDL_SCANCODE_F2);
-    click_shortcut(w, 48, 703, SDL_SCANCODE_F1);
-    click_shortcut(w, 120, 703, SDL_SCANCODE_F3);
+    CHECK(ph_window_connect_target(w, PH_TARGET_SETUP, &tx, &ty));
+    click_shortcut(w, tx, ty, SDL_SCANCODE_F2);
+    CHECK(ph_window_connect_target(w, PH_TARGET_HELP, &tx, &ty));
+    click_shortcut(w, tx, ty, SDL_SCANCODE_F1);
+    CHECK(ph_window_connect_target(w, PH_TARGET_STATS, &tx, &ty));
+    click_shortcut(w, tx, ty, SDL_SCANCODE_F3);
     SDL_Event copy = {.type = SDL_MOUSEBUTTONDOWN};
-    copy.button.button = SDL_BUTTON_LEFT; copy.button.x = 122; copy.button.y = 664;
+    CHECK(ph_window_connect_target(w, PH_TARGET_COPY, &tx, &ty));
+    copy.button.button = SDL_BUTTON_LEFT; copy.button.x = tx; copy.button.y = ty;
     CHECK(ph_window_chrome_event(w, &copy));
     copy.type = SDL_MOUSEBUTTONUP;
     CHECK(ph_window_chrome_event(w, &copy));
@@ -99,7 +105,8 @@ int main(int argc, char **argv)
     CHECK(clipboard && !strcmp(clipboard, "192.0.2.42:47731  SAMPLE42"));
     SDL_free(clipboard);
     SDL_Event fresh = {.type = SDL_MOUSEBUTTONDOWN};
-    fresh.button.button = SDL_BUTTON_LEFT; fresh.button.x = 394; fresh.button.y = 703;
+    CHECK(ph_window_connect_target(w, PH_TARGET_NEW_CODE, &tx, &ty));
+    fresh.button.button = SDL_BUTTON_LEFT; fresh.button.x = tx; fresh.button.y = ty;
     CHECK(ph_window_chrome_event(w, &fresh));
     fresh.type = SDL_MOUSEBUTTONUP;
     CHECK(ph_window_chrome_event(w, &fresh));
@@ -116,23 +123,41 @@ int main(int argc, char **argv)
     }
     SDL_Event gear = {.type = SDL_MOUSEBUTTONDOWN};
     gear.button.button = SDL_BUTTON_LEFT;
-    gear.button.x = 184; gear.button.y = 703;
+    CHECK(ph_window_connect_target(w, PH_TARGET_SETTINGS, &tx, &ty));
+    gear.button.x = tx; gear.button.y = ty;
     CHECK(ph_window_chrome_event(w, &gear));
     gear.type = SDL_MOUSEBUTTONUP;
     CHECK(ph_window_chrome_event(w, &gear));
     CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_NONE);
+    screenshot(w, dir, "11-settings");
     SDL_Event row = {.type = SDL_MOUSEBUTTONDOWN};
     row.button.button = SDL_BUTTON_LEFT;
-    row.button.x = 230; row.button.y = 125;
+    CHECK(ph_window_settings_target(w, 1, 1, &tx, &ty)); /* Wheel scrolling: Feed */
+    row.button.x = tx; row.button.y = ty;
     CHECK(ph_window_chrome_event(w, &row));
     row.type = SDL_MOUSEBUTTONUP;
     CHECK(ph_window_chrome_event(w, &row));
     CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_FEED);
-    gear.type = SDL_MOUSEBUTTONDOWN;
+    row.type = SDL_MOUSEBUTTONDOWN;                       /* Feed again: already on */
+    CHECK(ph_window_chrome_event(w, &row));
+    row.type = SDL_MOUSEBUTTONUP;
+    CHECK(ph_window_chrome_event(w, &row));
+    CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_NONE);
+    CHECK(ph_window_settings_target(w, 5, 0, &tx, &ty));  /* Media keys switch */
+    CHECK(ph_window_media_keys(w));
+    row.type = SDL_MOUSEBUTTONDOWN; row.button.x = tx; row.button.y = ty;
+    CHECK(ph_window_chrome_event(w, &row));
+    row.type = SDL_MOUSEBUTTONUP;
+    CHECK(ph_window_chrome_event(w, &row));
+    CHECK(!ph_window_media_keys(w));
+    CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_SAVE);
+    CHECK(ph_window_settings_target(w, -1, 0, &tx, &ty)); /* Done */
+    gear.type = SDL_MOUSEBUTTONDOWN; gear.button.x = tx; gear.button.y = ty;
     CHECK(ph_window_chrome_event(w, &gear));
     gear.type = SDL_MOUSEBUTTONUP;
     CHECK(ph_window_chrome_event(w, &gear));
     CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_NONE);
+    CHECK(!ph_window_settings_target(w, 99, 0, &tx, &ty));
     ph_window_set_active_transfer(w, "Sending photo.jpg");
     CHECK(!ph_window_set_active_transfer(w, "Sending photo.jpg"));
     ph_window_note_transfer(w, "Sent photo.jpg");
@@ -165,6 +190,9 @@ int main(int argc, char **argv)
     ph_setup_open(&setup, true);
     ph_window_set_setup(w, &setup);
     screenshot(w, dir, "04-setup");
+    SDL_SetWindowSize(native, 960, 680); ph_window_redraw(w);
+    screenshot(w, dir, "04b-setup-wide");
+    SDL_SetWindowSize(native, 460, 740); ph_window_redraw(w);
     CHECK(ph_window_setup_click(w, 220, 694) == PH_SETUP_ACTION_NONE); /* first Back */
     CHECK(ph_window_setup_click(w, 370, 694) == PH_SETUP_ACTION_NEXT);
     setup.step = PH_SETUP_BLUETOOTH;

@@ -157,6 +157,12 @@ if(PORTHOLE_WITH_AIRPLAY)
     add_test(NAME window_ui COMMAND test_window_ui)
     set_tests_properties(window_ui PROPERTIES TIMEOUT 15)
 
+    add_executable(test_origin_link test_origin_link.c)
+    target_link_libraries(test_origin_link PRIVATE porthole_app)
+    porthole_set_warnings(test_origin_link)
+    add_test(NAME origin_link COMMAND test_origin_link)
+    set_tests_properties(origin_link PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
     add_executable(test_app_pointer test_app_pointer.c)
     target_link_libraries(test_app_pointer PRIVATE porthole_app)
     porthole_set_warnings(test_app_pointer)

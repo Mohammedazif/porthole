@@ -31,6 +31,7 @@ add_library(porthole_core STATIC
     files/clip.c
     broadcast/screen.c
     files/inbox.c
+    files/places.c
     usb/packet.c
     usb/switch.c
     usb/winusb.c
@@ -45,6 +46,12 @@ if(UNIX)
     find_package(Threads REQUIRED)
     # broadcast/screen.c: its listener thread, and Bonjour loaded at run time
     target_link_libraries(porthole_core PUBLIC m Threads::Threads ${CMAKE_DL_LIBS})
+endif()
+if(WIN32)
+    # Sockets, LAN address, and Windows 10 DNS-SD for the iPhone links in core.
+    find_package(Threads REQUIRED)
+    target_compile_definitions(porthole_core PUBLIC _WIN32_WINNT=0x0A00)
+    target_link_libraries(porthole_core PUBLIC Threads::Threads ws2_32 iphlpapi dnsapi shell32 ole32 uuid)
 endif()
 porthole_set_warnings(porthole_core)
 
@@ -83,6 +90,7 @@ if(PORTHOLE_WITH_AIRPLAY)
         ui/text.c
         ui/drag_ghost.c
         ui/transfer_card.c
+        ui/wintray.c
         ui/generated/brand_art.c
         ui/chrome.c
         video/decoder.c
@@ -90,6 +98,7 @@ if(PORTHOLE_WITH_AIRPLAY)
         media/record.c
         files/origin.c
         files/hostclip.c
+        files/winclip.c
         files/xdnd.c
         control/paste_sdl.c
         touch/wda_net.c

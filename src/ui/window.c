@@ -44,16 +44,20 @@ struct ph_window {
     SDL_Texture *mark;
     char title[320];
     char pull_hint[96];
+    char pc_name[64];
     bool share_checked, share_available;
     bool new_code;
     bool settings_visible;
     bool ctrl_command;
     bool release_blur;
+    bool media_keys;
+    bool feed_on, paused, sound_on; /* app state shown in Settings */
     bool next_relative;
     ph_window_action pending_action;
     char transfer_lines[6][72];
     int transfer_count;
     char transfer_active[72];
+    int transfer_percent;
     bool transfer_cancel;
     Uint64 copied_until;
     int modal_scroll, modal_max_scroll;
@@ -91,9 +95,17 @@ static int draw_text(SDL_Renderer *renderer, const char *text, int x, int y,
 }
 
 static const SDL_Color color_text = {17, 17, 17, 255};
-static const SDL_Color color_muted = {104, 107, 112, 255};
+static const SDL_Color color_muted = {92, 96, 104, 255};
 static const SDL_Color color_warn = {154, 52, 18, 255};
 static const SDL_Color color_on_ink = {255, 255, 255, 255};
+static const SDL_Color color_stage = {11, 12, 13, 255};
+static const SDL_Color color_stage_raised = {42, 45, 49, 255};
+static const SDL_Color color_stage_muted = {150, 154, 160, 255};
+static const SDL_Color color_live = {61, 214, 140, 255};
+static const SDL_Color color_line = {226, 228, 232, 255};
+static const SDL_Color color_ground = {243, 244, 246, 255};
+static const SDL_Color color_border = {213, 216, 221, 255};
+static const SDL_Color color_ok = {22, 128, 60, 255};
 
 #ifdef _WIN32
 #define PH_PAIR_LINE "Pair this PC's Bluetooth name."
@@ -123,6 +135,12 @@ static void rounded(SDL_Renderer *renderer, SDL_Rect box, int radius, SDL_Color 
     }
 }
 
+static void fill_px(SDL_Renderer *renderer, int x, int y, int w, int h);
+static void modal_range(ph_window *w, int content, int visible);
+static void stroke(SDL_Renderer *renderer, int x1, int y1, int x2, int y2);
+static void draw_line_fit(SDL_Renderer *renderer, const char *text, int x, int y, int width, int scale,
+                          SDL_Color color);
+
 static void surface_card(SDL_Renderer *renderer, SDL_Rect box)
 {
     rounded(renderer, box, 4, (SDL_Color){228, 228, 228, 255});
@@ -137,41 +155,76 @@ static void draw_button(ph_window *w, SDL_Rect box, const char *label, bool prim
     SDL_Color fg = primary ? color_on_ink : color_text;
     if (disabled) { bg = (SDL_Color){232, 234, 237, 255}; fg = color_muted; }
     else if (hot) bg = primary ? (SDL_Color){48, 51, 56, 255} : (SDL_Color){238, 240, 242, 255};
-    if (!primary && !disabled) surface_card(w->renderer, box);
+    if (!primary && !disabled) rounded(w->renderer, box, 8, (SDL_Color){213, 216, 221, 255});
     SDL_Rect inside = box;
     if (!primary && !disabled) { inside.x++; inside.y++; inside.w -= 2; inside.h -= 2; }
-    rounded(w->renderer, inside, 4, bg);
-    int scale = box.h < 32 ? 1 : 2;
+    rounded(w->renderer, inside, primary || disabled ? 8 : 7, bg);
+    int scale = PH_TEXT(box.h < 32 ? 13 : 14, PH_FONT_MEDIUM);
     int tw = ph_text_width(label, scale);
     draw_text(w->renderer, label, box.x + (box.w - tw) / 2,
                box.y + (box.h - ph_text_line_height(scale)) / 2 - 1, box.w, scale, fg);
 }
 
+#define CONNECT_SUBTITLE \
+    "Open Porthole on your iPhone and tap this PC in the list. Keep both on the same Wi-Fi network."
+
 typedef struct connect_boxes {
     SDL_Rect copy, setup, help, stats, fresh, gear;
-    int left, inner;
+    SDL_Rect card, ready, qr;
+    int left, inner, title_y, footer_y;
+    bool wide;
 } connect_boxes;
 
+/* The connect screen: a pairing card (QR, address, code) and what is ready on this
+ * PC, side by side when wide and stacked when narrow, over a footer of shortcuts. */
 static connect_boxes connect_layout(int width, int height, int top)
 {
     connect_boxes g;
-    int pad = width < 560 ? 20 : 56;
-    int inner = width - pad * 2;
+    int pad = width < 560 ? 20 : 48;
+    int body_y, qr = 164;
 
-    if (inner > 640) inner = 640;
-    g.left = (width - inner) / 2;
-    g.inner = inner;
-    int button_y = height - 96;
-    if (button_y < top + 220) button_y = top + 220;
-    if (button_y + 64 > height - 8) button_y = height - 72;
-    int gap = 10;
-    int bw = (inner - gap) / 2;
-    g.copy = (SDL_Rect){g.left, button_y, bw, 40};
-    g.setup = (SDL_Rect){g.left + bw + gap, button_y, inner - bw - gap, 40};
-    g.help = (SDL_Rect){g.left, button_y + 48, 56, 22};
-    g.stats = (SDL_Rect){g.left + 72, button_y + 48, 56, 22};
-    g.fresh = (SDL_Rect){g.left + inner - 92, button_y + 48, 92, 22};
-    g.gear = (SDL_Rect){g.left + 148, button_y + 48, 72, 22};
+    memset(&g, 0, sizeof g);
+    g.inner = width - pad * 2;
+    if (g.inner > 1120) g.inner = 1120;
+    g.left = (width - g.inner) / 2;
+    g.wide = g.inner >= 760;
+    g.title_y = top + (g.wide ? 36 : 22);
+    body_y = g.title_y + (g.wide ? 48 : 36)
+             + ph_text_height(CONNECT_SUBTITLE, g.wide ? 820 : g.inner, PH_TEXT(g.wide ? 15 : 14, PH_FONT_REGULAR))
+             + (g.wide ? 24 : 16);
+    g.footer_y = height - 44;
+    if (g.wide) {
+        int card_w = (g.inner - 24) * 57 / 100;
+        g.card = (SDL_Rect){g.left, body_y, card_w, 330};
+        g.ready = (SDL_Rect){g.left + card_w + 24, body_y + 24, g.inner - card_w - 24, 4 * 64 + 24};
+    } else {
+        if (g.inner < 420) qr = 0;          /* too narrow: the code and address are enough */
+        else if (g.inner < 560) qr = 120;
+        /* Narrow: the code and buttons stay, the note under them goes, rows are compact. */
+        g.card = (SDL_Rect){g.left, body_y, g.inner, 252};
+        g.ready = (SDL_Rect){g.left, g.card.y + g.card.h + 44, g.inner, 4 * 48};
+    }
+    if (qr)
+        g.qr = (SDL_Rect){g.card.x + 24, g.card.y + 24, qr, qr};
+    {
+        int dx = qr ? g.qr.x + qr + 28 : g.card.x + 24;
+        int dw = g.card.x + g.card.w - 24 - dx;
+        int by = g.card.y + g.card.h - 24 - 36;
+        int cw = dw < 242 ? (dw - 10) * 55 / 100 : 128;
+        g.copy = (SDL_Rect){dx, by, cw, 36};
+        g.fresh = (SDL_Rect){dx + cw + 10, by, dw < 242 ? dw - cw - 10 : 104, 36};
+    }
+    /* The link sits in the third row; no row, no link. */
+    if (g.wide && g.ready.y + 64 * 2 + 88 <= g.footer_y - 12)
+        g.setup = (SDL_Rect){g.ready.x + 56, g.ready.y + 64 * 2 + 52, 120, 26};
+    else if (!g.wide && g.ready.y + 48 * 3 <= g.footer_y - 12)
+        g.setup = (SDL_Rect){g.ready.x + g.ready.w - 18 - 104, g.ready.y + 96 + 12, 108, 24};
+    g.help = (SDL_Rect){g.left, g.footer_y + 10, 150, 24};
+    g.stats = (SDL_Rect){g.left + (g.wide ? 174 : 70), g.footer_y + 10, g.wide ? 160 : 60, 24};
+    g.gear = (SDL_Rect){g.left + g.inner - 64, g.footer_y + 10, 64, 24};
+    if (!g.wide) {
+        g.help.w = 60;
+    }
     return g;
 }
 
@@ -258,58 +311,210 @@ static void draw_qr(SDL_Renderer *renderer, const char *text, SDL_Rect box)
     }
 }
 
-static const char *settings_label(const ph_window *w, int index, char *buf, size_t cap)
+/* Settings: one column of sections. Each row is a name, a line about it, and one
+ * control: a switch, a two-way choice, or a button. */
+enum { SET_SWITCH, SET_CHOICE, SET_BUTTON };
+enum {
+    SET_POINTER, SET_WHEEL, SET_PAUSE, SET_GUIDE, SET_CTRL, SET_MEDIA, SET_BLUR, SET_SOUND,
+    SET_COPY, SET_FORGET, SET_QUIT, SET_ROWS
+};
+
+typedef struct setting_row {
+    const char *section; /* starts a section when set */
+    const char *name;
+    const char *about;
+    int kind;
+    const char *left, *right; /* choice labels, or the button label in left */
+} setting_row;
+
+static const setting_row setting_rows[SET_ROWS] = {
+    [SET_POINTER] = {"CONTROLS", "Pointer", "Absolute puts the iPhone pointer where your mouse is. "
+                     "A change applies next time Porthole opens, after pairing again.",
+                     SET_CHOICE, "Absolute", "Relative"},
+    [SET_WHEEL] = {NULL, "Wheel scrolling", "Feed turns each wheel burst into one swipe, for Reels "
+                   "and Shorts. F4 switches.", SET_CHOICE, "Normal", "Feed"},
+    [SET_PAUSE] = {NULL, "Pause controls", "Keep watching without sending your mouse and keyboard.",
+                   SET_SWITCH, NULL, NULL},
+    [SET_GUIDE] = {NULL, "Setup guide", "Pair over Bluetooth and check the pointer lines up.",
+                   SET_BUTTON, "Open", NULL},
+    [SET_CTRL] = {"KEYBOARD", "Ctrl acts as Command", "Ctrl+C, Ctrl+V and Ctrl+A work on the iPhone.",
+                  SET_SWITCH, NULL, NULL},
+    [SET_MEDIA] = {NULL, "Media keys go to the iPhone", "Play, pause, next track and volume keys.",
+                   SET_SWITCH, NULL, NULL},
+    [SET_BLUR] = {NULL, "Release keys when Porthole loses focus", "Stops a key staying held on the iPhone.",
+                  SET_SWITCH, NULL, NULL},
+    [SET_SOUND] = {"SOUND", "Play iPhone sound on this PC", "Uses this PC's default speakers.",
+                   SET_SWITCH, NULL, NULL},
+    [SET_COPY] = {"PAIRING", "Pairing details", NULL, SET_BUTTON, "Copy", NULL},
+    [SET_FORGET] = {NULL, "Forget this iPhone", "It needs the pairing code again to connect.",
+                    SET_BUTTON, "Forget", NULL},
+    [SET_QUIT] = {"ABOUT", "Porthole " PORTHOLE_VERSION, "Free software under GPL-3.0.", SET_BUTTON,
+                  "Quit", NULL},
+};
+
+static bool setting_on(const ph_window *w, int row)
 {
-    switch (index) {
-    case 0: return "Check pointer alignment";
-    case 1: return "Wheel: Normal or Feed";
-    case 2:
-        snprintf(buf, cap, "Ctrl is Command: %s", w->ctrl_command ? "On" : "Off");
-        return buf;
-    case 3:
-        snprintf(buf, cap, "Release keys on blur: %s", w->release_blur ? "On" : "Off");
-        return buf;
-    case 4:
-        snprintf(buf, cap, "Relative pointer next open: %s", w->next_relative ? "On" : "Off");
-        return buf;
-    case 5: return "Pause or resume controls";
-    case 6: return "Play or mute sound";
-    case 7: return "Copy pairing details";
-    case 8: return "Forget this iPhone";
-    case 9: return "Quit";
-    default: return "";
+    switch (row) {
+    case SET_POINTER: return w->next_relative;
+    case SET_WHEEL: return w->feed_on;
+    case SET_PAUSE: return w->paused;
+    case SET_CTRL: return w->ctrl_command;
+    case SET_MEDIA: return w->media_keys;
+    case SET_BLUR: return w->release_blur;
+    case SET_SOUND: return w->sound_on;
+    default: return false;
     }
 }
 
-static SDL_Rect settings_row_box(int width, int index)
-{
-    int row_w = width - 48;
-    int x;
+typedef struct setting_box {
+    SDL_Rect row, control, left, right;
+    int text_w;
+    bool stacked;
+} setting_box;
 
-    if (row_w > 440)
-        row_w = 440;
-    x = (width - row_w) / 2;
-    return (SDL_Rect){x, PH_WINDOW_BAR_PX + 44 + index * 34, row_w, 30};
+static int settings_column(int width, int *left)
+{
+    int inner = width - 40;
+    if (inner > 600) inner = 600;
+    *left = (width - inner) / 2;
+    return inner;
+}
+
+static const char *setting_about(const ph_window *w, int row)
+{
+    if (row == SET_COPY)
+        return w->pull_hint[0] ? w->pull_hint : "Shown once the iPhone connection starts.";
+    return setting_rows[row].about;
+}
+
+/* Lays out rows top to bottom from the top of the scrolled content. */
+static setting_box setting_layout(const ph_window *w, int width, int row, int *y)
+{
+    setting_box b;
+    int left, inner = settings_column(width, &left);
+    int control_w = setting_rows[row].kind == SET_CHOICE ? 184 : setting_rows[row].kind == SET_SWITCH ? 40 : 84;
+    int text_h;
+
+    memset(&b, 0, sizeof b);
+    if (setting_rows[row].section)
+        *y += 44;
+    b.stacked = inner - 32 - control_w - 16 < 180;
+    b.text_w = b.stacked ? inner - 32 : inner - 32 - control_w - 16;
+    text_h = 20 + ph_text_height(setting_about(w, row), b.text_w, PH_TEXT(13, PH_FONT_REGULAR));
+    b.row = (SDL_Rect){left, *y, inner, (b.stacked ? text_h + 12 + 32 : (text_h > 32 ? text_h : 32)) + 28};
+    b.control = b.stacked
+        ? (SDL_Rect){left + 16, *y + 14 + text_h + 12, control_w, 32}
+        : (SDL_Rect){left + inner - 16 - control_w, *y + (b.row.h - 32) / 2, control_w, 32};
+    if (setting_rows[row].kind == SET_SWITCH)
+        b.control = (SDL_Rect){b.control.x, b.control.y + 6, 40, 22};
+    b.left = (SDL_Rect){b.control.x, b.control.y, b.control.w / 2, b.control.h};
+    b.right = (SDL_Rect){b.control.x + b.control.w / 2, b.control.y, b.control.w - b.control.w / 2, b.control.h};
+    *y += b.row.h;
+    return b;
+}
+
+static int settings_top(void)
+{
+    return PH_WINDOW_BAR_PX + 76;
+}
+
+static SDL_Rect settings_done_box(int width)
+{
+    int left, inner = settings_column(width, &left);
+    return (SDL_Rect){left + inner - 72, PH_WINDOW_BAR_PX + 22, 72, 32};
+}
+
+/* The hit code for a point: CHROME_SET + row * 2 + side (side 1 is a choice's right half). */
+static int settings_hit(const ph_window *w, int width, int height, SDL_Point p)
+{
+    int y = settings_top() - w->modal_scroll;
+    SDL_Rect done = settings_done_box(width);
+
+    if (SDL_PointInRect(&p, &done))
+        return CHROME_SETTINGS;
+    if (p.y < settings_top() - 8)
+        return CHROME_PANEL;
+    for (int row = 0; row < SET_ROWS; row++) {
+        setting_box b = setting_layout(w, width, row, &y);
+        SDL_Rect hit = b.control;
+        if (b.row.y > height)
+            break;
+        if (setting_rows[row].kind == SET_SWITCH)
+            hit = b.row; /* the whole row flips a switch */
+        if (SDL_PointInRect(&p, &hit))
+            return CHROME_SET + row * 2
+                   + (setting_rows[row].kind == SET_CHOICE && SDL_PointInRect(&p, &b.right));
+    }
+    return CHROME_PANEL;
+}
+
+static void draw_switch(SDL_Renderer *r, SDL_Rect box, bool on)
+{
+    rounded(r, box, box.h / 2, on ? color_text : (SDL_Color){213, 216, 221, 255});
+    rounded(r, (SDL_Rect){on ? box.x + box.w - box.h + 2 : box.x + 2, box.y + 2, box.h - 4, box.h - 4},
+            (box.h - 4) / 2, color_on_ink);
 }
 
 static void draw_settings(ph_window *w, int width, int height)
 {
-    int i;
+    SDL_Renderer *r = w->renderer;
+    int left, inner = settings_column(width, &left);
+    int y = settings_top() - w->modal_scroll, content;
+    SDL_Rect done = settings_done_box(width), clip = {0, settings_top() - 8, width, height};
 
-    paint(w->renderer, (SDL_Rect){0, PH_WINDOW_BAR_PX, width, height - PH_WINDOW_BAR_PX},
-          243, 244, 246, 255);
-    draw_text(w->renderer, "Settings", 24, PH_WINDOW_BAR_PX + 12, width - 48, 2, color_text);
-    for (i = 0; i < 10; i++) {
-        char buf[80];
-        SDL_Rect row = settings_row_box(width, i);
-        SDL_Color ink = w->chrome_hover == CHROME_SET + i ? color_on_ink : color_text;
-        if (row.y + row.h > height - 8)
-            break;
-        rounded(w->renderer, row, 6,
-                w->chrome_hover == CHROME_SET + i ? color_text : color_on_ink);
-        draw_text(w->renderer, settings_label(w, i, buf, sizeof buf), row.x + 10, row.y + 6,
-                  row.w - 20, 1, ink);
+    paint(r, (SDL_Rect){0, PH_WINDOW_BAR_PX, width, height - PH_WINDOW_BAR_PX}, 243, 244, 246, 255);
+    SDL_RenderSetClipRect(r, &clip);
+    for (int row = 0; row < SET_ROWS; row++) {
+        const setting_row *s = &setting_rows[row];
+        int top_of_section = y;
+        setting_box b = setting_layout(w, width, row, &y);
+        bool on = setting_on(w, row), first = s->section != NULL;
+        bool last = row + 1 == SET_ROWS || setting_rows[row + 1].section;
+        bool hot_row = w->chrome_hover >= CHROME_SET + row * 2 && w->chrome_hover <= CHROME_SET + row * 2 + 1;
+
+        if (first)
+            draw_text(r, s->section, left + 4, top_of_section + 20, inner, PH_TEXT(11, PH_FONT_MEDIUM),
+                      color_muted);
+        /* One white card per section: corners only at its first and last rows. */
+        {
+            SDL_Rect card = b.row;
+            rounded(r, card, first || last ? 12 : 0, color_line);
+            if (!first) { paint(r, (SDL_Rect){card.x, card.y, card.w, 12}, 226, 228, 232, 255); }
+            if (!last) { paint(r, (SDL_Rect){card.x, card.y + card.h - 12, card.w, 12}, 226, 228, 232, 255); }
+            SDL_Rect fill = {card.x + 1, card.y + (first ? 1 : 0), card.w - 2, card.h - (first ? 1 : 0) - (last ? 1 : 0)};
+            rounded(r, fill, first || last ? 11 : 0, color_on_ink);
+            if (!first) paint(r, (SDL_Rect){fill.x, fill.y, fill.w, 12}, 255, 255, 255, 255);
+            if (!last) paint(r, (SDL_Rect){fill.x, fill.y + fill.h - 12, fill.w, 12}, 255, 255, 255, 255);
+            if (!last) paint(r, (SDL_Rect){card.x + 16, card.y + card.h - 1, card.w - 32, 1}, 226, 228, 232, 255);
+        }
+        draw_text(r, s->name, b.row.x + 16, b.row.y + 14, b.text_w, PH_TEXT(14, PH_FONT_MEDIUM),
+                  row == SET_FORGET ? color_warn : color_text);
+        draw_text(r, setting_about(w, row), b.row.x + 16, b.row.y + 34, b.text_w,
+                  row == SET_COPY && w->pull_hint[0] ? PH_TEXT(13, PH_FONT_MONO) : PH_TEXT(13, PH_FONT_REGULAR),
+                  color_muted);
+        if (s->kind == SET_SWITCH) {
+            draw_switch(r, b.control, on);
+        } else if (s->kind == SET_CHOICE) {
+            SDL_Rect pick = on ? b.right : b.left;
+            rounded(r, b.control, 9, color_ground);
+            rounded(r, (SDL_Rect){pick.x + 3, pick.y + 3, pick.w - 6, pick.h - 6}, 7, color_border);
+            rounded(r, (SDL_Rect){pick.x + 3, pick.y + 3, pick.w - 6, pick.h - 7}, 7, color_on_ink);
+            draw_text(r, s->left, b.left.x + (b.left.w - ph_text_width(s->left, PH_TEXT(13, PH_FONT_MEDIUM))) / 2,
+                      b.left.y + 7, b.left.w, PH_TEXT(13, PH_FONT_MEDIUM), on ? color_muted : color_text);
+            draw_text(r, s->right, b.right.x + (b.right.w - ph_text_width(s->right, PH_TEXT(13, PH_FONT_MEDIUM))) / 2,
+                      b.right.y + 7, b.right.w, PH_TEXT(13, PH_FONT_MEDIUM), on ? color_text : color_muted);
+        } else {
+            const char *label = row == SET_COPY && w->copied_until ? "Copied" : s->left;
+            bool disabled = row == SET_COPY && !w->pull_hint[0];
+            draw_button(w, b.control, label, false, disabled, hot_row);
+        }
     }
+    SDL_RenderSetClipRect(r, NULL);
+    content = y + w->modal_scroll - settings_top() + 24;
+    modal_range(w, content, height - settings_top());
+    paint(r, (SDL_Rect){0, PH_WINDOW_BAR_PX, width, settings_top() - 8 - PH_WINDOW_BAR_PX}, 243, 244, 246, 255);
+    draw_text(r, "Settings", left, PH_WINDOW_BAR_PX + 22, inner - 90, PH_TEXT(24, PH_FONT_SEMIBOLD), color_text);
+    draw_button(w, done, "Done", true, false, w->chrome_hover == CHROME_SETTINGS);
 }
 
 /* Live bar, right to left: window buttons, a divider, Transfers, Controls, Settings. */
@@ -318,106 +523,220 @@ static SDL_Rect live_settings_box(int win_w)
     return (SDL_Rect){win_w - 120 - 9 - 3 * 32, 4, 30, PH_WINDOW_BAR_PX - 8};
 }
 
+static void outline(SDL_Renderer *r, SDL_Rect box, int radius, SDL_Color line, SDL_Color fill)
+{
+    rounded(r, box, radius, line);
+    rounded(r, (SDL_Rect){box.x + 1, box.y + 1, box.w - 2, box.h - 2}, radius - 1, fill);
+}
+
+/* Small line icons in a 32 px tile: 0 Wi-Fi, 1 screen, 2 mouse, 3 sound. */
+static void ready_icon(SDL_Renderer *r, int kind, int x, int y)
+{
+    int cx = x + 16, cy = y + 16;
+
+    rounded(r, (SDL_Rect){x, y, 32, 32}, 8, color_ground);
+    SDL_SetRenderDrawColor(r, 17, 17, 17, 255);
+    switch (kind) {
+    case 0:
+        for (int i = 0; i < 3; i++) {
+            int rad = 3 + i * 3;
+            for (int a = -40; a <= 40; a += 5) {
+                double t = (a - 90) * 3.14159265 / 180;
+                SDL_RenderDrawPoint(r, cx + (int)lround(rad * cos(t)), cy + 4 + (int)lround(rad * sin(t)));
+            }
+        }
+        fill_px(r, cx - 1, cy + 3, 2, 2);
+        break;
+    case 1:
+        SDL_RenderDrawRect(r, &(SDL_Rect){cx - 5, cy - 8, 10, 16});
+        fill_px(r, cx - 1, cy + 5, 2, 1);
+        break;
+    case 2:
+        SDL_RenderDrawRect(r, &(SDL_Rect){cx - 4, cy - 7, 8, 14});
+        fill_px(r, cx, cy - 7, 1, 5);
+        break;
+    default:
+        fill_px(r, cx - 6, cy - 2, 3, 5);
+        stroke(r, cx - 3, cy - 2, cx + 1, cy - 6);
+        stroke(r, cx - 3, cy + 2, cx + 1, cy + 6);
+        fill_px(r, cx + 1, cy - 6, 1, 13);
+        stroke(r, cx + 4, cy - 2, cx + 4, cy + 2);
+        break;
+    }
+}
+
+/* A coloured dot and label, right-aligned at right. tone: 0 muted ring, 1 ok, 2 warn. */
+static void state_pill(SDL_Renderer *r, int right, int y, const char *label, int tone)
+{
+    SDL_Color ink = tone == 1 ? color_ok : tone == 2 ? color_warn : color_muted;
+    int tw = ph_text_width(label, PH_TEXT(12, PH_FONT_MEDIUM));
+    int x = right - tw;
+
+    if (tone)
+        rounded(r, (SDL_Rect){x - 14, y + 5, 8, 8}, 4, ink);
+    else {
+        rounded(r, (SDL_Rect){x - 14, y + 5, 8, 8}, 4, ink);
+        rounded(r, (SDL_Rect){x - 12, y + 7, 4, 4}, 2, color_on_ink);
+    }
+    draw_text(r, label, x, y, tw + 4, PH_TEXT(12, PH_FONT_MEDIUM), ink);
+}
+
+static void kbd(SDL_Renderer *r, int x, int y, const char *key, const char *label, bool hot)
+{
+    int kw = ph_text_width(key, PH_TEXT(12, PH_FONT_MONO)) + 12;
+
+    outline(r, (SDL_Rect){x, y, kw, 22}, 4, color_border, color_on_ink);
+    draw_text(r, key, x + 6, y + 3, kw, PH_TEXT(12, PH_FONT_MONO), color_text);
+    draw_text(r, label, x + kw + 8, y + 3, 200, PH_TEXT(12, PH_FONT_REGULAR), hot ? color_text : color_muted);
+}
+
 static void draw_waiting(ph_window *w, int width, int height, int top)
 {
+    SDL_Renderer *r = w->renderer;
     connect_boxes g = connect_layout(width, height, top);
     char address[80], code[40];
-    bool have;
-    int y = top + 28;
-    int card_h;
-    SDL_Rect card;
-    const char *rows[4][2];
-    int dots[4][3];
+    bool have, unavailable;
+    int dx, dw, y;
 
     hint_fields(w, address, sizeof address, code, sizeof code);
     have = address[0] && code[0];
-    paint(w->renderer, (SDL_Rect){0, top, width, height - top}, 243, 244, 246, 255);
-    draw_text(w->renderer, "Connect your iPhone", g.left, y, g.inner, width < 560 ? 2 : 3, color_text);
-    y += width < 560 ? 28 : 44;
-    draw_text(w->renderer,
-              "Open Porthole on your iPhone and enter this PC. Keep both on the same Wi-Fi.",
-              g.left, y, g.inner, 1, color_muted);
-    y += 36;
-    card_h = have ? 268 : 72;
-    if (y + card_h > g.copy.y - 16) card_h = g.copy.y - 16 - y;
-    if (card_h < 48) card_h = 48;
-    card = (SDL_Rect){g.left, y, g.inner, card_h};
-    rounded(w->renderer, card, 12, (SDL_Color){226, 228, 232, 255});
-    card.x++; card.y++; card.w -= 2; card.h -= 2;
-    rounded(w->renderer, card, 11, color_on_ink);
-    if (have) {
-        draw_text(w->renderer, "THIS PC", card.x + 16, card.y + 12, card.w - 32, 1, color_muted);
-        draw_text(w->renderer, "Porthole", card.x + 16, card.y + 28, card.w - 32, 2, color_text);
-        draw_text(w->renderer, "Address", card.x + 16, card.y + 64, 80, 1, color_muted);
-        draw_text(w->renderer, address, card.x + 100, card.y + 62, card.w - 116, 2, color_text);
-        draw_text(w->renderer, "Code", card.x + 16, card.y + 92, 80, 1, color_muted);
-        draw_text(w->renderer, code, card.x + 100, card.y + 88, card.w - 116, 2, color_text);
-        if (card.h > 200) {
-            char payload[128], compact[16];
-            size_t n = 0;
-            SDL_Rect qr = {card.x + (card.w - 120) / 2, card.y + 118, 120, 120};
-            for (const char *p = code; *p && n + 1 < sizeof compact; p++) {
-                if (*p != ' ')
-                    compact[n++] = *p;
-            }
-            compact[n] = 0;
+    unavailable = w->share_checked && !w->share_available;
+    paint(r, (SDL_Rect){0, top, width, height - top}, 243, 244, 246, 255);
+
+    draw_text(r, "Connect your iPhone", g.left, g.title_y, g.inner,
+              PH_TEXT(g.wide ? 32 : 24, PH_FONT_SEMIBOLD), color_text);
+    draw_text(r, CONNECT_SUBTITLE, g.left, g.title_y + (g.wide ? 48 : 36), g.wide ? 820 : g.inner,
+              PH_TEXT(g.wide ? 15 : 14, PH_FONT_REGULAR), color_muted);
+
+    /* Pairing card */
+    outline(r, g.card, 14, color_line, color_on_ink);
+    if (g.qr.w) {
+        char payload[128], compact[16];
+        size_t n = 0;
+        const char *cap = "Or scan with the iPhone app";
+        outline(r, g.qr, 10, color_line, color_on_ink);
+        for (const char *p = code; *p && n + 1 < sizeof compact; p++)
+            if (*p != ' ')
+                compact[n++] = *p;
+        compact[n] = 0;
+        if (have) {
             snprintf(payload, sizeof payload, "porthole://%s:47731/%s", address, compact);
-            draw_qr(w->renderer, payload, qr);
+            draw_qr(r, payload, (SDL_Rect){g.qr.x + 10, g.qr.y + 10, g.qr.w - 20, g.qr.h - 20});
         }
-    } else {
-        draw_text(w->renderer, w->share_checked && !w->share_available
-                    ? "The companion connection is unavailable in this build."
-                    : "Starting the companion connection...",
-                  card.x + 16, card.y + 24, card.w - 32, 1, color_muted);
+        draw_text(r, cap, g.qr.x + (g.qr.w - ph_text_width(cap, PH_TEXT(12, PH_FONT_REGULAR))) / 2,
+                  g.qr.y + g.qr.h + 10, g.qr.w + 40, PH_TEXT(12, PH_FONT_REGULAR), color_muted);
     }
-    rows[0][0] = "Wi-Fi";
-    rows[0][1] = have ? "Listening on this network" : "Starting";
-    dots[0][0] = have ? 22 : 154; dots[0][1] = have ? 128 : 88; dots[0][2] = have ? 61 : 18;
-    rows[1][0] = "Screen";
-    rows[1][1] = w->share_checked && !w->share_available ? "Unavailable in this build"
-                 : "Starts when you tap Share screen";
-    dots[1][0] = 92; dots[1][1] = 96; dots[1][2] = 104;
-    rows[2][0] = "Mouse and keyboard";
-    rows[2][1] = w->control_ready ? "Paired over Bluetooth" : "Optional. Set up controls to use the PC.";
-    dots[2][0] = w->control_ready ? 22 : 92;
-    dots[2][1] = w->control_ready ? 128 : 96;
-    dots[2][2] = w->control_ready ? 61 : 104;
-    rows[3][0] = "Sound";
-    rows[3][1] = "Plays through this PC";
-    dots[3][0] = 22; dots[3][1] = 128; dots[3][2] = 61;
-    y = card.y + card.h + 14;
-    if (y < g.copy.y - 28) {
-        int room = g.copy.y - 12 - y;
-        bool stacked = g.inner < 520;
-        int row_h = room / 4;
-        int cap = stacked ? 40 : 28;
-        if (row_h > cap) row_h = cap;
-        if (row_h >= (stacked ? 30 : 16)) {
-            for (int i = 0; i < 4; i++) {
-                int ry = y + i * row_h;
-                status_dot(w->renderer, g.left, ry + 3, dots[i][0], dots[i][1], dots[i][2]);
-                if (stacked) {
-                    draw_text(w->renderer, rows[i][0], g.left + 16, ry, g.inner - 16, 1, color_text);
-                    draw_text(w->renderer, rows[i][1], g.left + 16, ry + 14, g.inner - 16, 1, color_muted);
-                } else {
-                    draw_text(w->renderer, rows[i][0], g.left + 16, ry, 160, 1, color_text);
-                    draw_text(w->renderer, rows[i][1], g.left + 188, ry, g.inner - 188, 1, color_muted);
-                }
-            }
+    dx = g.qr.w ? g.qr.x + g.qr.w + 28 : g.card.x + 24;
+    dw = g.card.x + g.card.w - 24 - dx;
+    y = g.card.y + 24;
+    draw_text(r, "THIS PC APPEARS AS", dx, y, dw, PH_TEXT(11, PH_FONT_MEDIUM), color_muted);
+    draw_text(r, w->pc_name[0] ? w->pc_name : "This PC", dx, y + 18, dw, PH_TEXT(20, PH_FONT_SEMIBOLD),
+              color_text);
+    y += 60;
+    {
+        SDL_Rect table = {dx, y, dw, 92};
+        outline(r, table, 10, color_line, color_on_ink);
+        paint(r, (SDL_Rect){dx + 1, y + 46, dw - 2, 1}, 226, 228, 232, 255);
+        draw_text(r, "Address", dx + 14, y + 14, 90, PH_TEXT(14, PH_FONT_REGULAR), color_muted);
+        draw_text(r, "Pairing code", dx + 14, y + 60, 110, PH_TEXT(14, PH_FONT_REGULAR), color_muted);
+        if (have) {
+            int aw = ph_text_width(address, PH_TEXT(15, PH_FONT_MONO));
+            int cw = ph_text_width(code, PH_TEXT(19, PH_FONT_MONO_MEDIUM));
+            draw_text(r, address, dx + dw - 14 - aw, y + 13, aw + 4, PH_TEXT(15, PH_FONT_MONO), color_text);
+            draw_text(r, code, dx + dw - 14 - cw, y + 56, cw + 4, PH_TEXT(19, PH_FONT_MONO_MEDIUM), color_text);
+        } else {
+            const char *wait = unavailable ? "Unavailable" : "Starting...";
+            int ww = ph_text_width(wait, PH_TEXT(14, PH_FONT_REGULAR));
+            draw_text(r, wait, dx + dw - 14 - ww, y + 14, ww + 4, PH_TEXT(14, PH_FONT_REGULAR), color_muted);
         }
+        y += 92 + 14;
     }
+    if (y + 40 < g.copy.y)
+        draw_text(r, unavailable ? "The iPhone connection could not start. Another program may be using port 47731."
+                                 : "Only needed if the PC doesn't show up in the app. New code stops the old one working.",
+                  dx, y, dw, PH_TEXT(13, PH_FONT_REGULAR), unavailable ? color_warn : color_muted);
     draw_button(w, g.copy, w->copied_until ? "Copied" : "Copy details", true, !have,
                 w->chrome_hover == CHROME_COPY);
-    draw_button(w, g.setup, "Set up controls", false, false, w->chrome_hover == CHROME_SETUP);
-    draw_text(w->renderer, "F1  Help", g.help.x, g.help.y, 80, 1, color_muted);
-    draw_text(w->renderer, "F3  Stats", g.stats.x, g.stats.y, 90, 1, color_muted);
-    if (have) {
-        const char *label = "New code";
-        int tw = ph_text_width(label, 1);
-        SDL_Color ink = w->chrome_hover == CHROME_NEW_CODE ? color_text : color_muted;
-        draw_text(w->renderer, label, g.fresh.x + g.fresh.w - tw, g.fresh.y, tw + 2, 1, ink);
+    draw_button(w, g.fresh, "New code", false, !have, w->chrome_hover == CHROME_NEW_CODE);
+
+    /* Ready on this PC */
+    if (g.ready.y + 64 <= g.footer_y - 12) {
+        static const char *const names[4] = {"Wi-Fi link", "Screen", "Mouse and keyboard", "Sound"};
+        const char *subs[4], *states[4];
+        int tones[4];
+        SDL_Rect box = g.ready;
+        int rows;
+
+        /* Only whole rows: the Mouse and keyboard row is taller for its link. */
+        for (rows = 0, box.h = 0; rows < 4; rows++) {
+            int h = !g.wide ? 48 : rows == 2 ? 88 : 64;
+            if (box.y + box.h + h > g.footer_y - 12)
+                break;
+            box.h += h;
+        }
+        if (!rows)
+            box.h = 0;
+        subs[0] = have ? "Listening on this Wi-Fi network" : unavailable ? "Could not start" : "Starting";
+        states[0] = have ? "Ready" : unavailable ? "Unavailable" : "Starting";
+        tones[0] = have ? 1 : unavailable ? 2 : 0;
+        subs[1] = w->mirroring ? "Showing the iPhone screen" : "Starts when you tap Share screen on the iPhone";
+        states[1] = w->mirroring ? "Live" : "Waiting";
+        tones[1] = w->mirroring ? 1 : 0;
+        subs[2] = w->control_ready ? "Paired over Bluetooth" : "Optional. Pair once over Bluetooth to control the iPhone.";
+        states[2] = w->control_ready ? "Paired" : "Not paired";
+        tones[2] = w->control_ready ? 1 : 2;
+        subs[3] = "Plays through this PC's speakers";
+        states[3] = "Ready";
+        tones[3] = 1;
+        draw_text(r, "READY ON THIS PC", box.x, box.y - 22, box.w, PH_TEXT(11, PH_FONT_MEDIUM), color_muted);
+        if (box.h)
+            outline(r, box, 14, color_line, color_on_ink);
+        for (int i = 0, ry = box.y; i < rows; i++) {
+            int h = !g.wide ? 48 : i == 2 ? 88 : 64;
+            int pill = ph_text_width(states[i], PH_TEXT(12, PH_FONT_MEDIUM)) + 30;
+            if (ry + 40 > box.y + box.h)
+                break;
+            if (!g.wide) {
+                ready_icon(r, i, box.x + 12, ry + 8);
+                draw_text(r, names[i], box.x + 56, ry + 14, box.w - 76 - pill, PH_TEXT(14, PH_FONT_MEDIUM),
+                          color_text);
+                if (i == 2 && !w->control_ready && g.setup.w) {
+                    SDL_Color ink = w->chrome_hover == CHROME_SETUP ? color_muted : color_text;
+                    int lw = ph_text_width("Set up controls", PH_TEXT(13, PH_FONT_MEDIUM));
+                    draw_text(r, "Set up controls", box.x + box.w - 18 - lw, ry + 15, lw + 4,
+                              PH_TEXT(13, PH_FONT_MEDIUM), ink);
+                    paint(r, (SDL_Rect){box.x + box.w - 18 - lw, ry + 33, lw, 1}, ink.r, ink.g, ink.b, 255);
+                } else {
+                    state_pill(r, box.x + box.w - 18, ry + 15, states[i], tones[i]);
+                }
+                ry += h;
+                if (i < rows - 1)
+                    paint(r, (SDL_Rect){box.x + 1, ry, box.w - 2, 1}, 226, 228, 232, 255);
+                continue;
+            }
+            ready_icon(r, i, box.x + 16, ry + 14);
+            draw_text(r, names[i], box.x + 60, ry + 12, box.w - 76 - pill, PH_TEXT(14, PH_FONT_MEDIUM), color_text);
+            draw_line_fit(r, subs[i], box.x + 60, ry + 32, box.w - 76, PH_TEXT(13, PH_FONT_REGULAR),
+                          color_muted);
+            state_pill(r, box.x + box.w - 18, ry + 13, states[i], tones[i]);
+            if (i == 2) {
+                SDL_Color ink = w->chrome_hover == CHROME_SETUP ? color_muted : color_text;
+                draw_text(r, "Set up controls", box.x + 60, ry + 56, 140, PH_TEXT(13, PH_FONT_MEDIUM), ink);
+                paint(r, (SDL_Rect){box.x + 60, ry + 74, ph_text_width("Set up controls", PH_TEXT(13, PH_FONT_MEDIUM)), 1},
+                      ink.r, ink.g, ink.b, 255);
+            }
+            ry += h;
+            if (i < rows - 1 && ry < box.y + box.h - 1)
+                paint(r, (SDL_Rect){box.x + 1, ry, box.w - 2, 1}, 226, 228, 232, 255);
+        }
     }
-    draw_text(w->renderer, "Settings", g.gear.x, g.gear.y, g.gear.w, 1,
+
+    /* Footer */
+    paint(r, (SDL_Rect){0, g.footer_y, width, 1}, 226, 228, 232, 255);
+    kbd(r, g.help.x, g.help.y, "F1", g.wide ? "Help and shortcuts" : "Help", w->chrome_hover == CHROME_HELP);
+    kbd(r, g.stats.x, g.stats.y, "F3", g.wide ? "Connection stats" : "Stats", w->chrome_hover == CHROME_STATS);
+    draw_text(r, "Settings", g.gear.x + g.gear.w - ph_text_width("Settings", PH_TEXT(12, PH_FONT_REGULAR)),
+              g.gear.y + 3, g.gear.w, PH_TEXT(12, PH_FONT_REGULAR),
               w->chrome_hover == CHROME_SETTINGS ? color_text : color_muted);
 }
 
@@ -533,14 +852,39 @@ static void draw_help(ph_window *w, int width, int height, int top)
     draw_text(w->renderer, "Porthole v" PORTHOLE_VERSION, left, height - 28, content_w, 1, color_muted);
 }
 
+/* Setup: a numbered step list on the left when wide, the step's content beside it. */
+typedef struct setup_frame {
+    bool wide;
+    SDL_Rect rail;     /* step list; empty when narrow */
+    int left, width;   /* content column */
+} setup_frame;
+
+static setup_frame setup_layout(int width)
+{
+    setup_frame f;
+    int outer = width - (width < 400 ? 40 : 56);
+
+    memset(&f, 0, sizeof f);
+    f.wide = width >= 760;
+    if (outer > 980) outer = 980;
+    f.left = (width - outer) / 2;
+    f.width = outer;
+    if (f.wide) {
+        f.rail = (SDL_Rect){f.left, PH_WINDOW_BAR_PX + 32, 236, 5 * 56};
+        f.left += 236 + 32;
+        f.width = outer - 236 - 32;
+    }
+    return f;
+}
+
 static void setup_buttons(int width, int height, SDL_Rect buttons[3])
 {
-    int content = width - (width < 400 ? 40 : 56);
-    if (content > 700) content = 700;
-    int left = (width - content) / 2;
-    int button_width = (content - 20) / 3;
+    setup_frame f = setup_layout(width);
+    int button_width = (f.width - 20) / 3;
+    if (f.wide && button_width > 132) button_width = 132;
+    int x = f.wide ? f.left + f.width - 3 * button_width - 20 : f.left;
     for (int i = 0; i < 3; i++)
-        buttons[i] = (SDL_Rect){left + i * (button_width + 10), height - 66, button_width, 42};
+        buttons[i] = (SDL_Rect){x + i * (button_width + 10), height - 66, button_width, 40};
 }
 
 static bool setup_next_enabled(const ph_setup *setup)
@@ -554,22 +898,49 @@ static bool setup_next_enabled(const ph_setup *setup)
 static void draw_setup(ph_window *w, int width, int height, int top)
 {
     const ph_setup *s = &w->setup;
-    int margin = width < 400 ? 20 : 28;
-    int content_width = width - 2 * margin;
-    if (content_width > 700) content_width = 700;
-    margin = (width - content_width) / 2;
-    paint(w->renderer, (SDL_Rect){0, top, width, height - top}, 255, 255, 255, 255);
+    setup_frame frame = setup_layout(width);
+    int margin = frame.left, content_width = frame.width;
+    paint(w->renderer, (SDL_Rect){0, top, width, height - top}, 243, 244, 246, 255);
     SDL_Rect buttons[3];
     setup_buttons(width, height, buttons);
     int step = s->controls ? (int)s->step : s->step == PH_SETUP_MIRROR ? 0 : 1;
     int steps = s->controls ? 5 : 2;
     char heading[80];
-    snprintf(heading, sizeof heading, "CONNECT YOUR IPHONE / %d OF %d", step + 1, steps);
-    draw_text(w->renderer, heading, margin, top + 22, content_width, 1, color_muted);
-    int segment = (content_width - (steps - 1) * 6) / steps;
-    for (int i = 0; i < steps; i++)
-        rounded(w->renderer, (SDL_Rect){margin + i * (segment + 6), top + 55, segment, 4}, 2,
-                  i <= step ? color_text : (SDL_Color){220, 224, 229, 255});
+    snprintf(heading, sizeof heading, "STEP %d OF %d", step + 1, steps);
+    if (frame.wide) {
+        static const char *const all[5] = {"Prepare your iPhone", "Pair over Bluetooth", "Share your screen",
+                                           "Check pointer alignment", "Ready to use"};
+        static const char *const view[2] = {"Share your screen", "Ready to use"};
+        for (int i = 0; i < steps; i++) {
+            SDL_Rect dot = {frame.rail.x, frame.rail.y + i * 56, 28, 28};
+            bool done = i < step, now = i == step;
+            char n[4];
+            if (i + 1 < steps)
+                paint(w->renderer, (SDL_Rect){dot.x + 13, dot.y + 32, 2, 20}, done ? 17 : 213, done ? 17 : 216,
+                      done ? 17 : 221, 255);
+            rounded(w->renderer, dot, 14, done || now ? color_text : color_border);
+            if (!done && !now)
+                rounded(w->renderer, (SDL_Rect){dot.x + 1, dot.y + 1, 26, 26}, 13, color_ground);
+            snprintf(n, sizeof n, "%d", i + 1);
+            if (done) {
+                SDL_SetRenderDrawColor(w->renderer, 255, 255, 255, 255);
+                stroke(w->renderer, dot.x + 8, dot.y + 14, dot.x + 12, dot.y + 18);
+                stroke(w->renderer, dot.x + 12, dot.y + 18, dot.x + 19, dot.y + 10);
+            } else {
+                draw_text(w->renderer, n, dot.x + (28 - ph_text_width(n, PH_TEXT(13, PH_FONT_MEDIUM))) / 2,
+                          dot.y + 5, 20, PH_TEXT(13, PH_FONT_MEDIUM), now ? color_on_ink : color_muted);
+            }
+            draw_text(w->renderer, s->controls ? all[i] : view[i], dot.x + 40, dot.y + 5, frame.rail.w - 40,
+                      PH_TEXT(14, now ? PH_FONT_SEMIBOLD : PH_FONT_REGULAR), now || done ? color_text : color_muted);
+        }
+        draw_text(w->renderer, heading, margin, top + 32, content_width, PH_TEXT(11, PH_FONT_MEDIUM), color_muted);
+    } else {
+        int segment = (content_width - (steps - 1) * 6) / steps;
+        draw_text(w->renderer, heading, margin, top + 22, content_width, PH_TEXT(11, PH_FONT_MEDIUM), color_muted);
+        for (int i = 0; i < steps; i++)
+            rounded(w->renderer, (SDL_Rect){margin + i * (segment + 6), top + 46, segment, 4}, 2,
+                    i <= step ? color_text : (SDL_Color){213, 216, 221, 255});
+    }
     const char *title = "", *body = "";
     switch (s->step) {
     case PH_SETUP_PREPARE:
@@ -617,10 +988,12 @@ static void draw_setup(ph_window *w, int width, int height, int top)
                    : "The iPhone screen is connected.\nThis window is viewing only.\nF2 opens this guide again.";
         break;
     }
-    int y = draw_text(w->renderer, title, margin, top + 77, content_width, 3, color_text);
-    SDL_Rect card = {margin, y + 18, content_width, buttons[0].y - y - 34};
-    surface_card(w->renderer, card);
-    SDL_Rect viewport = {card.x + 18, card.y + 14, card.w - 36, card.h - 28};
+    int y = draw_text(w->renderer, title, margin, top + (frame.wide ? 52 : 64), content_width,
+                      PH_TEXT(frame.wide ? 28 : 22, PH_FONT_SEMIBOLD), color_text);
+    SDL_Rect card = {margin, y + 14, content_width, buttons[0].y - y - 34};
+    rounded(w->renderer, card, 14, color_line);
+    rounded(w->renderer, (SDL_Rect){card.x + 1, card.y + 1, card.w - 2, card.h - 2}, 13, color_on_ink);
+    SDL_Rect viewport = {card.x + 20, card.y + 18, card.w - 40, card.h - 36};
     if (viewport.h < 1) viewport.h = 1;
     char status[160] = "";
     if (s->step == PH_SETUP_BLUETOOTH)
@@ -643,14 +1016,22 @@ static void draw_setup(ph_window *w, int width, int height, int top)
                     w->pull_hint[0] ? "This PC: " : "Connection details are unavailable.", w->pull_hint);
         body = share_body;
     }
-    int body_h = text_height(body, viewport.w, 2);
-    int status_h = status[0] ? 18 + text_height(status, viewport.w, 1) : 0;
-    int error_h = error[0] ? 18 + text_height(error, viewport.w, 1) : 0;
+    int body_h = text_height(body, viewport.w, PH_TEXT(15, PH_FONT_REGULAR));
+    int status_h = status[0] ? 18 + text_height(status, viewport.w - 16, PH_TEXT(13, PH_FONT_MEDIUM)) : 0;
+    int error_h = error[0] ? 18 + text_height(error, viewport.w, PH_TEXT(13, PH_FONT_REGULAR)) : 0;
+    bool good = (s->step == PH_SETUP_BLUETOOTH && s->bluetooth_ready)
+                || (s->step == PH_SETUP_MIRROR && s->mirroring)
+                || (s->step == PH_SETUP_CALIBRATE && s->calibrated);
     modal_range(w, body_h + status_h + error_h, viewport.h);
     SDL_RenderSetClipRect(w->renderer, &viewport);
-    y = draw_text(w->renderer, body, viewport.x, viewport.y - w->modal_scroll, viewport.w, 2, color_text);
-    if (status[0]) y = draw_text(w->renderer, status, viewport.x, y + 18, viewport.w, 1, color_muted);
-    if (error[0]) draw_text(w->renderer, error, viewport.x, y + 18, viewport.w, 1, color_warn);
+    y = draw_text(w->renderer, body, viewport.x, viewport.y - w->modal_scroll, viewport.w,
+                  PH_TEXT(15, PH_FONT_REGULAR), color_text);
+    if (status[0]) {
+        rounded(w->renderer, (SDL_Rect){viewport.x, y + 23, 8, 8}, 4, good ? color_ok : color_muted);
+        y = draw_text(w->renderer, status, viewport.x + 16, y + 18, viewport.w - 16, PH_TEXT(13, PH_FONT_MEDIUM),
+                      good ? color_ok : color_muted);
+    }
+    if (error[0]) draw_text(w->renderer, error, viewport.x, y + 18, viewport.w, PH_TEXT(13, PH_FONT_REGULAR), color_warn);
     SDL_RenderSetClipRect(w->renderer, NULL);
     draw_scrollbar(w, viewport);
     const char *next = s->step == PH_SETUP_FINISH ? "Finish"
@@ -850,17 +1231,8 @@ static int chrome_at(const ph_window *w, int win_w, int win_h, int x, int y)
         }
         return CHROME_DRAG;
     }
-    if (w->settings_visible) {
-        int i;
-        for (i = 0; i < 10; i++) {
-            SDL_Rect row = settings_row_box(win_w, i);
-            if (row.y + row.h > win_h - 8)
-                break;
-            if (SDL_PointInRect(&point, &row))
-                return CHROME_SET + i;
-        }
-        return CHROME_SETTINGS;
-    }
+    if (w->settings_visible)
+        return settings_hit(w, win_w, win_h, point);
     if (mirror_chrome(w)) {
         int column = picture_column_w(w, win_w);
         if (w->rail_open && x >= column && x < column + RAIL_W) {
@@ -929,12 +1301,6 @@ static void draw_chrome_glyph(SDL_Renderer *renderer, int kind, SDL_Rect box, in
     }
 }
 
-static const SDL_Color color_stage = {11, 12, 13, 255};
-static const SDL_Color color_stage_raised = {42, 45, 49, 255};
-static const SDL_Color color_stage_muted = {150, 154, 160, 255};
-static const SDL_Color color_live = {61, 214, 140, 255};
-static const SDL_Color color_line = {226, 228, 232, 255};
-static const SDL_Color color_ground = {243, 244, 246, 255};
 
 static void stroke(SDL_Renderer *renderer, int x1, int y1, int x2, int y2);
 
@@ -1088,6 +1454,9 @@ ph_window *ph_window_create(const char *title)
         return NULL;
     w->ctrl_command = true;
     w->release_blur = true;
+    w->media_keys = true;
+    w->sound_on = true;
+    w->transfer_percent = -1;
     w->window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WAITING_W,
                                  WAITING_H,
                                  SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_BORDERLESS);
@@ -1230,6 +1599,115 @@ void ph_window_note_transfer(ph_window *w, const char *line)
     if (!w->transfers_open)
         w->transfers_unseen = true;
     ph_window_redraw(w);
+}
+
+void ph_window_set_live_state(ph_window *w, bool feed, bool paused, bool sound_on)
+{
+    if (!w || (w->feed_on == feed && w->paused == paused && w->sound_on == sound_on))
+        return;
+    w->feed_on = feed;
+    w->paused = paused;
+    w->sound_on = sound_on;
+    if (w->settings_visible)
+        ph_window_redraw(w);
+}
+
+bool ph_window_media_keys(const ph_window *w)
+{
+    return !w || w->media_keys;
+}
+
+void ph_window_set_media_keys(ph_window *w, bool on)
+{
+    if (w)
+        w->media_keys = on;
+}
+
+bool ph_window_settings_target(ph_window *w, int row, int side, int *x, int *y)
+{
+    int width = 1, height = 1, top;
+
+    if (!w || !x || !y || row < -1 || row >= SET_ROWS)
+        return false;
+    SDL_GetWindowSize(w->window, &width, &height);
+    if (row == -1) {
+        SDL_Rect done = settings_done_box(width);
+        *x = done.x + done.w / 2;
+        *y = done.y + done.h / 2;
+        return true;
+    }
+    top = settings_top() - w->modal_scroll;
+    for (int i = 0; i <= row; i++) {
+        setting_box b = setting_layout(w, width, i, &top);
+        if (i == row) {
+            SDL_Rect c = setting_rows[i].kind == SET_CHOICE ? (side ? b.right : b.left) : b.control;
+            *x = c.x + c.w / 2;
+            *y = c.y + c.h / 2;
+            return *y < height;
+        }
+    }
+    return false;
+}
+
+void ph_window_set_pc_name(ph_window *w, const char *name)
+{
+    if (!w || !name)
+        return;
+    snprintf(w->pc_name, sizeof w->pc_name, "%s", name);
+    ph_window_redraw(w);
+}
+
+bool ph_window_connect_target(ph_window *w, ph_window_target target, int *x, int *y)
+{
+    int width = 1, height = 1;
+    connect_boxes g;
+    SDL_Rect box;
+
+    if (!w || !x || !y || w->has_picture)
+        return false;
+    SDL_GetWindowSize(w->window, &width, &height);
+    g = connect_layout(width, height, PH_WINDOW_BAR_PX);
+    switch (target) {
+    case PH_TARGET_COPY: box = g.copy; break;
+    case PH_TARGET_NEW_CODE: box = g.fresh; break;
+    case PH_TARGET_SETUP: box = g.setup; break;
+    case PH_TARGET_HELP: box = g.help; break;
+    case PH_TARGET_STATS: box = g.stats; break;
+    default: box = g.gear; break;
+    }
+    *x = box.x + box.w / 2;
+    *y = box.y + box.h / 2;
+    return true;
+}
+
+void ph_window_copy_pairing(ph_window *w)
+{
+    if (w && w->pull_hint[0] && SDL_SetClipboardText(w->pull_hint) == 0) {
+        w->copied_until = SDL_GetTicks64() + 1800;
+        ph_window_redraw(w);
+    }
+}
+
+bool ph_window_has_pairing(const ph_window *w)
+{
+    return w && w->pull_hint[0];
+}
+
+void ph_window_open_settings(ph_window *w)
+{
+    if (!w || w->settings_visible)
+        return;
+    w->settings_visible = true;
+    ph_window_redraw(w);
+}
+
+void ph_window_set_transfer_percent(ph_window *w, int percent)
+{
+    if (!w || w->transfer_percent == percent)
+        return;
+    w->transfer_percent = percent;
+    if (w->transfers_open)
+        ph_window_redraw(w);
 }
 
 bool ph_window_set_active_transfer(ph_window *w, const char *line)
@@ -1725,11 +2203,21 @@ static void draw_transfers(ph_window *w, int width, int height)
         int track = t.card.w - 28, seg = track / 3;
         int pos = (int)((now / 6) % (Uint64)(track + seg)) - seg;
         int a = pos < 0 ? 0 : pos, b = pos + seg > track ? track : pos + seg;
+        char status[48];
+
+        /* A known share fills the bar; otherwise a short piece travels along it. */
+        if (w->transfer_percent >= 0) {
+            a = 0;
+            b = track * (w->transfer_percent > 100 ? 100 : w->transfer_percent) / 100;
+            snprintf(status, sizeof status, "Sending to iPhone, %d%%", w->transfer_percent);
+        } else {
+            snprintf(status, sizeof status, "Sending to iPhone");
+        }
 
         surface_card(r, t.card);
         file_tile(r, t.card.x + 14, t.card.y + 12, name);
         draw_line_fit(r, name, t.card.x + 52, t.card.y + 10, t.card.w - 52 - 76, 1, color_text);
-        draw_text(r, "Sending to iPhone", t.card.x + 52, t.card.y + 30, t.card.w - 120, 1, color_muted);
+        draw_text(r, status, t.card.x + 52, t.card.y + 30, t.card.w - 120, 1, color_muted);
         rounded(r, t.cancel, 6, w->chrome_hover == CHROME_CANCEL ? color_line : color_ground);
         draw_text(r, "Cancel", t.cancel.x + (t.cancel.w - ph_text_width("Cancel", 1)) / 2,
                   t.cancel.y + 3, t.cancel.w, 1, color_text);
@@ -1884,7 +2372,7 @@ bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
 
     if (!w || !event)
         return false;
-    if ((w->help_visible || w->setup.visible) && event->type == SDL_MOUSEWHEEL) {
+    if ((w->help_visible || w->setup.visible || w->settings_visible) && event->type == SDL_MOUSEWHEEL) {
         double amount = event->wheel.y;
 #if SDL_VERSION_ATLEAST(2, 0, 18)
         if (event->wheel.preciseY != 0) amount = event->wheel.preciseY;
@@ -1981,40 +2469,63 @@ bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
         }
         else if (hit == CHROME_SETTINGS) {
             w->settings_visible = !w->settings_visible;
+            w->modal_scroll = 0;
             ph_window_redraw(w);
         }
         else if (hit == CHROME_CANCEL) {
             w->transfer_cancel = true;
             ph_window_redraw(w);
         }
-        else if (hit >= CHROME_SET && hit < CHROME_SET + 10) {
-            int index = hit - CHROME_SET;
-            if (index == 0)
+        else if (hit >= CHROME_SET && hit < CHROME_SET + SET_ROWS * 2) {
+            int row = (hit - CHROME_SET) / 2, side = (hit - CHROME_SET) % 2;
+            switch (row) {
+            case SET_POINTER:
+                if (w->next_relative != (side == 1)) {
+                    w->next_relative = side == 1;
+                    w->pending_action = PH_WINDOW_ACTION_SAVE;
+                }
+                break;
+            case SET_WHEEL:
+                if (w->feed_on != (side == 1)) {
+                    w->feed_on = side == 1;
+                    w->pending_action = PH_WINDOW_ACTION_FEED;
+                }
+                break;
+            case SET_PAUSE:
+                w->paused = !w->paused;
+                w->pending_action = PH_WINDOW_ACTION_PAUSE;
+                break;
+            case SET_GUIDE:
+                w->settings_visible = false;
                 push_shortcut(w, SDL_SCANCODE_F2, KMOD_NONE);
-            else if (index == 1)
-                w->pending_action = PH_WINDOW_ACTION_FEED;
-            else if (index == 2) {
+                break;
+            case SET_CTRL:
                 w->ctrl_command = !w->ctrl_command;
                 w->pending_action = PH_WINDOW_ACTION_SAVE;
-            } else if (index == 3) {
+                break;
+            case SET_MEDIA:
+                w->media_keys = !w->media_keys;
+                w->pending_action = PH_WINDOW_ACTION_SAVE;
+                break;
+            case SET_BLUR:
                 w->release_blur = !w->release_blur;
                 w->pending_action = PH_WINDOW_ACTION_SAVE;
-            } else if (index == 4) {
-                w->next_relative = !w->next_relative;
-                w->pending_action = PH_WINDOW_ACTION_SAVE;
-            } else if (index == 5)
-                w->pending_action = PH_WINDOW_ACTION_PAUSE;
-            else if (index == 6)
+                break;
+            case SET_SOUND:
+                w->sound_on = !w->sound_on;
                 w->pending_action = PH_WINDOW_ACTION_MUTE;
-            else if (index == 7 && w->pull_hint[0]) {
-                if (SDL_SetClipboardText(w->pull_hint) == 0)
+                break;
+            case SET_COPY:
+                if (w->pull_hint[0] && SDL_SetClipboardText(w->pull_hint) == 0)
                     w->copied_until = SDL_GetTicks64() + 1800;
-            } else if (index == 8)
+                break;
+            case SET_FORGET:
                 w->pending_action = PH_WINDOW_ACTION_FORGET;
-            else if (index == 9)
+                break;
+            case SET_QUIT:
                 w->pending_action = PH_WINDOW_ACTION_QUIT;
-            if (index == 0)
-                w->settings_visible = false;
+                break;
+            }
             ph_window_redraw(w);
         }
         else if (hit == CHROME_SETUP)

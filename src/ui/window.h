@@ -55,6 +55,32 @@ void ph_window_set_prefs(ph_window *w, bool ctrl_command, bool release_blur, boo
 /* A line in the Transfers panel. active is the one in progress; NULL clears it.
  * set_active returns true when the line changed. show_transfers opens that panel. */
 void ph_window_note_transfer(ph_window *w, const char *line);
+/* Feed scrolling, paused controls and PC sound, shown in Settings. */
+void ph_window_set_live_state(ph_window *w, bool feed, bool paused, bool sound_on);
+bool ph_window_media_keys(const ph_window *w);
+void ph_window_set_media_keys(ph_window *w, bool on);
+/* Settings rows, top to bottom: pointer, wheel, pause, guide, Ctrl, media keys,
+ * release keys, sound, copy pairing, forget, quit. side picks a two-way choice's half.
+ * Row -1 is Done. Centre of that control, for tests. */
+bool ph_window_settings_target(ph_window *w, int row, int side, int *x, int *y);
+
+/* The name the iPhone lists this PC under. */
+void ph_window_set_pc_name(ph_window *w, const char *name);
+
+typedef enum ph_window_target {
+    PH_TARGET_COPY, PH_TARGET_NEW_CODE, PH_TARGET_SETUP, PH_TARGET_HELP, PH_TARGET_STATS,
+    PH_TARGET_SETTINGS
+} ph_window_target;
+/* Centre of a connect-screen control, for tests. False while the picture shows. */
+bool ph_window_connect_target(ph_window *w, ph_window_target target, int *x, int *y);
+
+/* Puts the pairing line on the clipboard; whether there is one to copy. */
+void ph_window_copy_pairing(ph_window *w);
+bool ph_window_has_pairing(const ph_window *w);
+void ph_window_open_settings(ph_window *w);
+
+/* 0 to 100 of the file moving now; -1 when unknown. */
+void ph_window_set_transfer_percent(ph_window *w, int percent);
 bool ph_window_set_active_transfer(ph_window *w, const char *line);
 void ph_window_show_transfers(ph_window *w);
 bool ph_window_take_cancel(ph_window *w);
