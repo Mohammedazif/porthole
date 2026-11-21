@@ -53,7 +53,10 @@ jobs:
         with:
           msystem: UCRT64
           update: true
+          # git and zstd are for scripts/package-windows.sh (source archives, .pkg.tar.zst).
           install: >-
+            git
+            zstd
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
