@@ -41,6 +41,12 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
+      # The runner's git sets autocrlf, which writes CRLF into the UxPlay submodule.
+      # MSYS2's git does not read that setting, so the packager would see it as modified.
+      - name: Check out with LF line endings
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@v4
         with:
           submodules: recursive
