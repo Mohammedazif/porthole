@@ -951,7 +951,6 @@ ph_decoder *ph_decoder_start(void (*on_frame)(void *user), void *user)
 {
     frame_ready = on_frame;
     frame_user = user;
-    if (stream_mode) stream_thread = SDL_CreateThread(stream_frames, "test-video-60fps", NULL);
     return &decoder;
 }
 void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len)
@@ -997,6 +996,9 @@ ph_receiver *ph_receiver_start(const ph_receiver_options *opt, const ph_receiver
     if (filter_one_frame) SDL_SetEventFilter(filter_first_frame, NULL);
     cb->connected(cb->user, "Idle-frame phone", "test");
     publish_frame();
+    /* A frame before this connect is cleared, and the next one cancels the pointer. */
+    if (stream_mode && !stream_thread)
+        stream_thread = SDL_CreateThread(stream_frames, "test-video-60fps", NULL);
     return &receiver;
 }
 void ph_receiver_poll(ph_receiver *r) { (void)r; }

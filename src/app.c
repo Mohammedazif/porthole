@@ -2103,7 +2103,7 @@ static bool content_moving(const app *a, const ph_yuv_planes *p, const ph_rect *
     return samples >= 50 && changed * 100 > samples * 8;
 }
 
-static void observe_pointer(app *a)
+static void observe_pointer(app *a, bool defer_to_queued_frame)
 {
     const AVFrame *f = a->view_frame;
     Uint64 now = SDL_GetTicks64();
@@ -2114,8 +2114,9 @@ static void observe_pointer(app *a)
         a->target_moved_at = now;
     }
     double hx, hy, radius;
+    /* show_frame passes false so the picture just stored is read while the next is queued. */
     if (!f || !f->data[0] || a->pointer.phase != PH_POINTER_WAIT_VIDEO
-        || atomic_load(&a->frame_pending) /* inspect already-arrived video first */
+        || (defer_to_queued_frame && atomic_load(&a->frame_pending))
         || (!a->pointer.anchoring && a->view_seen_at < a->pointer.sent_at)
         || !ph_pointer_hint(&a->pointer, &hx, &hy, &radius))
         return;
@@ -2317,7 +2318,7 @@ static void show_frame(app *a, const AVFrame *f)
     a->view_screen = screen;
     a->view_seen_at = SDL_GetTicks64();
     a->view_serial++;
-    observe_pointer(a);
+    observe_pointer(a, false);
     ph_rect bar;
     bool visible = ph_video_scrollbar(&planes, &screen, &bar);
     int previous_edge = a->wheel.blocked_y;
@@ -3261,7 +3262,7 @@ int ph_app_run(const ph_app_options *opt)
             if (ph_polish_quit(a.polish))
                 running = false;
         }
-        observe_pointer(&a);
+        observe_pointer(&a, true);
         bool gesture_running = ph_gesture_active(&a.gesture);
         ph_gesture_tick(&a.gesture, a.picture_w, a.picture_h, SDL_GetTicks64());
         if (gesture_running && !ph_gesture_active(&a.gesture))

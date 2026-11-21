@@ -63,6 +63,22 @@ jobs:
             mingw-w64-ucrt-x86_64-SDL2
             mingw-w64-ucrt-x86_64-ffmpeg
 
+      # ffmpeg pulls sdl2-compat, which drops injected keys and precise wheel deltas.
+      - name: Use classic SDL2
+        run: |
+          if pacman -Q mingw-w64-ucrt-x86_64-sdl2-compat >/dev/null 2>&1; then
+            pacman -Rdd --noconfirm mingw-w64-ucrt-x86_64-sdl2-compat
+          fi
+          curl --fail --location --retry 3 -o /tmp/SDL2-2.32.10.pkg.tar.zst \
+            https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-SDL2-2.32.10-1-any.pkg.tar.zst
+          echo '9e77124b14bedaafbfb44ac26e5fb43890184db23292cebf2251b2178fad6693  /tmp/SDL2-2.32.10.pkg.tar.zst' | sha256sum -c
+          pacman -U --noconfirm /tmp/SDL2-2.32.10.pkg.tar.zst
+          mkdir -p /var/cache/pacman/pkg
+          cp /tmp/SDL2-2.32.10.pkg.tar.zst \
+            /var/cache/pacman/pkg/mingw-w64-ucrt-x86_64-SDL2-2.32.10-1-any.pkg.tar.zst
+          test "$(pkg-config --modversion sdl2)" = 2.32.10
+          test "$(pacman -Qoq "${MINGW_PREFIX}/bin/SDL2.dll")" = mingw-w64-ucrt-x86_64-SDL2
+
       - name: Configure
         run: cmake --preset windows-release -DPORTHOLE_WARNINGS_AS_ERRORS=ON
 

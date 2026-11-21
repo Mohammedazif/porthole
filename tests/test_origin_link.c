@@ -4,17 +4,16 @@
 #include <SDL.h>
 
 #include "core/sock.h"
+#include "core/upath.h"
 #include "files/origin.h"
 #include "files/places.h"
+#include "temp_path.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#ifdef _WIN32
-#include <direct.h>
-#include <process.h>
-#define getpid _getpid
+#ifndef _WIN32
+#include <unistd.h>
 #endif
 
 #ifdef _WIN32
@@ -66,7 +65,7 @@ static void say(int fd, const char *text)
 
 static void write_file(const char *path, size_t size)
 {
-    FILE *f = fopen(path, "wb");
+    FILE *f = ph_fopen(path, "wb");
     CHECK(f);
     for (size_t i = 0; i < size; i++)
         fputc((int)(i * 7 % 251), f);
@@ -95,7 +94,7 @@ static void take_push(int fd, const char *name, size_t size)
 
 int main(int argc, char **argv)
 {
-    char dir[256], hint[96], token[16] = "", reply[64], name[96], path_a[300], path_b[300];
+    char dir[1024], hint[96], token[16] = "", reply[64], name[96], path_a[1200], path_b[1200];
     char *paths[2] = {path_a, path_b};
     ph_origin *o;
     int phone, results[2], percent_seen = -1;
@@ -103,12 +102,8 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    snprintf(dir, sizeof dir, "%s/porthole-origin-test-%d", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp",
-             (int)getpid());
-#ifdef _WIN32
-    _mkdir(dir);
-#else
-    mkdir(dir, 0700);
+    CHECK(ph_test_temp_dir(dir, sizeof dir));
+#ifndef _WIN32
     setenv("XDG_CONFIG_HOME", dir, 1);
 #endif
     o = ph_origin_start(hint, sizeof hint);
@@ -169,8 +164,9 @@ int main(int argc, char **argv)
     ph_sock_close(phone);
     nap(400);
     ph_origin_stop(o);
-    remove(path_a);
-    remove(path_b);
+    ph_remove(path_a);
+    ph_remove(path_b);
+    ph_rmdir(dir);
     puts("origin link: code, sync, queued Send to files with results, clipboard passed");
     return 0;
 }
