@@ -15,8 +15,12 @@ source_dir="${package_dir}-sources"
 [[ ! -e "$package_dir" && ! -e "$source_dir" ]] || {
     echo 'Choose a new output directory; existing packages are not overwritten.' >&2; exit 1;
 }
-git -C "$repo_root" diff --quiet
-git -C "$repo_root" diff --cached --quiet
+if ! git -C "$repo_root" diff --quiet || ! git -C "$repo_root" diff --cached --quiet; then
+    echo 'Tracked files differ from HEAD, so the source archive would not match the binary:' >&2
+    git -C "$repo_root" status --short --untracked-files=no >&2
+    git -C "$repo_root" diff --stat >&2
+    exit 1
+fi
 mkdir -p "$package_dir/licenses" "$source_dir"
 cp "$binary" "$package_dir/porthole.exe"
 cp "$repo_root/LICENSE" "$package_dir/LICENSE"
