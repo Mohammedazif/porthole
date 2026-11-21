@@ -14,7 +14,7 @@ packages=(
     # AirPlay receiver core (UxPlay lib): crypto, plists, mDNS
     libssl-dev libplist-dev libavahi-compat-libdnssd-dev
     # Video/audio decoding and the mirror window (Phase 1)
-    libsdl2-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev
+    libsdl2-dev libfreetype-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev
     # USB capture (Phase 4)
     libusb-1.0-0-dev
     # Bluetooth HID experiments on Linux (spikes S3/S5)

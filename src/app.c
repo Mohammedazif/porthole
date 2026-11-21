@@ -1064,8 +1064,12 @@ static int downloads_move_all(char *paths, char *first, size_t first_cap, char *
             if (names && names_cap) {
                 size_t used = strlen(names);
                 const char *saved_name = ph_path_base(dest);
-                if (used + 1 < names_cap && saved_name[0])
-                    snprintf(names + used, names_cap - used, "%s\n", saved_name);
+                size_t namelen = strlen(saved_name);
+                if (saved_name[0] && used < names_cap && namelen + 2 <= names_cap - used) {
+                    memcpy(names + used, saved_name, namelen);
+                    names[used + namelen] = '\n';
+                    names[used + namelen + 1] = '\0';
+                }
             }
             PH_LOGI("share: saved %s", dest);
         } else {
@@ -1079,17 +1083,21 @@ static int downloads_move_all(char *paths, char *first, size_t first_cap, char *
  * and the card shows instead. where is "Downloads" or "the Desktop". */
 static bool tray_notice(app *a, const char *path, int count, const char *where)
 {
-    char title[128], text[256];
+    char title[128], text[256], shown[96];
     const char *name = path ? ph_path_base(path) : "";
+    size_t i = 0;
 
     if (!a->tray || !path || !path[0])
         return false;
+    for (; name[i] && i + 1 < sizeof shown; i++)
+        shown[i] = name[i];
+    shown[i] = '\0';
     if (count > 1) {
         snprintf(title, sizeof title, "%d files received from iPhone", count);
-        snprintf(text, sizeof text, "%s and %d more, in %s", name, count - 1, where);
+        snprintf(text, sizeof text, "%s and %d more, in %.40s", shown, count - 1, where ? where : "");
     } else {
-        snprintf(title, sizeof title, "%s received from iPhone", name);
-        snprintf(text, sizeof text, "Saved in %s. Click to show it.", where);
+        snprintf(title, sizeof title, "%s received from iPhone", shown);
+        snprintf(text, sizeof text, "Saved in %.40s. Click to show it.", where ? where : "");
     }
     return ph_wintray_notify(a->tray, title, text, path);
 }
