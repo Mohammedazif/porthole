@@ -95,7 +95,10 @@ for package in "${!packages[@]}"; do
         url="https://repo.msys2.org/mingw/sources/$source_archive"
         curl --fail --location --retry 3 "$url" -o "$source_dir/$source_archive"
         curl --fail --location --retry 3 "$url.sig" -o "$source_dir/$source_archive.sig"
-        pacman-key --verify "$source_dir/$source_archive.sig" "$source_dir/$source_archive"
+        # pacman-key --verify needs root (or lock-never); gpgv checks the same
+        # MSYS2 keyring read-only.
+        gpgv --keyring /etc/pacman.d/gnupg/pubring.gpg \
+            "$source_dir/$source_archive.sig" "$source_dir/$source_archive"
         printf '%s\n' "$url" >> "$source_dir/SOURCE-URLS.txt"
     fi
     printf '%s\n' "$metadata" > "$source_dir/$package.PKGINFO"
