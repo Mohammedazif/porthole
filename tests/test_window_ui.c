@@ -52,7 +52,9 @@ static void screenshot(ph_window *window, const char *dir, const char *name)
 static void click_shortcut(ph_window *w, int x, int y, SDL_Scancode expected)
 {
     SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
-    SDL_Event event = {.type = SDL_MOUSEBUTTONDOWN};
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = SDL_MOUSEBUTTONDOWN;
     event.button.windowID = ph_window_id(w);
     event.button.button = SDL_BUTTON_LEFT;
     event.button.x = x; event.button.y = y;
@@ -95,7 +97,9 @@ int main(int argc, char **argv)
     click_shortcut(w, tx, ty, SDL_SCANCODE_F1);
     CHECK(ph_window_connect_target(w, PH_TARGET_STATS, &tx, &ty));
     click_shortcut(w, tx, ty, SDL_SCANCODE_F3);
-    SDL_Event copy = {.type = SDL_MOUSEBUTTONDOWN};
+    SDL_Event copy;
+    SDL_zero(copy);
+    copy.type = SDL_MOUSEBUTTONDOWN;
     CHECK(ph_window_connect_target(w, PH_TARGET_COPY, &tx, &ty));
     copy.button.button = SDL_BUTTON_LEFT; copy.button.x = tx; copy.button.y = ty;
     CHECK(ph_window_chrome_event(w, &copy));
@@ -104,7 +108,9 @@ int main(int argc, char **argv)
     char *clipboard = SDL_GetClipboardText();
     CHECK(clipboard && !strcmp(clipboard, "192.0.2.42:47731  SAMPLE42"));
     SDL_free(clipboard);
-    SDL_Event fresh = {.type = SDL_MOUSEBUTTONDOWN};
+    SDL_Event fresh;
+    SDL_zero(fresh);
+    fresh.type = SDL_MOUSEBUTTONDOWN;
     CHECK(ph_window_connect_target(w, PH_TARGET_NEW_CODE, &tx, &ty));
     fresh.button.button = SDL_BUTTON_LEFT; fresh.button.x = tx; fresh.button.y = ty;
     CHECK(ph_window_chrome_event(w, &fresh));
@@ -121,7 +127,9 @@ int main(int argc, char **argv)
         CHECK(qrcodegen_getSize(qr) >= 21);
         CHECK(qrcodegen_getModule(qr, 0, 0));
     }
-    SDL_Event gear = {.type = SDL_MOUSEBUTTONDOWN};
+    SDL_Event gear;
+    SDL_zero(gear);
+    gear.type = SDL_MOUSEBUTTONDOWN;
     gear.button.button = SDL_BUTTON_LEFT;
     CHECK(ph_window_connect_target(w, PH_TARGET_SETTINGS, &tx, &ty));
     gear.button.x = tx; gear.button.y = ty;
@@ -130,7 +138,9 @@ int main(int argc, char **argv)
     CHECK(ph_window_chrome_event(w, &gear));
     CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_NONE);
     screenshot(w, dir, "11-settings");
-    SDL_Event row = {.type = SDL_MOUSEBUTTONDOWN};
+    SDL_Event row;
+    SDL_zero(row);
+    row.type = SDL_MOUSEBUTTONDOWN;
     row.button.button = SDL_BUTTON_LEFT;
     CHECK(ph_window_settings_target(w, 1, 1, &tx, &ty)); /* Wheel scrolling: Feed */
     row.button.x = tx; row.button.y = ty;
@@ -207,11 +217,15 @@ int main(int argc, char **argv)
     ph_window_set_setup(w, &setup);
     ph_window_toggle_help(w);
     screenshot(w, dir, "05-help");
-    SDL_Event wheel = {.type = SDL_MOUSEWHEEL};
+    SDL_Event wheel;
+    SDL_zero(wheel);
+    wheel.type = SDL_MOUSEWHEEL;
     wheel.wheel.y = -20;
     CHECK(ph_window_chrome_event(w, &wheel));
     screenshot(w, dir, "06-help-scrolled");
-    SDL_Event key = {.type = SDL_KEYDOWN};
+    SDL_Event key;
+    SDL_zero(key);
+    key.type = SDL_KEYDOWN;
     key.key.keysym.scancode = SDL_SCANCODE_HOME;
     CHECK(ph_window_chrome_event(w, &key));
     ph_window_toggle_help(w);
@@ -245,7 +259,9 @@ int main(int argc, char **argv)
     {
         /* Phone-sized window, then Controls and Transfers open beside the picture. */
         int ww, wh;
-        SDL_Event click = {.type = SDL_MOUSEBUTTONDOWN};
+        SDL_Event click;
+        SDL_zero(click);
+        click.type = SDL_MOUSEBUTTONDOWN;
         click.button.button = SDL_BUTTON_LEFT;
         click.button.clicks = 1;
         SDL_SetWindowSize(native, 360, 812);
@@ -268,7 +284,9 @@ int main(int argc, char **argv)
         SDL_GetWindowSize(native, &ww, &wh);
         CHECK(ww == 360 + 60 + 300);
         ph_window_set_active_transfer(w, "Sending IMG_4790.MOV");
-        SDL_Event hover = {.type = SDL_MOUSEMOTION};
+        SDL_Event hover;
+        SDL_zero(hover);
+        hover.type = SDL_MOUSEMOTION;
         hover.motion.x = 360 + 30; hover.motion.y = 32 + 10 + 20;      /* Home */
         ph_window_chrome_event(w, &hover);
         ph_window_redraw(w);

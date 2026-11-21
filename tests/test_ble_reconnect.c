@@ -25,7 +25,9 @@ static Uint64 first_tick, motion_at, recovered_at;
 
 static void quit(void)
 {
-    SDL_Event event = {.type = SDL_QUIT};
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = SDL_QUIT;
     SDL_PushEvent(&event);
 }
 
@@ -112,7 +114,9 @@ void ph_window_tick(ph_window *w)
     if (ack_timeout_mode && ready_count == 1 && !motion_injected) {
         motion_injected = true;
         motion_at = SDL_GetTicks64();
-        SDL_Event event = {.type = SDL_MOUSEMOTION};
+        SDL_Event event;
+        SDL_zero(event);
+        event.type = SDL_MOUSEMOTION;
         event.motion.windowID = 1;
         event.motion.x = 250;
         event.motion.y = 700;

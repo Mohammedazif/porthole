@@ -198,13 +198,17 @@ static bool enqueue(paced_report report)
 
 static void quit(void)
 {
-    SDL_Event event = {.type = SDL_QUIT};
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = SDL_QUIT;
     SDL_PushEvent(&event);
 }
 
 static void push_key(SDL_Scancode scancode, bool down, SDL_Keymod modifiers)
 {
-    SDL_Event event = {.type = down ? SDL_KEYDOWN : SDL_KEYUP};
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = down ? SDL_KEYDOWN : SDL_KEYUP;
     event.key.windowID = 1;
     event.key.state = down ? SDL_PRESSED : SDL_RELEASED;
     event.key.keysym.scancode = scancode;
@@ -214,14 +218,18 @@ static void push_key(SDL_Scancode scancode, bool down, SDL_Keymod modifiers)
 
 static void push_motion(int x, int y)
 {
-    SDL_Event event = {.type = SDL_MOUSEMOTION};
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = SDL_MOUSEMOTION;
     event.motion.windowID = 1; event.motion.x = x; event.motion.y = y;
     SDL_PushEvent(&event);
 }
 
 static void push_window(Uint8 action)
 {
-    SDL_Event event = {.type = SDL_WINDOWEVENT};
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = SDL_WINDOWEVENT;
     event.window.windowID = 1; event.window.event = action;
     SDL_PushEvent(&event);
 }
@@ -414,7 +422,9 @@ bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy
 
 static void push_button(Uint8 button, bool down)
 {
-    SDL_Event event = {.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP};
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
     event.button.windowID = 1;
     event.button.button = button;
     event.button.state = down ? SDL_PRESSED : SDL_RELEASED;
@@ -425,7 +435,9 @@ static void push_button(Uint8 button, bool down)
 
 static void photo_button(bool down)
 {
-    SDL_Event event = {.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP};
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
     photo_buttons = down ? SDL_BUTTON_LMASK : 0;
     event.button.windowID = 1;
     event.button.button = SDL_BUTTON_LEFT;
@@ -494,7 +506,9 @@ static void tick_photo(void)
 
 static void push_wheel(float y)
 {
-    SDL_Event event = {.type = SDL_MOUSEWHEEL};
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = SDL_MOUSEWHEEL;
     event.wheel.windowID = 1;
     event.wheel.direction = SDL_MOUSEWHEEL_NORMAL;
 #if SDL_VERSION_ATLEAST(2, 0, 18)
@@ -774,7 +788,9 @@ void ph_window_tick(ph_window *w)
             push_key(SDL_SCANCODE_ESCAPE, true, KMOD_NONE);
             push_key(SDL_SCANCODE_ESCAPE, false, KMOD_NONE);
         } else {
-            SDL_Event focus = {.type = SDL_WINDOWEVENT};
+            SDL_Event focus;
+            SDL_zero(focus);
+            focus.type = SDL_WINDOWEVENT;
             focus.window.windowID = 1;
             focus.window.event = SDL_WINDOWEVENT_FOCUS_LOST;
             SDL_PushEvent(&focus);
@@ -816,7 +832,9 @@ void ph_window_tick(ph_window *w)
              * for that physical endpoint, but must not finish the old intent. */
             push_window(reentry_focus ? SDL_WINDOWEVENT_FOCUS_GAINED : SDL_WINDOWEVENT_ENTER);
             push_motion(REENTER_X, REENTER_Y);
-            SDL_Event button = {.type = SDL_MOUSEBUTTONDOWN};
+            SDL_Event button;
+            SDL_zero(button);
+            button.type = SDL_MOUSEBUTTONDOWN;
             button.button.windowID = 1; button.button.button = SDL_BUTTON_LEFT;
             button.button.state = SDL_PRESSED;
             button.button.x = REENTER_X; button.button.y = REENTER_Y;
@@ -832,7 +850,9 @@ void ph_window_tick(ph_window *w)
     if ((cancel_mode || freeze_mode) && presses && !fault_stage) {
         fault_stage = 1;
         if (cancel_mode) push_key(SDL_SCANCODE_B, true, KMOD_NONE);
-        SDL_Event motion = {.type = SDL_MOUSEMOTION};
+        SDL_Event motion;
+        SDL_zero(motion);
+        motion.type = SDL_MOUSEMOTION;
         motion.motion.windowID = 1;
         motion.motion.state = SDL_BUTTON_LMASK;
         motion.motion.x = DRAG_END_X;
@@ -849,7 +869,9 @@ void ph_window_tick(ph_window *w)
             else if (!strcmp(fault_name, "close")) quit();
             else if (!strcmp(fault_name, "modal")) push_key(SDL_SCANCODE_F2, true, KMOD_NONE);
             else {
-                SDL_Event focus = {.type = SDL_WINDOWEVENT};
+                SDL_Event focus;
+                SDL_zero(focus);
+                focus.type = SDL_WINDOWEVENT;
                 focus.window.windowID = 1;
                 focus.window.event = SDL_WINDOWEVENT_FOCUS_LOST;
                 SDL_PushEvent(&focus);
@@ -876,16 +898,22 @@ void ph_window_tick(ph_window *w)
             push_key(SDL_SCANCODE_H, true, KMOD_LALT);
             push_key(SDL_SCANCODE_H, false, KMOD_LALT);
             push_key(SDL_SCANCODE_LALT, false, KMOD_NONE);
-            SDL_Event motion = {.type = SDL_MOUSEMOTION};
+            SDL_Event motion;
+            SDL_zero(motion);
+            motion.type = SDL_MOUSEMOTION;
             motion.motion.windowID = 1;
             motion.motion.x = TARGET_X;
             motion.motion.y = TARGET_Y;
             SDL_PushEvent(&motion);
-            SDL_Event wheel = {.type = SDL_MOUSEWHEEL};
+            SDL_Event wheel;
+            SDL_zero(wheel);
+            wheel.type = SDL_MOUSEWHEEL;
             wheel.wheel.windowID = 1;
             wheel.wheel.y = -1;
             SDL_PushEvent(&wheel);
-            SDL_Event button = {.type = SDL_MOUSEBUTTONDOWN};
+            SDL_Event button;
+            SDL_zero(button);
+            button.type = SDL_MOUSEBUTTONDOWN;
             button.button.windowID = 1;
             button.button.button = SDL_BUTTON_LEFT;
             button.button.x = TARGET_X;
@@ -919,12 +947,16 @@ void ph_window_tick(ph_window *w)
     if (!injected && mirroring && control_ready && initial_frame) {
         injected = true;
         injected_at = SDL_GetTicks64();
-        SDL_Event motion = {.type = SDL_MOUSEMOTION};
+        SDL_Event motion;
+        SDL_zero(motion);
+        motion.type = SDL_MOUSEMOTION;
         motion.motion.windowID = 1;
         motion.motion.x = TARGET_X;
         motion.motion.y = TARGET_Y;
         SDL_PushEvent(&motion);
-        SDL_Event button = {.type = SDL_MOUSEBUTTONDOWN};
+        SDL_Event button;
+        SDL_zero(button);
+        button.type = SDL_MOUSEBUTTONDOWN;
         button.button.windowID = 1;
         button.button.button = SDL_BUTTON_LEFT;
         button.button.state = SDL_PRESSED;

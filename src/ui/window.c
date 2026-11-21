@@ -1459,7 +1459,8 @@ static void toggle_zoom(SDL_Window *window)
 static void push_shortcut(ph_window *w, SDL_Scancode key, SDL_Keymod mod)
 {
     /* Route clicks through the keyboard path so modal input cancellation is identical. */
-    SDL_Event event = {0};
+    SDL_Event event;
+    SDL_zero(event);
     event.type = SDL_KEYDOWN;
     event.key.windowID = SDL_GetWindowID(w->window);
     event.key.state = SDL_PRESSED;
@@ -2746,7 +2747,9 @@ bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
             push_shortcut(w, keys[index], index == 7 ? KMOD_NONE : KMOD_LALT);
         }
         else if (hit == CHROME_CLOSE) {
-            SDL_Event quit = {.type = SDL_QUIT};
+            SDL_Event quit;
+            SDL_zero(quit);
+            quit.type = SDL_QUIT;
             SDL_PushEvent(&quit);
         }
     }
