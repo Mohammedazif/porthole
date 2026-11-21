@@ -71,8 +71,17 @@ for package in "${!packages[@]}"; do
         cp "$path" "$destination"
     done < <(pacman -Qlq "$package" | awk '/\/share\/licenses\//')
     version=$(pacman -Q "$package" | awk '{print $2}')
-    archive=$(find /var/cache/pacman/pkg -maxdepth 1 -name "$package-${version#*:}-*.pkg.tar.*" \
-        ! -name '*.sig' -print -quit)
+    find_archive() {
+        find /var/cache/pacman/pkg -maxdepth 1 -name "$package-${version#*:}-*.pkg.tar.*" \
+            ! -name '*.sig' -print -quit
+    }
+    archive=$(find_archive)
+    if [[ -z $archive ]]; then
+        # Preinstalled packages are not cached. Fetch the repository copy; it is
+        # accepted only if it is the exact installed version.
+        pacman -Sw --noconfirm "$package" >&2 || true
+        archive=$(find_archive)
+    fi
     if [[ -z $archive ]]; then
         echo "Cached package metadata missing for $package $version; rebuild after installing dependencies." >&2
         exit 1
