@@ -320,6 +320,8 @@ void ph_window_set_live_state(ph_window *w, bool feed, bool paused, bool sound_o
 bool ph_window_media_keys(const ph_window *w) { (void)w; return true; }
 void ph_window_set_media_keys(ph_window *w, bool on) { (void)w; (void)on; }
 void ph_window_set_pc_name(ph_window *w, const char *name) { (void)w; (void)name; }
+void ph_window_set_phone_name(ph_window *w, const char *name) { (void)w; (void)name; }
+void ph_window_set_code_open(ph_window *w, bool open) { (void)w; (void)open; }
 bool ph_window_has_pairing(const ph_window *w) { (void)w; return false; }
 void ph_window_open_settings(ph_window *w) { (void)w; }
 void ph_window_set_transfer_percent(ph_window *w, int percent) { (void)w; (void)percent; }

@@ -326,8 +326,8 @@ static void screen_connected(void *user, const char *address)
     pthread_mutex_lock(&a->src_lock);
     a->src.usb_unplugged = false; /* the broadcast takes the cable's place */
     pthread_mutex_unlock(&a->src_lock);
-    if (!atomic_load(&a->airplay_on))
-        push_event(user, EV_CONNECTED, strdup("iPhone (screen broadcast)"));
+    if (!atomic_load(&a->airplay_on) && !a->phone_name[0])
+        push_event(user, EV_CONNECTED, strdup("Connected"));
 }
 
 static void screen_video(void *user, const uint8_t *annexb, size_t len, bool keyframe)
@@ -1128,9 +1128,13 @@ static void end_pull(app *a)
     a->pull_hold = false;
     a->pull_path[0] = 0;
     update_title(a);
-    if (offer && !(landed && tray_notice(a, offer, 1, "the Desktop")) && a->card) {
-        ph_transfer_card_place(a->card, landed ? "Desktop" : NULL);
-        ph_transfer_card_show(a->card, offer, 1, 1, landed, SDL_GetTicks64());
+    if (offer) {
+        if (landed)
+            tray_notice(a, offer, 1, "the Desktop");
+        if (a->card) {
+            ph_transfer_card_place(a->card, landed ? "Desktop" : NULL);
+            ph_transfer_card_show(a->card, offer, 1, 1, landed, SDL_GetTicks64());
+        }
     }
     if (note == 3)
         ph_window_set_detail(a->win, placed ? "Pulled the original photo"
@@ -1726,9 +1730,12 @@ static bool queue_pc_file(app *a, const char *path);
 static uint8_t pc_modifiers(const app *a, SDL_Keymod mods)
 {
     uint8_t result = 0;
-    bool command = ph_window_ctrl_is_command(a->win);
-    if (mods & KMOD_LCTRL) result |= command ? PH_HID_MOD_LGUI : PH_HID_MOD_LCTRL;
-    if (mods & KMOD_RCTRL) result |= command ? PH_HID_MOD_RGUI : PH_HID_MOD_RCTRL;
+    (void)a;
+    /* Ctrl stays Ctrl here. input.c turns it into Command when that setting is on.
+     * Doing it in both places put Control back on the iPhone, so Ctrl+C and Ctrl+A
+     * never arrived as Command. */
+    if (mods & KMOD_LCTRL) result |= PH_HID_MOD_LCTRL;
+    if (mods & KMOD_RCTRL) result |= PH_HID_MOD_RCTRL;
     if (mods & KMOD_LSHIFT) result |= PH_HID_MOD_LSHIFT;
     if (mods & KMOD_RSHIFT) result |= PH_HID_MOD_RSHIFT;
     if (mods & KMOD_LALT) result |= PH_HID_MOD_LALT;
@@ -1977,6 +1984,8 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         return;
     }
     if (a->phone_name[0] && (unsigned)sc < 256) {
+        a->input.swap_ctrl_cmd = ph_window_ctrl_is_command(a->win);
+        a->input.swap_set = true;
         mark_input(a, e->timestamp);
         if (down && !e->repeat && sc == SDL_SCANCODE_V && (e->keysym.mod & KMOD_CTRL)
             && !(e->keysym.mod & (KMOD_ALT | KMOD_GUI))) {
@@ -2380,6 +2389,9 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
         ph_pointer_reset(&a->pointer, SDL_GetTicks64());
         ph_scroll_reset(&a->wheel);
         snprintf(a->phone_name, sizeof a->phone_name, "%s", (const char *)e->user.data1);
+        if (a->phone_name[0] && strcmp(a->phone_name, "iPhone (screen broadcast)") != 0
+            && strcmp(a->phone_name, "Connected") != 0)
+            ph_window_set_phone_name(a->win, a->phone_name);
         ph_decoder_reset(a->dec);
         ph_pointer_set_enabled(&a->pointer, a->input.enabled, SDL_GetTicks64());
         update_title(a);
@@ -2432,15 +2444,14 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
             char where[64];
             if (!ph_place_save_label(where, sizeof where))
                 snprintf(where, sizeof where, "Downloads");
-            if (saved > 0 && dest[0] && tray_notice(a, dest, saved, where)) {
-                if (a->card)
-                    ph_transfer_card_dismiss(a->card, SDL_GetTicks64());
-            } else if (a->card) {
-                if (saved > 0 && dest[0]) {
+            if (saved > 0 && dest[0]) {
+                tray_notice(a, dest, saved, where);
+                if (a->card) {
                     ph_transfer_card_place(a->card, where);
                     ph_transfer_card_show(a->card, dest, saved, saved, true, SDL_GetTicks64());
-                } else
-                    ph_transfer_card_dismiss(a->card, SDL_GetTicks64());
+                }
+            } else if (a->card) {
+                ph_transfer_card_dismiss(a->card, SDL_GetTicks64());
             }
             snprintf(line, sizeof line, "Saved %d item%s from the iPhone in %s", saved,
                      saved == 1 ? "" : "s", where);
@@ -2747,6 +2758,13 @@ static void sync_clipboard(app *a)
     Uint64 now;
 
     ph_hostclip_pump();
+    if (a->origin && a->win) {
+        char named[64];
+        ph_window_set_code_open(a->win, ph_origin_code_open(a->origin));
+        ph_origin_phone_name(a->origin, named, sizeof named);
+        if (named[0])
+            ph_window_set_phone_name(a->win, named);
+    }
     flags = ph_origin_clip_flags(a->origin);
     if (ph_origin_take_clip(a->origin, &kind, &data, &len)) {
         ph_hostclip_apply(kind, data, len);

@@ -48,6 +48,8 @@ struct ph_window {
     char title[320];
     char pull_hint[96];
     char pc_name[64];
+    char phone_label[64];
+    bool code_open;
     bool share_checked, share_available;
     bool new_code;
     bool settings_visible;
@@ -130,21 +132,35 @@ static void paint(SDL_Renderer *renderer, SDL_Rect rect, int r, int g, int b, in
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 }
 
+static void crisp_rect(SDL_Renderer *renderer, int x, int y, int w, int h, SDL_Rect *out,
+                        float *sx, float *sy);
+
 static void rounded(SDL_Renderer *renderer, SDL_Rect box, int radius, SDL_Color color)
 {
+    SDL_Rect px;
+    float sx, sy;
+    int rad;
+
     if (box.w < 1 || box.h < 1) return;
-    if (radius > box.w / 2) radius = box.w / 2;
-    if (radius > box.h / 2) radius = box.h / 2;
+    crisp_rect(renderer, box.x, box.y, box.w, box.h, &px, &sx, &sy);
+    rad = (int)lroundf((float)radius * sy);
+    if (rad > px.w / 2) rad = px.w / 2;
+    if (rad > px.h / 2) rad = px.h / 2;
+    SDL_RenderSetScale(renderer, 1, 1);
     SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
-    for (int y = 0; y < box.h; y++) {
+    for (int y = 0; y < px.h; y++) {
         int inset = 0;
-        int dy = y < radius ? radius - y - 1 : y >= box.h - radius ? y - (box.h - radius) : 0;
-        if (dy > 0) inset = radius - (int)sqrt((double)(radius * radius - dy * dy));
-        SDL_RenderDrawLine(renderer, box.x + inset, box.y + y, box.x + box.w - inset - 1, box.y + y);
+        int dy = y < rad ? rad - y - 1 : y >= px.h - rad ? y - (px.h - rad) : 0;
+        if (dy > 0) inset = rad - (int)sqrt((double)(rad * rad - dy * dy));
+        SDL_RenderDrawLine(renderer, px.x + inset, px.y + y, px.x + px.w - inset - 1, px.y + y);
     }
+    SDL_RenderSetScale(renderer, sx, sy);
 }
 
 static void fill_px(SDL_Renderer *renderer, int x, int y, int w, int h);
+static void paint_icon(SDL_Renderer *renderer, SDL_Rect dest, SDL_Color color,
+                        void (*build)(float *cov, int n, int kind), int kind);
+static void icon_ready(float *cov, int n, int kind);
 static void modal_range(ph_window *w, int content, int visible);
 static void stroke(SDL_Renderer *renderer, int x1, int y1, int x2, int y2);
 static void draw_line_fit(SDL_Renderer *renderer, const char *text, int x, int y, int width, int scale,
@@ -578,34 +594,9 @@ static void ready_icon(SDL_Renderer *r, int kind, int x, int y)
     int cx = x + 16, cy = y + 16;
 
     rounded(r, (SDL_Rect){x, y, 32, 32}, 8, color_ground);
-    SDL_SetRenderDrawColor(r, 17, 17, 17, 255);
-    switch (kind) {
-    case 0:
-        for (int i = 0; i < 3; i++) {
-            int rad = 3 + i * 3;
-            for (int a = -40; a <= 40; a += 5) {
-                double t = (a - 90) * 3.14159265 / 180;
-                SDL_RenderDrawPoint(r, cx + (int)lround(rad * cos(t)), cy + 4 + (int)lround(rad * sin(t)));
-            }
-        }
-        fill_px(r, cx - 1, cy + 3, 2, 2);
-        break;
-    case 1:
-        SDL_RenderDrawRect(r, &(SDL_Rect){cx - 5, cy - 8, 10, 16});
-        fill_px(r, cx - 1, cy + 5, 2, 1);
-        break;
-    case 2:
-        SDL_RenderDrawRect(r, &(SDL_Rect){cx - 4, cy - 7, 8, 14});
-        fill_px(r, cx, cy - 7, 1, 5);
-        break;
-    default:
-        fill_px(r, cx - 6, cy - 2, 3, 5);
-        stroke(r, cx - 3, cy - 2, cx + 1, cy - 6);
-        stroke(r, cx - 3, cy + 2, cx + 1, cy + 6);
-        fill_px(r, cx + 1, cy - 6, 1, 13);
-        stroke(r, cx + 4, cy - 2, cx + 4, cy + 2);
-        break;
-    }
+    (void)cx;
+    (void)cy;
+    paint_icon(r, (SDL_Rect){x + 4, y + 4, 24, 24}, color_text, icon_ready, kind);
 }
 
 /* A coloured dot and label, right-aligned at right. tone: 0 muted ring, 1 ok, 2 warn. */
@@ -677,22 +668,23 @@ static void draw_waiting(ph_window *w, int width, int height, int top)
               color_text);
     y += 60;
     {
-        SDL_Rect table = {dx, y, dw, 92};
+        SDL_Rect table = {dx, y, dw, 116};
         outline(r, table, 10, color_line, color_on_ink);
-        paint(r, (SDL_Rect){dx + 1, y + 46, dw - 2, 1}, 226, 228, 232, 255);
-        draw_text(r, "Address", dx + 14, y + 14, 90, PH_TEXT(14, PH_FONT_REGULAR), color_muted);
-        draw_text(r, "Pairing code", dx + 14, y + 60, 110, PH_TEXT(14, PH_FONT_REGULAR), color_muted);
+        paint(r, (SDL_Rect){dx + 1, y + 56, dw - 2, 1}, 226, 228, 232, 255);
+        draw_text(r, "Address", dx + 14, y + 6, dw - 28, PH_TEXT(12, PH_FONT_REGULAR), color_muted);
+        draw_text(r, "Pairing code", dx + 14, y + 62, dw - 28, PH_TEXT(12, PH_FONT_REGULAR), color_muted);
         if (have) {
-            int aw = ph_text_width(address, PH_TEXT(15, PH_FONT_MONO));
-            int cw = ph_text_width(code, PH_TEXT(19, PH_FONT_MONO_MEDIUM));
-            draw_text(r, address, dx + dw - 14 - aw, y + 13, aw + 4, PH_TEXT(15, PH_FONT_MONO), color_text);
-            draw_text(r, code, dx + dw - 14 - cw, y + 56, cw + 4, PH_TEXT(19, PH_FONT_MONO_MEDIUM), color_text);
+            draw_text(r, address, dx + 14, y + 24, dw - 28, PH_TEXT(15, PH_FONT_MONO), color_text);
+            if (w->code_open)
+                draw_text(r, code, dx + 14, y + 80, dw - 28, PH_TEXT(16, PH_FONT_MONO_MEDIUM), color_text);
+            else
+                draw_text(r, "Used", dx + 14, y + 80, dw - 28, PH_TEXT(15, PH_FONT_MEDIUM), color_muted);
         } else {
             const char *wait = unavailable ? "Unavailable" : "Starting...";
             int ww = ph_text_width(wait, PH_TEXT(14, PH_FONT_REGULAR));
-            draw_text(r, wait, dx + dw - 14 - ww, y + 14, ww + 4, PH_TEXT(14, PH_FONT_REGULAR), color_muted);
+            draw_text(r, wait, dx + dw - 14 - ww, y + 22, ww + 4, PH_TEXT(14, PH_FONT_REGULAR), color_muted);
         }
-        y += 92 + 14;
+        y += 116 + 14;
     }
     if (y + 40 < g.copy.y)
         draw_text(r, unavailable ? "The iPhone connection could not start. Another program may be using port 47731."
@@ -1287,8 +1279,6 @@ static int chrome_at(const ph_window *w, int win_w, int win_h, int x, int y)
         }
         if (w->transfers_open && x >= column + (w->rail_open ? RAIL_W : 0)) {
             transfer_boxes t = transfers_layout(w, win_w, win_h);
-            if (SDL_PointInRect(&point, &t.files)) return CHROME_TAB_FILES;
-            if (SDL_PointInRect(&point, &t.clip)) return CHROME_TAB_CLIP;
             if (!w->transfer_tab && w->transfer_active[0] && SDL_PointInRect(&point, &t.cancel))
                 return CHROME_CANCEL;
             return CHROME_PANEL;
@@ -1308,83 +1298,333 @@ static int chrome_at(const ph_window *w, int win_w, int win_h, int x, int y)
     return CHROME_NONE;
 }
 
+/* Chrome is drawn in window points and then scaled. Snap each mark onto whole
+ * output pixels so a 150% display does not smear a 1px icon. */
+static void crisp_rect(SDL_Renderer *renderer, int x, int y, int w, int h, SDL_Rect *out,
+                        float *sx, float *sy)
+{
+    SDL_RenderGetScale(renderer, sx, sy);
+    if (*sx < 0.5f)
+        *sx = 1;
+    if (*sy < 0.5f)
+        *sy = 1;
+    out->x = (int)lroundf((float)x * *sx);
+    out->y = (int)lroundf((float)y * *sy);
+    out->w = (int)lroundf((float)(x + w) * *sx) - out->x;
+    out->h = (int)lroundf((float)(y + h) * *sy) - out->y;
+    if (out->w < 1)
+        out->w = 1;
+    if (out->h < 1)
+        out->h = 1;
+}
+
 static void fill_px(SDL_Renderer *renderer, int x, int y, int w, int h)
 {
     SDL_Rect rect;
+    float sx, sy;
 
     if (w < 1)
         w = 1;
     if (h < 1)
         h = 1;
-    rect = (SDL_Rect){x, y, w, h};
+    crisp_rect(renderer, x, y, w, h, &rect, &sx, &sy);
+    SDL_RenderSetScale(renderer, 1, 1);
     SDL_RenderFillRect(renderer, &rect);
+    SDL_RenderSetScale(renderer, sx, sy);
+}
+
+static float clampf(float v, float lo, float hi)
+{
+    return v < lo ? lo : v > hi ? hi : v;
+}
+
+static void cov_put(float *c, int n, int x, int y, float v)
+{
+    if (x < 0 || y < 0 || x >= n || y >= n || v <= 0)
+        return;
+    if (v > c[y * n + x])
+        c[y * n + x] = v > 1 ? 1 : v;
+}
+
+static void cov_capsule(float *c, int n, float x0, float y0, float x1, float y1, float rad)
+{
+    float dx = x1 - x0, dy = y1 - y0, len2 = dx * dx + dy * dy;
+    int minx = (int)floorf(fminf(x0, x1) - rad - 1);
+    int maxx = (int)ceilf(fmaxf(x0, x1) + rad + 1);
+    int miny = (int)floorf(fminf(y0, y1) - rad - 1);
+    int maxy = (int)ceilf(fmaxf(y0, y1) + rad + 1);
+    int x, y;
+
+    for (y = miny; y <= maxy; y++) {
+        for (x = minx; x <= maxx; x++) {
+            float t = len2 < 0.01f ? 0 : ((x + 0.5f - x0) * dx + (y + 0.5f - y0) * dy) / len2;
+            float px, py, dist;
+            t = clampf(t, 0, 1);
+            px = x0 + t * dx;
+            py = y0 + t * dy;
+            dist = hypotf(x + 0.5f - px, y + 0.5f - py);
+            cov_put(c, n, x, y, rad + 0.5f - dist);
+        }
+    }
+}
+
+static void cov_ring(float *c, int n, float cx, float cy, float r, float thick)
+{
+    float half = thick * 0.5f;
+    int minx = (int)floorf(cx - r - half - 1), maxx = (int)ceilf(cx + r + half + 1);
+    int miny = (int)floorf(cy - r - half - 1), maxy = (int)ceilf(cy + r + half + 1);
+    int x, y;
+
+    for (y = miny; y <= maxy; y++) {
+        for (x = minx; x <= maxx; x++) {
+            float dist = hypotf(x + 0.5f - cx, y + 0.5f - cy);
+            float cover = fminf(r + half + 0.5f - dist, dist - (r - half - 0.5f));
+            cov_put(c, n, x, y, cover);
+        }
+    }
+}
+
+static void cov_arc(float *c, int n, float cx, float cy, float r, float thick, float a0, float a1)
+{
+    float half = thick * 0.5f;
+    int minx = (int)floorf(cx - r - half - 1), maxx = (int)ceilf(cx + r + half + 1);
+    int miny = (int)floorf(cy - r - half - 1), maxy = (int)ceilf(cy + r + half + 1);
+    int x, y;
+
+    for (y = miny; y <= maxy; y++) {
+        for (x = minx; x <= maxx; x++) {
+            float dx = x + 0.5f - cx, dy = y + 0.5f - cy, ang = atan2f(dy, dx);
+            float dist, cover;
+            if (ang < a0)
+                ang += 6.2831853f;
+            if (ang < a0 || ang > a1)
+                continue;
+            dist = hypotf(dx, dy);
+            cover = fminf(r + half + 0.5f - dist, dist - (r - half - 0.5f));
+            cov_put(c, n, x, y, cover);
+        }
+    }
+}
+
+static void cov_rrect(float *c, int n, float x, float y, float w, float h, float rad, float thick)
+{
+    float r = rad < thick ? thick : rad;
+    cov_capsule(c, n, x + r, y + thick * 0.5f, x + w - r, y + thick * 0.5f, thick * 0.5f);
+    cov_capsule(c, n, x + r, y + h - thick * 0.5f, x + w - r, y + h - thick * 0.5f, thick * 0.5f);
+    cov_capsule(c, n, x + thick * 0.5f, y + r, x + thick * 0.5f, y + h - r, thick * 0.5f);
+    cov_capsule(c, n, x + w - thick * 0.5f, y + r, x + w - thick * 0.5f, y + h - r, thick * 0.5f);
+    cov_ring(c, n, x + r, y + r, r - thick * 0.5f, thick);
+    cov_ring(c, n, x + w - r, y + r, r - thick * 0.5f, thick);
+    cov_ring(c, n, x + r, y + h - r, r - thick * 0.5f, thick);
+    cov_ring(c, n, x + w - r, y + h - r, r - thick * 0.5f, thick);
+}
+
+/* Smooth icon in a 32-unit square, painted at the destination's real pixel size. */
+static void paint_icon(SDL_Renderer *renderer, SDL_Rect dest, SDL_Color color,
+                        void (*build)(float *cov, int n, int kind), int kind)
+{
+    float sx = 1, sy = 1;
+    int n, i;
+    float *cov;
+    SDL_Surface *surface;
+    SDL_Texture *tex;
+
+    if (dest.w < 4 || dest.h < 4)
+        return;
+    SDL_RenderGetScale(renderer, &sx, &sy);
+    n = (int)lroundf(dest.w * (sx > sy ? sx : sy));
+    if (n < 16)
+        n = 16;
+    if (n > 96)
+        n = 96;
+    cov = calloc((size_t)n * (size_t)n, sizeof *cov);
+    surface = SDL_CreateRGBSurfaceWithFormat(0, n, n, 32, SDL_PIXELFORMAT_RGBA32);
+    if (!cov || !surface) {
+        free(cov);
+        if (surface)
+            SDL_FreeSurface(surface);
+        return;
+    }
+    build(cov, n, kind);
+    for (i = 0; i < n * n; i++) {
+        unsigned char *p = (unsigned char *)surface->pixels + i * 4;
+        p[0] = p[1] = p[2] = 255;
+        p[3] = (unsigned char)(clampf(cov[i], 0, 1) * 255);
+    }
+    tex = SDL_CreateTextureFromSurface(renderer, surface);
+    SDL_FreeSurface(surface);
+    free(cov);
+    if (!tex)
+        return;
+    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureColorMod(tex, color.r, color.g, color.b);
+    SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
+    SDL_RenderCopy(renderer, tex, NULL, &dest);
+    SDL_DestroyTexture(tex);
+}
+
+static float iu(int n, float u)
+{
+    return u * (float)n / 32.f;
+}
+
+static void icon_gear(float *c, int n, int kind)
+{
+    int i;
+    (void)kind;
+    cov_ring(c, n, iu(n, 16), iu(n, 16), iu(n, 5.2f), iu(n, 1.7f));
+    for (i = 0; i < 8; i++) {
+        float a = i * 0.785398f;
+        cov_capsule(c, n, iu(n, 16 + 4.6f * cosf(a)), iu(n, 16 + 4.6f * sinf(a)),
+                    iu(n, 16 + 8.4f * cosf(a)), iu(n, 16 + 8.4f * sinf(a)), iu(n, 1.15f));
+    }
+}
+
+static void icon_sliders(float *c, int n, int kind)
+{
+    static const float knob[3] = {9, 22, 15};
+    int i;
+    (void)kind;
+    for (i = 0; i < 3; i++) {
+        float y = 9 + i * 7;
+        cov_capsule(c, n, iu(n, 6), iu(n, y), iu(n, 26), iu(n, y), iu(n, 1.05f));
+        cov_ring(c, n, iu(n, knob[i]), iu(n, y), iu(n, 2.5f), iu(n, 1.5f));
+        cov_capsule(c, n, iu(n, knob[i] - 0.2f), iu(n, y), iu(n, knob[i] + 0.2f), iu(n, y), iu(n, 1.1f));
+    }
+}
+
+static void icon_transfer(float *c, int n, int kind)
+{
+    (void)kind;
+    cov_capsule(c, n, iu(n, 11), iu(n, 23), iu(n, 11), iu(n, 10), iu(n, 1.15f));
+    cov_capsule(c, n, iu(n, 11), iu(n, 8), iu(n, 7), iu(n, 13), iu(n, 1.15f));
+    cov_capsule(c, n, iu(n, 11), iu(n, 8), iu(n, 15), iu(n, 13), iu(n, 1.15f));
+    cov_capsule(c, n, iu(n, 21), iu(n, 9), iu(n, 21), iu(n, 22), iu(n, 1.15f));
+    cov_capsule(c, n, iu(n, 21), iu(n, 24), iu(n, 17), iu(n, 19), iu(n, 1.15f));
+    cov_capsule(c, n, iu(n, 21), iu(n, 24), iu(n, 25), iu(n, 19), iu(n, 1.15f));
+}
+
+static void icon_window(float *c, int n, int kind)
+{
+    if (kind == CHROME_MIN) {
+        cov_capsule(c, n, iu(n, 8), iu(n, 16), iu(n, 24), iu(n, 16), iu(n, 1.35f));
+        return;
+    }
+    if (kind == CHROME_MAX) {
+        cov_rrect(c, n, iu(n, 8), iu(n, 8), iu(n, 16), iu(n, 16), iu(n, 2.2f), iu(n, 1.45f));
+        return;
+    }
+    cov_capsule(c, n, iu(n, 9), iu(n, 9), iu(n, 23), iu(n, 23), iu(n, 1.35f));
+    cov_capsule(c, n, iu(n, 23), iu(n, 9), iu(n, 9), iu(n, 23), iu(n, 1.35f));
+}
+
+static void icon_ready(float *c, int n, int kind)
+{
+    if (kind == 0) {
+        cov_ring(c, n, iu(n, 16), iu(n, 22), iu(n, 1.5f), iu(n, 3));
+        cov_arc(c, n, iu(n, 16), iu(n, 22), iu(n, 6), iu(n, 1.6f), -2.7f, -0.45f);
+        cov_arc(c, n, iu(n, 16), iu(n, 22), iu(n, 10), iu(n, 1.6f), -2.7f, -0.45f);
+        cov_arc(c, n, iu(n, 16), iu(n, 22), iu(n, 14), iu(n, 1.6f), -2.5f, -0.65f);
+        return;
+    }
+    if (kind == 1) {
+        cov_rrect(c, n, iu(n, 10), iu(n, 5), iu(n, 12), iu(n, 20), iu(n, 2), iu(n, 1.5f));
+        cov_capsule(c, n, iu(n, 14), iu(n, 21), iu(n, 18), iu(n, 21), iu(n, 0.8f));
+        return;
+    }
+    if (kind == 2) {
+        cov_rrect(c, n, iu(n, 11), iu(n, 5), iu(n, 10), iu(n, 20), iu(n, 4), iu(n, 1.5f));
+        cov_capsule(c, n, iu(n, 16), iu(n, 8), iu(n, 16), iu(n, 14), iu(n, 0.75f));
+        return;
+    }
+    cov_capsule(c, n, iu(n, 8), iu(n, 13), iu(n, 8), iu(n, 19), iu(n, 1.6f));
+    cov_capsule(c, n, iu(n, 8), iu(n, 13), iu(n, 14), iu(n, 10), iu(n, 1.15f));
+    cov_capsule(c, n, iu(n, 8), iu(n, 19), iu(n, 14), iu(n, 22), iu(n, 1.15f));
+    cov_capsule(c, n, iu(n, 14), iu(n, 10), iu(n, 14), iu(n, 22), iu(n, 1.15f));
+    cov_arc(c, n, iu(n, 14), iu(n, 16), iu(n, 5), iu(n, 1.4f), -1.1f, 1.1f);
+    cov_arc(c, n, iu(n, 14), iu(n, 16), iu(n, 8), iu(n, 1.4f), -0.9f, 0.9f);
+}
+
+static void icon_action(float *c, int n, int kind)
+{
+    switch (kind) {
+    case 0:
+        cov_capsule(c, n, iu(n, 6), iu(n, 16), iu(n, 16), iu(n, 7), iu(n, 1.2f));
+        cov_capsule(c, n, iu(n, 16), iu(n, 7), iu(n, 26), iu(n, 16), iu(n, 1.2f));
+        cov_capsule(c, n, iu(n, 10), iu(n, 16), iu(n, 10), iu(n, 25), iu(n, 1.15f));
+        cov_capsule(c, n, iu(n, 22), iu(n, 16), iu(n, 22), iu(n, 25), iu(n, 1.15f));
+        cov_capsule(c, n, iu(n, 10), iu(n, 25), iu(n, 22), iu(n, 25), iu(n, 1.15f));
+        break;
+    case 1:
+        cov_rrect(c, n, iu(n, 5), iu(n, 5), iu(n, 9), iu(n, 9), iu(n, 1.5f), iu(n, 1.3f));
+        cov_rrect(c, n, iu(n, 18), iu(n, 5), iu(n, 9), iu(n, 9), iu(n, 1.5f), iu(n, 1.3f));
+        cov_rrect(c, n, iu(n, 5), iu(n, 18), iu(n, 9), iu(n, 9), iu(n, 1.5f), iu(n, 1.3f));
+        cov_rrect(c, n, iu(n, 18), iu(n, 18), iu(n, 9), iu(n, 9), iu(n, 1.5f), iu(n, 1.3f));
+        break;
+    case 2:
+        cov_capsule(c, n, iu(n, 6), iu(n, 8), iu(n, 26), iu(n, 8), iu(n, 1.15f));
+        cov_capsule(c, n, iu(n, 6), iu(n, 16), iu(n, 26), iu(n, 16), iu(n, 1.15f));
+        cov_capsule(c, n, iu(n, 6), iu(n, 24), iu(n, 26), iu(n, 24), iu(n, 1.15f));
+        break;
+    case 3:
+        cov_capsule(c, n, iu(n, 16), iu(n, 4), iu(n, 16), iu(n, 6), iu(n, 1));
+        cov_capsule(c, n, iu(n, 8), iu(n, 10), iu(n, 24), iu(n, 10), iu(n, 1.1f));
+        cov_capsule(c, n, iu(n, 9), iu(n, 10), iu(n, 9), iu(n, 20), iu(n, 1.1f));
+        cov_capsule(c, n, iu(n, 23), iu(n, 10), iu(n, 23), iu(n, 20), iu(n, 1.1f));
+        cov_capsule(c, n, iu(n, 9), iu(n, 20), iu(n, 23), iu(n, 20), iu(n, 1.1f));
+        cov_capsule(c, n, iu(n, 13), iu(n, 20), iu(n, 13), iu(n, 23), iu(n, 1));
+        cov_capsule(c, n, iu(n, 19), iu(n, 20), iu(n, 19), iu(n, 23), iu(n, 1));
+        break;
+    case 4:
+        cov_capsule(c, n, iu(n, 6), iu(n, 12), iu(n, 6), iu(n, 6), iu(n, 1.15f));
+        cov_capsule(c, n, iu(n, 6), iu(n, 6), iu(n, 12), iu(n, 6), iu(n, 1.15f));
+        cov_capsule(c, n, iu(n, 20), iu(n, 6), iu(n, 26), iu(n, 6), iu(n, 1.15f));
+        cov_capsule(c, n, iu(n, 26), iu(n, 6), iu(n, 26), iu(n, 12), iu(n, 1.15f));
+        cov_capsule(c, n, iu(n, 6), iu(n, 20), iu(n, 6), iu(n, 26), iu(n, 1.15f));
+        cov_capsule(c, n, iu(n, 6), iu(n, 26), iu(n, 12), iu(n, 26), iu(n, 1.15f));
+        cov_capsule(c, n, iu(n, 20), iu(n, 26), iu(n, 26), iu(n, 26), iu(n, 1.15f));
+        cov_capsule(c, n, iu(n, 26), iu(n, 20), iu(n, 26), iu(n, 26), iu(n, 1.15f));
+        break;
+    case 5:
+    case 6:
+        cov_capsule(c, n, iu(n, 5), iu(n, 13), iu(n, 5), iu(n, 19), iu(n, 1.5f));
+        cov_capsule(c, n, iu(n, 5), iu(n, 13), iu(n, 12), iu(n, 9), iu(n, 1.15f));
+        cov_capsule(c, n, iu(n, 5), iu(n, 19), iu(n, 12), iu(n, 23), iu(n, 1.15f));
+        cov_capsule(c, n, iu(n, 12), iu(n, 9), iu(n, 12), iu(n, 23), iu(n, 1.15f));
+        cov_arc(c, n, iu(n, 12), iu(n, 16), iu(n, 6), iu(n, 1.3f), -1, 1);
+        if (kind == 5) {
+            cov_capsule(c, n, iu(n, 20), iu(n, 16), iu(n, 26), iu(n, 16), iu(n, 1.1f));
+            cov_capsule(c, n, iu(n, 23), iu(n, 13), iu(n, 23), iu(n, 19), iu(n, 1.1f));
+        }
+        break;
+    default:
+        cov_capsule(c, n, iu(n, 16), iu(n, 24), iu(n, 16), iu(n, 8), iu(n, 1.2f));
+        cov_capsule(c, n, iu(n, 16), iu(n, 7), iu(n, 11), iu(n, 13), iu(n, 1.2f));
+        cov_capsule(c, n, iu(n, 16), iu(n, 7), iu(n, 21), iu(n, 13), iu(n, 1.2f));
+        break;
+    }
 }
 
 static void draw_chrome_glyph(SDL_Renderer *renderer, int kind, SDL_Rect box, int thick, bool on_ink)
 {
-    int cx = box.x + box.w / 2, cy = box.y + box.h / 2, arm = 5, i;
-
-    if (arm < thick)
-        arm = thick;
-    SDL_SetRenderDrawColor(renderer, on_ink ? 255 : 17, on_ink ? 255 : 17, on_ink ? 255 : 17, 255);
-    if (kind == CHROME_MIN) {
-        fill_px(renderer, cx - arm, cy - thick / 2, arm * 2, thick);
-        return;
-    }
-    if (kind == CHROME_MAX) {
-        fill_px(renderer, cx - arm, cy - arm, arm * 2, thick);
-        fill_px(renderer, cx - arm, cy + arm - thick, arm * 2, thick);
-        fill_px(renderer, cx - arm, cy - arm, thick, arm * 2);
-        fill_px(renderer, cx + arm - thick, cy - arm, thick, arm * 2);
-        return;
-    }
-    for (i = -arm; i <= arm; i++) {
-        fill_px(renderer, cx + i, cy + i - thick / 2, thick, thick);
-        fill_px(renderer, cx + i, cy - i - thick / 2, thick, thick);
-    }
+    SDL_Rect glyph = {box.x + box.w / 2 - 7, box.y + box.h / 2 - 7, 14, 14};
+    (void)thick;
+    paint_icon(renderer, glyph, on_ink ? color_on_ink : color_text, icon_window, kind);
 }
 
 
 static void stroke(SDL_Renderer *renderer, int x1, int y1, int x2, int y2);
 
-static void ring(SDL_Renderer *renderer, int cx, int cy, int outer, int inner, SDL_Color ink,
-                 SDL_Color hole)
-{
-    rounded(renderer, (SDL_Rect){cx - outer, cy - outer, outer * 2, outer * 2}, outer, ink);
-    rounded(renderer, (SDL_Rect){cx - inner, cy - inner, inner * 2, inner * 2}, inner, hole);
-}
-
 /* 0 Settings (gear), 1 Controls (sliders), 2 Transfers (up and down arrows). */
 static void bar_toggle(ph_window *w, SDL_Rect box, int kind, bool on, bool hot)
 {
     SDL_Renderer *r = w->renderer;
-    SDL_Color back = on || hot ? color_stage_raised : color_stage;
-    int cx = box.x + box.w / 2, cy = box.y + box.h / 2;
-
     if (on || hot)
-        rounded(r, box, 6, back);
-    SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
-    if (kind == 0) {
-        fill_px(r, cx - 1, cy - 8, 3, 16);
-        fill_px(r, cx - 8, cy - 1, 16, 3);
-        stroke(r, cx - 6, cy - 6, cx + 5, cy + 5);
-        stroke(r, cx + 5, cy - 6, cx - 6, cy + 5);
-        ring(r, cx, cy, 6, 2, color_on_ink, back);
-    } else if (kind == 1) {
-        static const int knob[3] = {-3, 3, -1};
-        for (int i = 0; i < 3; i++) {
-            int y = cy - 5 + i * 5;
-            SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
-            fill_px(r, cx - 7, y, 15, 1);
-            rounded(r, (SDL_Rect){cx + knob[i] * 2 - 2, y - 2, 5, 5}, 2, color_on_ink);
-        }
-    } else {
-        stroke(r, cx - 4, cy - 6, cx - 4, cy + 6);
-        stroke(r, cx - 7, cy - 3, cx - 4, cy - 6);
-        stroke(r, cx - 1, cy - 3, cx - 4, cy - 6);
-        stroke(r, cx + 3, cy - 6, cx + 3, cy + 6);
-        stroke(r, cx, cy + 3, cx + 3, cy + 6);
-        stroke(r, cx + 6, cy + 3, cx + 3, cy + 6);
+        rounded(r, box, 6, on || hot ? color_stage_raised : color_stage);
+    {
+        SDL_Rect glyph = {box.x + (box.w - 16) / 2, box.y + (box.h - 16) / 2, 16, 16};
+        void (*build)(float *, int, int) = kind == 0 ? icon_gear : kind == 1 ? icon_sliders : icon_transfer;
+        paint_icon(r, glyph, color_on_ink, build, 0);
     }
 }
 
@@ -1395,18 +1635,26 @@ static void draw_bar(ph_window *w, int width, int height)
     paint(w->renderer, (SDL_Rect){0, 0, width, PH_WINDOW_BAR_PX}, live ? 11 : 255, live ? 12 : 255,
           live ? 13 : 255, 255);
     if (live && w->mark_on_dark) {
-        SDL_Rect mark = {10, 7, 18, 18};
+        SDL_Rect mark = {8, (PH_WINDOW_BAR_PX - 18) / 2, 18, 18};
         SDL_RenderCopy(w->renderer, w->mark_on_dark, NULL, &mark);
+    } else if (!live && w->lockup) {
+        int lh = 22;
+        int lw = ph_brand_lockup_w * lh / ph_brand_lockup_h;
+        SDL_Rect mark = {8, (PH_WINDOW_BAR_PX - lh) / 2, lw, lh};
+        SDL_RenderCopy(w->renderer, w->lockup, NULL, &mark);
     } else if (w->mark) {
-        SDL_Rect mark = {10, 7, 18, 18};
+        SDL_Rect mark = {8, (PH_WINDOW_BAR_PX - 18) / 2, 18, 18};
         SDL_RenderCopy(w->renderer, w->mark, NULL, &mark);
     }
     if (live) {
         SDL_Rect rail = rail_toggle_box(width);
         SDL_Rect transfers = transfers_toggle_box(width);
         SDL_Rect gear = live_settings_box(width);
-        status_dot(w->renderer, 34, 12, 61, 214, 140);
-        draw_text(w->renderer, "iPhone", 48, 6, 80, 1, color_on_ink);
+        const char *who = w->phone_label[0] ? w->phone_label : "Connected";
+        int name_x = 36;
+        int name_y = (PH_WINDOW_BAR_PX - ph_text_line_height(PH_TEXT(13, PH_FONT_MEDIUM))) / 2;
+        status_dot(w->renderer, 30, (PH_WINDOW_BAR_PX - 8) / 2, 61, 214, 140);
+        draw_text(w->renderer, who, name_x, name_y, 160, PH_TEXT(13, PH_FONT_MEDIUM), color_on_ink);
         bar_toggle(w, rail, 1, w->rail_open, w->chrome_hover == CHROME_RAIL);
         bar_toggle(w, transfers, 2, w->transfers_open, w->chrome_hover == CHROME_TRANSFERS);
         bar_toggle(w, gear, 0, w->settings_visible, w->chrome_hover == CHROME_SETTINGS);
@@ -1424,7 +1672,6 @@ static void draw_bar(ph_window *w, int width, int height)
                       color_stage_muted);
         }
     } else {
-        draw_text(w->renderer, "Porthole", 35, 6, 100, 1, color_text);
         SDL_Rect buttons[3];
         toolbar_buttons(width, buttons);
         if (w->chrome_hover == CHROME_HELP)
@@ -1491,6 +1738,8 @@ static void flip_panel(ph_window *w, bool *flag, int width_px)
 ph_window *ph_window_create(const char *title)
 {
     ph_window *w = calloc(1, sizeof *w);
+    if (w)
+        w->code_open = true;
 
     if (!w)
         return NULL;
@@ -1720,6 +1969,26 @@ bool ph_window_settings_target(ph_window *w, int row, int side, int *x, int *y)
         }
     }
     return false;
+}
+
+void ph_window_set_phone_name(ph_window *w, const char *name)
+{
+    if (!w)
+        return;
+    if (!name)
+        name = "";
+    if (!strcmp(w->phone_label, name))
+        return;
+    snprintf(w->phone_label, sizeof w->phone_label, "%s", name);
+    ph_window_redraw(w);
+}
+
+void ph_window_set_code_open(ph_window *w, bool open)
+{
+    if (!w || w->code_open == open)
+        return;
+    w->code_open = open;
+    ph_window_redraw(w);
 }
 
 void ph_window_set_pc_name(ph_window *w, const char *name)
@@ -2150,65 +2419,22 @@ void ph_window_tick(ph_window *w)
 
 static void stroke(SDL_Renderer *renderer, int x1, int y1, int x2, int y2)
 {
-    SDL_RenderDrawLine(renderer, x1, y1, x2, y2);
-    SDL_RenderDrawLine(renderer, x1 + 1, y1, x2 + 1, y2);
+    float sx, sy;
+    SDL_RenderGetScale(renderer, &sx, &sy);
+    if (sx < 0.5f)
+        sx = 1;
+    if (sy < 0.5f)
+        sy = 1;
+    SDL_RenderSetScale(renderer, 1, 1);
+    SDL_RenderDrawLine(renderer, (int)lroundf(x1 * sx), (int)lroundf(y1 * sy),
+                       (int)lroundf(x2 * sx), (int)lroundf(y2 * sy));
+    SDL_RenderSetScale(renderer, sx, sy);
 }
 
 static void draw_action_icon(SDL_Renderer *renderer, int index, SDL_Rect box)
 {
-    int x = box.x + (box.w - 17) / 2, y = box.y + (box.h - 17) / 2;
-
-    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-    switch (index) {
-    case 0: /* Home */
-        stroke(renderer, x, y + 8, x + 8, y);
-        stroke(renderer, x + 8, y, x + 16, y + 8);
-        stroke(renderer, x + 3, y + 8, x + 3, y + 16);
-        stroke(renderer, x + 13, y + 8, x + 13, y + 16);
-        stroke(renderer, x + 3, y + 16, x + 13, y + 16);
-        break;
-    case 1: /* App Switcher */
-        for (int i = 0; i < 4; i++)
-            SDL_RenderDrawRect(renderer, &(SDL_Rect){x + (i % 2) * 9, y + (i / 2) * 9, 7, 7});
-        break;
-    case 2: /* Control Center */
-        stroke(renderer, x, y + 3, x + 16, y + 3);
-        stroke(renderer, x, y + 8, x + 16, y + 8);
-        stroke(renderer, x, y + 13, x + 16, y + 13);
-        break;
-    case 3: /* Notifications */
-        stroke(renderer, x + 8, y, x + 8, y + 2);
-        stroke(renderer, x + 3, y + 7, x + 13, y + 7);
-        stroke(renderer, x + 4, y + 4, x + 4, y + 11);
-        stroke(renderer, x + 12, y + 4, x + 12, y + 11);
-        stroke(renderer, x + 4, y + 11, x + 12, y + 11);
-        break;
-    case 4: /* Screenshot */
-        stroke(renderer, x, y + 5, x, y);
-        stroke(renderer, x, y, x + 5, y);
-        stroke(renderer, x + 11, y, x + 16, y);
-        stroke(renderer, x + 16, y, x + 16, y + 5);
-        stroke(renderer, x, y + 11, x, y + 16);
-        stroke(renderer, x, y + 16, x + 5, y + 16);
-        stroke(renderer, x + 11, y + 16, x + 16, y + 16);
-        stroke(renderer, x + 16, y + 11, x + 16, y + 16);
-        break;
-    case 5: /* Volume up */
-    case 6: /* Volume down */
-        stroke(renderer, x, y + 6, x + 4, y + 6);
-        stroke(renderer, x + 4, y + 6, x + 9, y + 2);
-        stroke(renderer, x + 4, y + 10, x + 9, y + 14);
-        stroke(renderer, x, y + 6, x, y + 10);
-        stroke(renderer, x, y + 10, x + 4, y + 10);
-        stroke(renderer, x + 12, y + 8, x + 16, y + 8);
-        if (index == 5) stroke(renderer, x + 14, y + 6, x + 14, y + 10);
-        break;
-    default: /* Feed scrolling */
-        stroke(renderer, x + 8, y + 14, x + 8, y + 2);
-        stroke(renderer, x + 4, y + 6, x + 8, y + 2);
-        stroke(renderer, x + 12, y + 6, x + 8, y + 2);
-        break;
-    }
+    SDL_Rect glyph = {box.x + (box.w - 18) / 2, box.y + (box.h - 18) / 2, 18, 18};
+    paint_icon(renderer, glyph, color_on_ink, icon_action, index);
 }
 
 /* One line, cut with "..." to fit. */
@@ -2256,12 +2482,57 @@ static SDL_Color kind_color(const char *name)
     return (SDL_Color){74, 78, 85, 255};
 }
 
-/* A page with its type colour along the bottom. */
+static bool image_name(const char *name)
+{
+    const char *dot = name ? strrchr(name, '.') : NULL;
+    char ext[8] = "";
+    size_t i;
+
+    if (!dot)
+        return false;
+    for (i = 0; i + 1 < sizeof ext && dot[1 + i]; i++)
+        ext[i] = (char)((dot[1 + i] >= 'A' && dot[1 + i] <= 'Z') ? dot[1 + i] + 32 : dot[1 + i]);
+    ext[i] = 0;
+    return !strcmp(ext, "jpg") || !strcmp(ext, "jpeg") || !strcmp(ext, "png")
+           || !strcmp(ext, "heic") || !strcmp(ext, "gif") || !strcmp(ext, "webp")
+           || !strcmp(ext, "mov") || !strcmp(ext, "mp4") || !strcmp(ext, "m4v");
+}
+
+static void type_tag(const char *name, char *out, size_t len)
+{
+    const char *dot = name ? strrchr(name, '.') : NULL;
+    size_t i = 0;
+
+    if (!out || len < 2)
+        return;
+    if (!dot || !dot[1]) {
+        snprintf(out, len, "FILE");
+        return;
+    }
+    for (const char *p = dot + 1; *p && i + 1 < len && i < 4; p++, i++)
+        out[i] = (char)((*p >= 'a' && *p <= 'z') ? *p - 32 : *p);
+    out[i] = 0;
+}
+
+/* A page with its type on it. Pictures are a filled mark; other files name the type. */
 static void file_tile(SDL_Renderer *renderer, int x, int y, const char *name)
 {
+    char tag[8];
+    SDL_Color ink = kind_color(name);
+
+    type_tag(name, tag, sizeof tag);
+    if (image_name(name)) {
+        rounded(renderer, (SDL_Rect){x, y, 26, 32}, 4, ink);
+        return;
+    }
     rounded(renderer, (SDL_Rect){x, y, 26, 32}, 4, (SDL_Color){213, 216, 221, 255});
     rounded(renderer, (SDL_Rect){x + 1, y + 1, 24, 30}, 3, color_on_ink);
-    rounded(renderer, (SDL_Rect){x - 2, y + 19, 18, 8}, 2, kind_color(name));
+    rounded(renderer, (SDL_Rect){x - 2, y + 18, 22, 12}, 2, ink);
+    {
+        int tw = ph_text_width(tag, PH_TEXT(8, PH_FONT_SEMIBOLD));
+        draw_text(renderer, tag, x - 2 + (22 - tw) / 2, y + 19, 22, PH_TEXT(8, PH_FONT_SEMIBOLD),
+                  color_on_ink);
+    }
 }
 
 typedef struct transfer_row {
@@ -2362,26 +2633,9 @@ static void draw_transfers(ph_window *w, int width, int height)
     paint(r, (SDL_Rect){t.x, PH_WINDOW_BAR_PX, TRANSFERS_W, height - PH_WINDOW_BAR_PX}, 255, 255, 255, 255);
     paint(r, (SDL_Rect){t.x, PH_WINDOW_BAR_PX, 1, height - PH_WINDOW_BAR_PX}, 226, 228, 232, 255);
     draw_text(r, "Transfers", t.x + 16, PH_WINDOW_BAR_PX + 14, inner, 2, color_text);
+    w->transfer_tab = 0;
 
-    rounded(r, (SDL_Rect){t.x + 16, t.files.y - 3, inner, t.files.h + 6}, 9, color_ground);
-    {
-        SDL_Rect on = w->transfer_tab ? t.clip : t.files;
-        rounded(r, on, 7, (SDL_Color){213, 216, 221, 255});
-        rounded(r, (SDL_Rect){on.x, on.y, on.w, on.h - 1}, 7, color_on_ink);
-        draw_text(r, "Files", t.files.x + (t.files.w - ph_text_width("Files", 1)) / 2, t.files.y + 5,
-                  t.files.w, 1, w->transfer_tab ? color_muted : color_text);
-        draw_text(r, "Clipboard", t.clip.x + (t.clip.w - ph_text_width("Clipboard", 1)) / 2,
-                  t.clip.y + 5, t.clip.w, 1, w->transfer_tab ? color_text : color_muted);
-    }
-
-    if (w->transfer_tab) {
-        draw_text(r, "Copy text or a picture on either side while Porthole is open on the iPhone, "
-                     "then paste on the other with Ctrl+V or Paste.",
-                  t.x + 16, t.card.y, inner, 1, color_muted);
-        return;
-    }
-
-    y = t.card.y;
+    y = t.files.y;
     if (w->transfer_active[0]) {
         const char *name = !strncmp(w->transfer_active, "Sending ", 8) ? w->transfer_active + 8
                                                                        : w->transfer_active;
@@ -2422,16 +2676,36 @@ static void draw_transfers(ph_window *w, int width, int height)
                          "Settings, or drop files here to send them to the iPhone.",
                       t.x + 16, y, inner, 1, color_muted);
     } else {
-        draw_text(r, "RECENT", t.x + 16, y, inner, 1, color_muted);
-        y += 24;
-        for (int i = w->transfer_count - 1; i >= 0 && y + 44 <= list_end; i--) {
-            transfer_row row = read_transfer(w->transfer_lines[i]);
-            file_tile(r, t.x + 18, y + 4, row.title);
-            draw_line_fit(r, row.title, t.x + 56, y + 2, inner - 44, 1, color_text);
-            draw_text(r, row.sub, t.x + 56, y + 21, inner - 44, 1, row.sub_color);
-            y += 48;
-            if (i > 0)
-                paint(r, (SDL_Rect){t.x + 56, y - 4, inner - 40, 1}, 226, 228, 232, 255);
+        int received[6], sent[6], nr = 0, ns = 0;
+        const int *groups[2];
+        int counts[2];
+        const char *heads[2] = {"RECEIVED", "SENT"};
+
+        for (int i = w->transfer_count - 1; i >= 0; i--) {
+            if (!strncmp(w->transfer_lines[i], "Received ", 9))
+                received[nr++] = i;
+            else
+                sent[ns++] = i;
+        }
+        groups[0] = received;
+        groups[1] = sent;
+        counts[0] = nr;
+        counts[1] = ns;
+        for (int g = 0; g < 2; g++) {
+            if (!counts[g] || y + 44 > list_end)
+                continue;
+            draw_text(r, heads[g], t.x + 16, y, inner, 1, color_muted);
+            y += 22;
+            for (int n = 0; n < counts[g] && y + 44 <= list_end; n++) {
+                transfer_row row = read_transfer(w->transfer_lines[groups[g][n]]);
+                file_tile(r, t.x + 18, y + 4, row.title);
+                draw_line_fit(r, row.title, t.x + 56, y + 2, inner - 44, 1, color_text);
+                draw_text(r, row.sub, t.x + 56, y + 21, inner - 44, 1, row.sub_color);
+                y += 48;
+                if (n + 1 < counts[g])
+                    paint(r, (SDL_Rect){t.x + 56, y - 4, inner - 40, 1}, 226, 228, 232, 255);
+            }
+            y += 8;
         }
     }
 

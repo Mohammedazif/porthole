@@ -67,6 +67,12 @@ bool ph_origin_ask(ph_origin *origin, uint64_t hash, double aspect, const uint8_
 /* The name this PC is listed under in the iPhone app (the computer's host name). */
 void ph_origin_pc_name(char *out, size_t len);
 
+/* False once a phone has used the pairing code. The digits stay accepted for that
+ * phone and stay off the screen until New code. */
+bool ph_origin_code_open(ph_origin *origin);
+/* The name the phone sent for itself. Empty until it does. */
+void ph_origin_phone_name(ph_origin *origin, char *out, size_t len);
+
 /* IPv4 address of the phone that last gave the right code, kept after it disconnects. */
 bool ph_origin_peer(ph_origin *origin, char *address, size_t len);
 

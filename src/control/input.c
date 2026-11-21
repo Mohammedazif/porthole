@@ -86,7 +86,17 @@ static void shortcut_down(ph_input *input, uint8_t usage)
     }
 }
 
+static void apply_key(ph_input *input, uint8_t usage, bool down, bool repeat, uint8_t modifiers,
+                       bool swap);
+
 void ph_input_key(ph_input *input, uint8_t usage, bool down, bool repeat, uint8_t modifiers)
+{
+    bool swap = !input->swap_set || input->swap_ctrl_cmd;
+    apply_key(input, usage, down, repeat, modifiers, swap);
+}
+
+static void apply_key(ph_input *input, uint8_t usage, bool down, bool repeat, uint8_t modifiers,
+                       bool swap)
 {
     bool alt = (modifiers & PH_HID_MOD_LALT) != 0;
     bool changed;
@@ -101,7 +111,7 @@ void ph_input_key(ph_input *input, uint8_t usage, bool down, bool repeat, uint8_
         if (down) {
             if (ph_keyboard_release_all(&input->keys))
                 send_keys(input);
-        } else if (ph_keyboard_set_modifiers(&input->keys, modifiers, true)) {
+        } else if (ph_keyboard_set_modifiers(&input->keys, modifiers, swap)) {
             send_keys(input);
         }
         return;
@@ -115,7 +125,7 @@ void ph_input_key(ph_input *input, uint8_t usage, bool down, bool repeat, uint8_
             send_buttons(input);
         }
         if (ph_keyboard_set_modifiers(&input->keys,
-                                       alt ? 0 : (uint8_t)(modifiers & ~PH_HID_MOD_LALT), true))
+                                       alt ? 0 : (uint8_t)(modifiers & ~PH_HID_MOD_LALT), swap))
             send_keys(input);
         return; /* still local when Alt was released before this key */
     }
@@ -129,10 +139,10 @@ void ph_input_key(ph_input *input, uint8_t usage, bool down, bool repeat, uint8_
         return;
     }
 
-    changed = ph_keyboard_apply(&input->keys, usage, down, true);
+    changed = ph_keyboard_apply(&input->keys, usage, down, swap);
     /* Key releases must reach the phone even while Alt is held. */
     changed = ph_keyboard_set_modifiers(&input->keys,
-                                        alt ? 0 : (uint8_t)(modifiers & ~PH_HID_MOD_LALT), true)
+                                        alt ? 0 : (uint8_t)(modifiers & ~PH_HID_MOD_LALT), swap)
               || changed;
     if (changed)
         send_keys(input);
@@ -197,6 +207,6 @@ void ph_input_set_enabled(ph_input *input, bool enabled)
 
 void ph_input_type(ph_input *input, uint8_t usage, uint8_t modifiers)
 {
-    ph_input_key(input, usage, true, false, modifiers);
-    ph_input_key(input, usage, false, false, 0);
+    apply_key(input, usage, true, false, modifiers, false);
+    apply_key(input, usage, false, false, 0, false);
 }

@@ -19,6 +19,8 @@ typedef struct ph_input {
     bool local[256];
     uint8_t buttons;
     bool enabled;
+    bool swap_ctrl_cmd; /* PC Ctrl becomes the iPhone Command key */
+    bool swap_set;
     uint16_t consumer_keys[PH_INPUT_CONSUMER_KEYS];
     uint8_t consumer_count;
 } ph_input;

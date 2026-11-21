@@ -74,6 +74,10 @@ bool ph_window_settings_target(ph_window *w, int row, int side, int *x, int *y);
 
 /* The name the iPhone lists this PC under. */
 void ph_window_set_pc_name(ph_window *w, const char *name);
+/* The connected phone's own name. Empty shows "Connected". */
+void ph_window_set_phone_name(ph_window *w, const char *name);
+/* False after the pairing code has been used once. The digits are hidden. */
+void ph_window_set_code_open(ph_window *w, bool open);
 
 typedef enum ph_window_target {
     PH_TARGET_COPY, PH_TARGET_NEW_CODE, PH_TARGET_SETUP, PH_TARGET_HELP, PH_TARGET_STATS,

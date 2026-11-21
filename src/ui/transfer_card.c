@@ -369,7 +369,7 @@ static void paint(ph_transfer_card *c, Uint64 now)
 {
     SDL_Color white = {255, 255, 255, 255};
     SDL_Color gray = {174, 174, 178, 255};
-    char sub[96];
+    char sub[256];
     char frac[32];
     int y, scale;
 
@@ -421,24 +421,30 @@ static void paint(ph_transfer_card *c, Uint64 now)
     y = 78;
     if (c->name[0]) {
         char shown[180];
+        char heading[64];
         int text_x = PAD + 56;
         int text_w = CARD_W - text_x - PAD;
+        const char *title = c->name;
         rgba(c->renderer, 246, 246, 248, 255);
         fill_round(c->renderer, PAD, y, 40, 50, 6);
         if (scale > 0)
             draw_check(c->renderer, PAD + 32, y + 42, scale > 36 ? 36 : scale);
-        fit_name(shown, sizeof shown, c->name, text_w, 2);
+        if (c->received && c->total > 1) {
+            snprintf(heading, sizeof heading, "%d files received from iPhone", c->total);
+            title = heading;
+        }
+        fit_name(shown, sizeof shown, title, text_w, 2);
         y = ph_ui_draw_text(c->renderer, shown, text_x, y + 14, text_w, 2, white);
         y += 2;
     }
     if (!c->received)
         snprintf(sub, sizeof sub, "Receiving from iPhone");
-    else if (c->place[0] && c->total > 1)
-        snprintf(sub, sizeof sub, "Saved %d items in %s", c->total, c->place);
+    else if (c->total > 1 && c->name[0] && c->place[0])
+        snprintf(sub, sizeof sub, "%s and %d more, in %s", c->name, c->total - 1, c->place);
+    else if (c->total > 1 && c->name[0])
+        snprintf(sub, sizeof sub, "%s and %d more", c->name, c->total - 1);
     else if (c->place[0])
         snprintf(sub, sizeof sub, "Saved in %s", c->place);
-    else if (c->total > 1)
-        snprintf(sub, sizeof sub, "Received %d items from iPhone", c->total);
     else
         snprintf(sub, sizeof sub, "Received from iPhone");
     y = ph_ui_draw_text(c->renderer, sub, c->name[0] ? PAD + 56 : PAD, y, CARD_W - PAD * 2 - (c->name[0] ? 56 : 0),
@@ -459,7 +465,7 @@ static void paint(ph_transfer_card *c, Uint64 now)
     }
     if (c->received) {
         draw_button(c->renderer, c->open_r, "Open", c->hot_open);
-        draw_button(c->renderer, c->show_r, "Show", c->hot_show);
+        draw_button(c->renderer, c->show_r, "Show in folder", c->hot_show);
     }
     SDL_RenderPresent(c->renderer);
 }

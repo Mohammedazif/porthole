@@ -70,6 +70,8 @@ struct ph_origin {
     unsigned long long push_size, push_done;
     char peer[64]; /* address of the connection being served */
     char known[64]; /* last phone that gave the right code */
+    bool code_open; /* false after that code has been used once */
+    char phone_name[64];
     bool clip_ready;
     bool ask_clip;     /* send CLIP? once the phone has enabled clipboard sync */
     bool clip_wait;    /* Ctrl+C is waiting for that answer */
@@ -361,6 +363,24 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
     if (strcmp(line, "FILES") == 0) {
         pthread_mutex_lock(&o->lock);
         o->files_ok = true;
+        pthread_mutex_unlock(&o->lock);
+        *consumed = true;
+        return true;
+    }
+    if (strncmp(line, "NAME ", 5) == 0) {
+        const char *raw = line + 5;
+        char clean[64];
+        size_t n = 0;
+        while (*raw == ' ')
+            raw++;
+        for (; raw[n] && n + 1 < sizeof clean && raw[n] != '\r'; n++)
+            clean[n] = raw[n] < 32 ? ' ' : raw[n];
+        while (n > 0 && clean[n - 1] == ' ')
+            n--;
+        clean[n] = 0;
+        pthread_mutex_lock(&o->lock);
+        if (clean[0])
+            snprintf(o->phone_name, sizeof o->phone_name, "%s", clean);
         pthread_mutex_unlock(&o->lock);
         *consumed = true;
         return true;
@@ -761,8 +781,10 @@ static void serve_client(ph_origin *o, int fd)
         goto done;
     pthread_mutex_lock(&o->lock);
     o->have_client = true;
+    o->code_open = false;
     snprintf(o->known, sizeof o->known, "%s", o->peer);
     pthread_mutex_unlock(&o->lock);
+    ph_config_write_line("pull-paired", "1");
     PH_LOGI("photo pull: iPhone connected");
     while (!o->stop) {
         uint64_t hash;
@@ -1144,6 +1166,10 @@ ph_origin *ph_origin_start(char *hint, size_t hint_len)
         ph_config_write_line("pull-token", token);
     }
     snprintf(o->token, sizeof o->token, "%s", token);
+    {
+        char paired[8] = "";
+        o->code_open = !(ph_config_read_line("pull-paired", paired, sizeof paired) && paired[0] == '1');
+    }
     fd = ph_sock_listen(PH_PULL_PORT, false, 4);
     if (fd < 0) {
         PH_LOGW("photo pull: port %d is unavailable", PH_PULL_PORT);
@@ -1189,12 +1215,14 @@ bool ph_origin_renew(ph_origin *o, char *hint, size_t hint_len)
     pthread_mutex_lock(&o->lock);
     snprintf(o->token, sizeof o->token, "%s", token);
     o->known[0] = 0;
+    o->code_open = true;
     client = o->client_fd;
     pthread_mutex_unlock(&o->lock);
     if (client >= 0)
         shutdown(client, SHUT_RDWR);
     lan_address(ip, sizeof ip);
     fill_hint(hint, hint_len, ip, token);
+    ph_config_write_line("pull-paired", "0");
     PH_LOGI("photo pull: new code %s", token);
     return true;
 }
@@ -1229,6 +1257,29 @@ void ph_origin_stop(ph_origin *o)
 void ph_origin_pc_name(char *out, size_t len)
 {
     service_name(out, len);
+}
+
+bool ph_origin_code_open(ph_origin *o)
+{
+    bool open;
+    if (!o)
+        return true;
+    pthread_mutex_lock(&o->lock);
+    open = o->code_open;
+    pthread_mutex_unlock(&o->lock);
+    return open;
+}
+
+void ph_origin_phone_name(ph_origin *o, char *out, size_t len)
+{
+    if (!out || !len)
+        return;
+    out[0] = 0;
+    if (!o)
+        return;
+    pthread_mutex_lock(&o->lock);
+    snprintf(out, len, "%s", o->phone_name);
+    pthread_mutex_unlock(&o->lock);
 }
 
 bool ph_origin_peer(ph_origin *o, char *address, size_t len)
