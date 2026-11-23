@@ -685,6 +685,34 @@ static int history_row_count(const ph_workspace *u, int limit)
     return count;
 }
 
+static void history_empty(ph_workspace *u, SDL_Rect rows, ph_control_icon icon,
+                          const char *heading, const char *hint)
+{
+    if (rows.h < 66)
+        return;
+    int x = rows.x + 12, y = rows.y;
+    rounded(u, (SDL_Rect){x, y + 17, 38, 38}, 9, u->selected_bg);
+    ph_icon_draw(u->renderer, icon, (SDL_Rect){x + 9, y + 26, 20, 20}, u->muted);
+    fitted_label(u, heading, x + 52, y + 15, rows.w - 76, 13, true, u->ink);
+    text(u, hint, x + 52, y + 37, rows.w - 76, 11, false, u->muted);
+}
+
+static SDL_Rect history_header(ph_workspace *u, const char *title, const char *subtitle,
+                               bool panel)
+{
+    SDL_Rect b = u->rect;
+    int pad = panel ? 12 : b.w < 600 ? 20 : 32;
+    b.x += pad;
+    b.w -= 2 * pad;
+    close_button(u, b.x + b.w - 28, b.y + (panel ? 9 : 24), PH_WORKSPACE_CLOSE);
+    text(u, title, b.x, b.y + (panel ? 12 : 28), b.w - 40, panel ? 18 : 27, true, u->ink);
+    if (panel)
+        fitted_label(u, subtitle, b.x, b.y + 40, b.w, 12, false, u->muted);
+    else
+        text(u, subtitle, b.x, b.y + 68, b.w, 12, false, u->muted);
+    return b;
+}
+
 static void draw_file_rows(ph_workspace *u, SDL_Rect b, bool full)
 {
     const char *filters[] = {"All transfers", "Sent", "Received"};
@@ -755,7 +783,7 @@ static void draw_file_rows(ph_workspace *u, SDL_Rect b, bool full)
         cy += 66;
     }
     SDL_RenderSetClipRect(u->renderer, NULL);
-    if (!any && clip.h >= 66) {
+    if (!any) {
         const char *heading = u->search[0] || (full && u->date_range) ? "No matching transfers"
                               : u->filter == 2 ? "No received transfers"
                               : u->filter == 1 ? "No sent transfers" : "No file transfers yet";
@@ -764,12 +792,7 @@ static void draw_file_rows(ph_workspace *u, SDL_Rect b, bool full)
                            : u->filter == 2 ? "Files received from your iPhone appear here."
                            : u->filter == 1 ? "Files sent to your iPhone appear here."
                            : "Sent and received files appear here.";
-        int left = b.x + 12;
-        rounded(u, (SDL_Rect){left, y + 17, 38, 38}, 9, u->selected_bg);
-        ph_icon_draw(u->renderer, u->filter == 2 ? PH_ICON_RECEIVE : PH_ICON_FILE,
-                     (SDL_Rect){left + 9, y + 26, 20, 20}, u->muted);
-        fitted_label(u, heading, left + 52, y + 15, b.w - 76, 13, true, u->ink);
-        fitted_label(u, hint, left + 52, y + 37, b.w - 76, 11, false, u->muted);
+        history_empty(u, clip, u->filter == 2 ? PH_ICON_RECEIVE : PH_ICON_FILE, heading, hint);
     }
     u->scroll_limit = SDL_max(cy + u->scroll - y - clip.h, 0);
 }
@@ -843,23 +866,19 @@ static void draw_file_detail(ph_workspace *u, SDL_Rect b)
 static void history_page(ph_workspace *u)
 {
     const char *dates[] = {"All time", "Today", "Last 7 days"};
-    SDL_Rect b = u->rect;
-    int pad = b.w < 600 ? 20 : 32;
-    text(u, "File history", b.x + pad, b.y + 28, b.w - 2 * pad - 40, 27, true, u->ink);
-    text(u, "All recorded transfers for this iPhone, including previous days.", b.x + pad, b.y + 68,
-         b.w - 2 * pad, 12, false, u->muted);
-    close_button(u, b.x + b.w - pad - 28, b.y + 24, PH_WORKSPACE_CLOSE);
-    search_box(u, (SDL_Rect){b.x + pad, b.y + 104, b.w - 2 * pad - 130, 36});
-    SDL_Rect date = {b.x + b.w - pad - 118, b.y + 104, 118, 36};
+    SDL_Rect b = history_header(u, "File history",
+                               "All recorded transfers for this iPhone, including previous days.",
+                               false);
+    search_box(u, (SDL_Rect){b.x, b.y + 104, b.w - 130, 36});
+    SDL_Rect date = {b.x + b.w - 118, b.y + 104, 118, 36};
     button(u, date, dates[u->date_range], UI_DATE, 0, false, true);
     ph_icon_draw(u->renderer, PH_ICON_DOWN,
                  (SDL_Rect){date.x + date.w - 22, date.y + 11, 14, 14}, u->muted);
-    int detail = u->selected && b.w >= 850 ? 340 : 0;
+    int detail = u->selected && u->rect.w >= 850 ? 340 : 0;
     int remaining = b.h - 184;
     int matches = history_row_count(u, SDL_max(1, remaining / 66));
     int list_height = SDL_min(remaining, matches ? 64 + matches * 66 : 157);
-    SDL_Rect list = {b.x + pad, b.y + 160, b.w - 2 * pad - detail - (detail ? 20 : 0),
-                     list_height};
+    SDL_Rect list = {b.x, b.y + 160, b.w - detail - (detail ? 20 : 0), list_height};
     if (!u->selected || detail) {
         card(u, list);
         SDL_Rect rows = {list.x + 14, list.y + 10, list.w - 28, list.h - 20};
@@ -868,7 +887,7 @@ static void history_page(ph_workspace *u)
     if (detail)
         draw_file_detail(u, (SDL_Rect){list.x + list.w + 20, list.y, detail, remaining});
     else if (u->selected)
-        draw_file_detail(u, (SDL_Rect){b.x + pad, b.y + 160, b.w - 2 * pad, b.h - 184});
+        draw_file_detail(u, (SDL_Rect){b.x, b.y + 160, b.w, remaining});
     if (u->date_menu) {
         SDL_Rect menu = {date.x, date.y + date.h + 5, date.w, 110};
         card(u, menu);
@@ -951,108 +970,132 @@ static void draw_clipboard_thumbnail(ph_workspace *u, const ph_clip_entry *item,
     }
 }
 
+static void clipboard_row(ph_workspace *u, SDL_Rect row, const ph_clip_entry *item,
+                          bool stacked, bool send)
+{
+    enum { COPY_W = 65, SEND_W = 106, DELETE_W = 55, GAP = 8 };
+    bool checked = clip_checked(u, item->id);
+    if (checked)
+        rounded(u, row, 6, u->selected_bg);
+
+    SDL_Rect check = {row.x + 3, row.y + 24, 16, 16};
+    rounded(u, check, 4, checked ? u->ink : u->muted);
+    if (checked)
+        ph_icon_draw(u->renderer, PH_ICON_CHECK, check, u->surface);
+    else
+        rounded(u, (SDL_Rect){check.x + 1, check.y + 1, 14, 14}, 3, u->surface);
+
+    SDL_Rect tile = {row.x + 28, row.y + 12, 40, 40};
+    if (item->kind == 'P')
+        draw_clipboard_thumbnail(u, item, tile);
+    else {
+        rounded(u, tile, 7, u->selected_bg);
+        ph_icon_draw(u->renderer, PH_ICON_CLIPBOARD,
+                     (SDL_Rect){tile.x + 10, tile.y + 10, 20, 20}, u->muted);
+    }
+    int right = row.x + row.w - 4;
+    int actions = right - COPY_W - SEND_W - DELETE_W - 2 * GAP;
+    int label_x = tile.x + tile.w + 12;
+    int label_right = stacked ? right : actions - 12;
+    int label_width = label_right - label_x;
+    char preview[200], when[40], details[128];
+    if (item->kind == 'T')
+        snprintf(preview, sizeof preview, "%.190s", (const char *)item->data);
+    else
+        image_preview(item, preview, sizeof preview);
+    timestamp(item->time, when);
+    snprintf(details, sizeof details, "From %s · %s", item->incoming ? "iPhone" : pc_name(u), when);
+    fitted_label(u, preview, label_x, row.y + 13, label_width, 13, true, u->ink);
+    fitted_label(u, details, label_x, row.y + 35, label_width, 11, false, u->muted);
+    hit(u, (SDL_Rect){row.x, row.y, label_right - row.x, 58}, UI_CLIP_CHECK, item->id,
+        checked ? "Deselect clipboard item" : "Select clipboard item");
+
+    int y = row.y + (stacked ? 57 : 18);
+    if (stacked)
+        actions = row.x + 3;
+    action_button(u, (SDL_Rect){actions, y, COPY_W, 28}, "Copy", PH_WORKSPACE_CLIP_COPY,
+                  item->id, false, true, true, PH_ICON_COPY);
+    button(u, (SDL_Rect){actions + COPY_W + GAP, y, SEND_W, 28}, "Send to iPhone",
+           PH_WORKSPACE_CLIP_SEND, item->id, false, send);
+    button(u, (SDL_Rect){right - DELETE_W, y, DELETE_W, 28}, "Delete", UI_CLIP_REMOVE,
+           item->id, false, true);
+}
+
 static void clipboard_page(ph_workspace *u)
 {
-    SDL_Rect b = u->rect;
-    bool compact = b.w < 530;
-    int pad = compact ? 14 : 32;
-    int width = SDL_min(860, b.w - pad * 2);
-    int x = b.x + (b.w - width) / 2, y = b.y + (compact ? 16 : 28);
-    if (!compact)
-        rect(u, b, u->background);
+    char subtitle[150];
+    snprintf(subtitle, sizeof subtitle, "Up to 100 recent items stored on %s.", pc_name(u));
+    bool panel = u->live.mirroring && !u->live.modal;
+    SDL_Rect b = history_header(u, "Clipboard history", subtitle, panel);
+    bool ready = clipboard_ready(u);
+    int status_y = b.y + (panel ? 67 : 112);
+    status_dot(u, b.x, status_y + 6, ready);
+    fitted_label(u, clipboard_status(u, false), b.x + 13, status_y, b.w - 13, 12, false,
+                 ready ? u->positive : u->muted);
+
     size_t total = ph_history_clip_count(u->history);
     size_t kept = 0;
-    for (size_t i = 0; i < u->clip_selected_n; i++) {
-        for (size_t j = 0; j < ph_history_clip_count(u->history); j++)
+    for (size_t i = 0; i < u->clip_selected_n; i++)
+        for (size_t j = 0; j < total; j++)
             if (ph_history_clip(u->history, j)->id == u->clip_selected[i]) {
                 u->clip_selected[kept++] = u->clip_selected[i];
                 break;
             }
-    }
     u->clip_selected_n = kept;
-    text(u, "Clipboard", x, y, width - 32, compact ? 20 : 27, true, u->ink);
-    close_button(u, x + width - 29, y - 3, PH_WORKSPACE_CLOSE);
-    y += compact ? 39 : 48;
-    bool ready = clipboard_ready(u);
-    status_dot(u, x, y + 5, ready);
-    fitted_label(u, clipboard_status(u, false), x + 13, y, width - 13, 12, false,
-                 ready ? u->positive : u->muted);
-    y += 39;
-    char count[64];
-    snprintf(count, sizeof count, "Clipboard history · %zu", total);
-    text(u, count, x, y, width - 92, 14, true, u->ink);
-    button(u, (SDL_Rect){x + width - 88, y - 6, 88, 28}, "Clear history", UI_CLEAR, 0, false,
-           ph_history_clip_count(u->history) > 0);
-    y += 35;
+
+    bool stacked = b.w < 550;
+    bool split_toolbar = total && b.w < 468;
+    int row_height = stacked ? 94 : 66;
+    int toolbar_height = split_toolbar ? 78 : 44;
+    int offset = panel ? 98 : 160;
+    int available = SDL_max(0, b.h - offset - 18);
+    int content = total ? (int)total * row_height : 93;
+    SDL_Rect list = {b.x, b.y + offset, b.w, SDL_min(available, 20 + toolbar_height + content)};
+    if (list.h <= toolbar_height + 10)
+        return;
+    card(u, list);
+    SDL_Rect rows = {list.x + 14, list.y + 10, list.w - 28, list.h - 20};
+    int y = rows.y, right = rows.x + rows.w;
+    char count[48];
+    if (kept)
+        snprintf(count, sizeof count, "%zu of %zu selected", kept, total);
+    else
+        snprintf(count, sizeof count, "%zu %s", total, total == 1 ? "item" : "items");
+    int select_width = 87;
+    int count_width = ph_text_width(count, PH_TEXT(12, PH_FONT_MEDIUM));
+    text(u, count, rows.x, y + 8, count_width + 2, 12, true, u->ink);
+    button(u, (SDL_Rect){right - 92, y, 92, 30}, "Clear history", UI_CLEAR, 0, false, total > 0);
     if (total) {
-        button(u, (SDL_Rect){x, y, 83, 27}, kept == total ? "Deselect all" : "Select all",
-               UI_CLIP_CHECK, 0, false, true);
-        if (kept && !compact) {
-            char selected[32];
-            snprintf(selected, sizeof selected, "%zu selected", kept);
-            text(u, selected, x + 96, y + 6, 160, 11, false, u->muted);
-        }
-        button(u, (SDL_Rect){x + width - 116, y, 116, 27}, "Delete selected", UI_CLIP_DELETE,
-               0, false, kept > 0);
-        y += 38;
+        int select_x = split_toolbar ? rows.x : rows.x + count_width + 17;
+        int select_y = split_toolbar ? y + 34 : y;
+        button(u, (SDL_Rect){select_x, select_y, select_width, 30},
+               kept == total ? "Deselect all" : "Select all", UI_CLIP_CHECK, 0, false, true);
+        button(u, (SDL_Rect){right - (split_toolbar ? 115 : 213), select_y, 115, 30},
+               "Delete selected", UI_CLIP_DELETE, 0, false, kept > 0);
     }
-    SDL_Rect clip = {x, y, width, SDL_max(0, b.y + b.h - y - 48)};
-    SDL_RenderSetClipRect(u->renderer, &clip);
-    int cy = y - u->scroll;
-    for (size_t i = 0; i < total; i++) {
-        const ph_clip_entry *c = ph_history_clip(u->history, i);
-        bool image = c->kind == 'P', checked = clip_checked(u, c->id);
-        int row_height = image ? 124 : 100;
-        if (cy + row_height > clip.y && cy < clip.y + clip.h) {
-            SDL_Rect row = {x, cy, width, row_height - 9};
-            card(u, row);
-            if (checked)
-                rounded(u, (SDL_Rect){x + 1, cy + 1, width - 2, row.h - 2}, 11, u->selected_bg);
-            SDL_Rect check = {x + 12, cy + 15, 16, 16};
-            rounded(u, check, 4, checked ? u->ink : u->muted);
-            if (checked)
-                ph_icon_draw(u->renderer, PH_ICON_CHECK, check, u->surface);
-            else
-                rounded(u, (SDL_Rect){check.x + 1, check.y + 1, 14, 14}, 3, u->surface);
-            int content = x + 39;
-            if (image) {
-                draw_clipboard_thumbnail(u, c, (SDL_Rect){content, cy + 12, 59, 59});
-                content += 70;
-            }
-            char preview[200], date[40];
-            timestamp(c->time, date);
-            if (c->kind == 'T')
-                snprintf(preview, sizeof preview, "%.190s", (const char *)c->data);
-            else
-                image_preview(c, preview, sizeof preview);
-            hit(u, (SDL_Rect){x, cy, width, image ? 72 : 47}, UI_CLIP_CHECK, c->id,
-                checked ? "Deselect clipboard item" : "Select clipboard item");
-            fitted_label(u, preview, content, cy + 13, x + width - content - 12, 13, true, u->ink);
-            char sub[128];
-            snprintf(sub, sizeof sub, "From %s · %s", c->incoming ? "iPhone" : pc_name(u), date);
-            fitted_label(u, sub, content, cy + 35, x + width - content - 12, 11, false, u->muted);
-            int buttons = cy + row_height - 47;
-            action_button(u, (SDL_Rect){x + 12, buttons, 65, 28}, "Copy", PH_WORKSPACE_CLIP_COPY,
-                          c->id, false, true, true, PH_ICON_COPY);
-            button(u, (SDL_Rect){x + 84, buttons, 106, 28}, "Send to iPhone",
-                   PH_WORKSPACE_CLIP_SEND, c->id, false, ready && u->to_phone);
-            button(u, (SDL_Rect){x + width - 67, buttons, 55, 28}, "Delete", UI_CLIP_REMOVE, c->id,
-                   false, true);
-        }
-        cy += row_height;
+    line(u, rows.x, y + toolbar_height - 10, rows.w);
+    rows.y += toolbar_height;
+    rows.h -= toolbar_height;
+    if (!total) {
+        history_empty(u, rows, PH_ICON_CLIPBOARD, "No clipboard items",
+                      "Copied text and images appear here.");
+        return;
+    }
+
+    SDL_RenderSetClipRect(u->renderer, &rows);
+    int row_y = rows.y - u->scroll;
+    for (size_t i = 0; i < total; i++, row_y += row_height) {
+        if (row_y + row_height <= rows.y)
+            continue;
+        if (row_y >= rows.y + rows.h)
+            break;
+        SDL_Rect row = {rows.x, row_y, rows.w, row_height};
+        clipboard_row(u, row, ph_history_clip(u->history, i), stacked, ready && u->to_phone);
+        if (i + 1 < total)
+            line(u, row.x + 12, row.y + row.h - 1, row.w - 24);
     }
     SDL_RenderSetClipRect(u->renderer, NULL);
-    if (!total) {
-        card(u, (SDL_Rect){x, y, width, 82});
-        ph_icon_draw(u->renderer, PH_ICON_CLIPBOARD, (SDL_Rect){x + 14, y + 21, 24, 24}, u->muted);
-        text(u, "No clipboard items", x + 49, y + 17, width - 60, 13, true, u->ink);
-        text(u, "Copied text and images appear here.", x + 49, y + 39, width - 60, 11,
-             false, u->muted);
-    }
-    u->scroll_limit = SDL_max(cy + u->scroll - y - clip.h, 0);
-    char storage[128];
-    snprintf(storage, sizeof storage, "Up to 100 recent items · Stored on %s", pc_name(u));
-    fitted_label(u, storage, x, b.y + b.h - 31, width, 11, false, u->muted);
+    u->scroll_limit = SDL_max(content - rows.h, 0);
 }
 static int incoming_progress(ph_workspace *u, int x, int y, int width)
 {
@@ -2415,8 +2458,7 @@ static void draw_page(ph_workspace *u)
     u->hits_n = 0;
     u->scroll_limit = 0;
     SDL_RenderSetClipRect(u->renderer, NULL);
-    rect(u, b,
-         view == PH_WORKSPACE_CLIPBOARD || view == PH_WORKSPACE_FILES ? u->surface : u->background);
+    rect(u, b, view == PH_WORKSPACE_FILES ? u->surface : u->background);
     if (view == PH_WORKSPACE_HOME) {
         if (!u->live.paired)
             SDL_RenderSetClipRect(u->renderer, &b);
