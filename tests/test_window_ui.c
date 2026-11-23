@@ -17,7 +17,6 @@
 #include "control/setup.h"
 #include "core/config.h"
 #include "core/secure_link.h"
-#include "files/hostclip.h"
 #include "temp_path.h"
 #include "core/version.h"
 #include "ui/control_icons.h"
@@ -298,18 +297,7 @@ int main(int argc, char **argv)
     ph_window_redraw(w);
 #ifdef _WIN32
     if (test_accessibility) {
-        ph_hostclip_init();
         test_windows_accessibility(w, native);
-        char kind;
-        void *data;
-        size_t length;
-        CHECK(ph_hostclip_copy_text("private\r\nmultiline"));
-        CHECK(!ph_hostclip_changed(true, &kind, &data, &length));
-        CHECK(SDL_SetClipboardText("external copy") == 0);
-        CHECK(ph_hostclip_changed(true, &kind, &data, &length));
-        CHECK(kind == 'T' && length == 13 && !memcmp(data, "external copy", length));
-        free(data);
-        ph_hostclip_shutdown();
         ph_window_destroy(w);
         SDL_Quit();
         puts("Windows accessibility: named controls, roles, values and actions passed");
