@@ -165,6 +165,38 @@ static void click_at(ph_window *window, int x, int y)
     CHECK(ph_window_chrome_event(window, &event));
 }
 
+static int section_y(int index)
+{
+    return PH_WINDOW_BAR_PX + 47 + 18 + index * 41 + 19;
+}
+
+static void capture_settings(ph_window *w, const char *dir)
+{
+    const char *names[] = {"appearance", "screen-and-audio", "controls", "transfers",
+                          "notifications", "help", "connection-statistics", "about"};
+    SDL_Window *native = SDL_GetWindowFromID(ph_window_id(w));
+    ph_workspace *workspace = ph_window_workspace(w);
+    SDL_SetWindowSize(native, 1280, 800);
+    for (int i = 0; i < (int)SDL_arraysize(names); i++) {
+        ph_window_redraw(w);
+        click_at(w, 65, section_y(i));
+        CHECK(ph_workspace_current_section(workspace) == i);
+        screenshot(w, dir, names[i]);
+    }
+    ph_window_toggle_statistics(w);
+    CHECK(ph_workspace_current_section(workspace) == 6 && ph_window_help_visible(w));
+    ph_window_toggle_statistics(w);
+    CHECK(!ph_window_help_visible(w));
+    ph_window_toggle_help(w);
+    CHECK(ph_workspace_current_section(workspace) == 5);
+    click_at(w, 350, 335);
+    screenshot(w, dir, "help-guide-open");
+    click_at(w, 350, 263);
+    screenshot(w, dir, "keyboard-shortcuts");
+    ph_window_toggle_help(w);
+    CHECK(!ph_window_help_visible(w));
+}
+
 static void workspace_key(ph_window *window, SDL_Scancode key, SDL_Keymod mod)
 {
     SDL_Event event = {0};
@@ -357,7 +389,7 @@ int main(int argc, char **argv)
     screenshot(w, dir, "11-settings");
     SDL_SetWindowSize(native, 960, 720);
     ph_window_redraw(w);
-    click_at(w, 65, PH_WINDOW_BAR_PX + 88 + 2 * 44 + 18);
+    click_at(w, 65, section_y(2));
     CHECK(ph_workspace_target(workspace, PH_WORKSPACE_FEED, &tx, &ty));
     click_at(w, tx, ty);
     CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_FEED);
@@ -422,7 +454,7 @@ int main(int argc, char **argv)
     click_at(w, tx, ty);
     ph_workspace_open_section(workspace, 0);
     ph_window_redraw(w);
-    click_at(w, 550, PH_WINDOW_BAR_PX + 32 + 55 + 27 + 20);
+    click_at(w, 550, 326);
     CHECK(ph_workspace_dark(workspace));
     CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLOSE, &tx, &ty));
     click_at(w, tx, ty);
@@ -450,11 +482,15 @@ int main(int argc, char **argv)
     screenshot(w, dir, "16-devices-dark");
     ph_workspace_open_section(workspace, 0);
     ph_window_redraw(w);
-    click_at(w, 330, PH_WINDOW_BAR_PX + 32 + 55 + 27 + 20);
+    click_at(w, 330, 326);
     CHECK(!ph_workspace_dark(workspace));
     CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLOSE, &tx, &ty));
     click_at(w, tx, ty);
 
+    ph_window_open_settings(w);
+    capture_settings(w, dir);
+    SDL_SetWindowSize(native, 960, 720);
+    ph_window_redraw(w);
     CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLIPBOARD_OPEN, &tx, &ty));
     CHECK(ph_history_add_clip(history, 'T', "Clipboard sample", 16, true) != 0);
     click_at(w, tx, ty);
@@ -525,6 +561,8 @@ int main(int argc, char **argv)
     ph_window_redraw(w); screenshot(w, dir, "02b-phone-sized-connect");
     SDL_SetWindowSize(native, 960, 640);
     ph_window_redraw(w); screenshot(w, dir, "03-wide");
+    SDL_SetWindowSize(native, 1280, 800);
+    ph_window_redraw(w); screenshot(w, dir, "connect");
     SDL_SetWindowSize(native, 460, 740);
     ph_setup setup;
     ph_setup_open(&setup, true);

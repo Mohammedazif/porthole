@@ -15,6 +15,7 @@ typedef enum ph_wintray_command {
     PH_WINTRAY_COPY,
     PH_WINTRAY_SETTINGS,
     PH_WINTRAY_RECEIVED,
+    PH_WINTRAY_SHOW_RECEIVED_FILE,
     PH_WINTRAY_QUIT
 } ph_wintray_command;
 
@@ -27,7 +28,7 @@ void ph_wintray_destroy(ph_wintray *tray);
 void ph_wintray_set_state(ph_wintray *tray, bool feed, bool paused, bool sound_on,
                           bool can_copy, const char *tip);
 
-/* A Windows notification from the tray icon. Clicking it opens Received files.
+/* A Windows notification from the tray icon.
  * False when there is no tray icon. */
 bool ph_wintray_notify(ph_wintray *tray, const char *title, const char *text);
 

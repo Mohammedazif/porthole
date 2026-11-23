@@ -41,6 +41,9 @@ Name: "{commonstartup}\Porthole"; Filename: "{app}\porthole.exe"; WorkingDir: "{
 Name: "startwithwindows"; Description: "Start with Windows for all users"; GroupDescription: "Additional tasks:"; Flags: unchecked
 Name: "localnetwork"; Description: "Allow Porthole on Private networks"; GroupDescription: "Local network:"; Flags: unchecked
 
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "Porthole"; Flags: dontcreatekey uninsdeletevalue
+
 [Run]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Porthole Installed TCP"" dir=in action=allow program=""{app}\porthole.exe"" protocol=TCP localport=7000,7001,7100,47731,47732,47733 profile=private remoteip=localsubnet"; Tasks: localnetwork; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Porthole Installed UDP"" dir=in action=allow program=""{app}\porthole.exe"" protocol=UDP localport=6000,6001,7011 profile=private remoteip=localsubnet"; Tasks: localnetwork; Flags: runhidden

@@ -12,6 +12,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <time.h>
+#include "ui/settings_help.h"
 
 typedef struct ui_hit {
     SDL_Rect box;
@@ -51,7 +52,10 @@ enum {
     UI_EDIT_DEVICE,
     UI_SECTION_MENU,
     UI_FINGERPRINT,
-    UI_CLEAR_ALL_CLIPBOARD
+    UI_CLEAR_ALL_CLIPBOARD,
+    UI_HELP_GUIDE,
+    UI_SIGN_IN,
+    UI_KEEP_ASPECT
 };
 struct ph_workspace {
     ph_history *history;
@@ -76,6 +80,8 @@ struct ph_workspace {
     uint64_t selected, clip_selected[100];
     size_t clip_selected_n;
     bool history_open, editing, tray, notifications, sync, to_phone, to_pc, shortcuts;
+    bool launch_at_sign_in, launch_managed, keep_aspect;
+    unsigned expanded_guides;
     char search[256];
     char error[128];
     ph_workspace_action action;
@@ -237,8 +243,11 @@ static void status_dot(ph_workspace *u, int x, int y, bool good)
 static void toggle(ph_workspace *u, int x, int y, const char *name, bool on, int action,
                    bool enabled)
 {
-    rounded(u, (SDL_Rect){x, y, 36, 20}, 10, on ? u->ink : u->border);
-    rounded(u, (SDL_Rect){x + (on ? 18 : 2), y + 2, 16, 16}, 8, u->surface);
+    SDL_Color off = ph_workspace_dark(u) ? (SDL_Color){83, 96, 115, 255}
+                                         : (SDL_Color){185, 195, 207, 255};
+    SDL_Color knob = on ? u->surface : (SDL_Color){255, 255, 255, 255};
+    rounded(u, (SDL_Rect){x, y, 36, 21}, 10, on ? u->ink : off);
+    rounded(u, (SDL_Rect){x + (on ? 17 : 2), y + 2, 17, 17}, 9, knob);
     if (enabled) {
         char label[96];
         snprintf(label, sizeof label, "%s (%s)", name, on ? "on" : "off");
@@ -294,30 +303,31 @@ bool ph_workspace_dark(ph_workspace *u)
 static void palette(ph_workspace *u)
 {
     bool dark = ph_workspace_dark(u);
-    u->ink = dark ? (SDL_Color){233, 236, 242, 255} : (SDL_Color){22, 27, 34, 255};
-    u->muted = dark ? (SDL_Color){157, 170, 187, 255} : (SDL_Color){101, 114, 133, 255};
-    u->surface = dark ? (SDL_Color){30, 35, 42, 255} : (SDL_Color){255, 255, 255, 255};
-    u->background = dark ? (SDL_Color){21, 25, 30, 255} : (SDL_Color){243, 244, 246, 255};
-    u->border = dark ? (SDL_Color){55, 63, 75, 255} : (SDL_Color){220, 225, 233, 255};
-    u->selected_bg = dark ? (SDL_Color){49, 58, 70, 255} : (SDL_Color){233, 237, 243, 255};
-    u->positive = dark ? (SDL_Color){85, 206, 154, 255} : (SDL_Color){21, 128, 61, 255};
+    u->ink = dark ? (SDL_Color){238, 241, 246, 255} : (SDL_Color){21, 26, 33, 255};
+    u->muted = dark ? (SDL_Color){160, 171, 187, 255} : (SDL_Color){102, 114, 130, 255};
+    u->surface = dark ? (SDL_Color){30, 34, 40, 255} : (SDL_Color){255, 255, 255, 255};
+    u->background = dark ? (SDL_Color){21, 24, 28, 255} : (SDL_Color){243, 244, 246, 255};
+    u->border = dark ? (SDL_Color){55, 62, 73, 255} : (SDL_Color){220, 226, 234, 255};
+    u->selected_bg = dark ? (SDL_Color){52, 60, 72, 255} : (SDL_Color){233, 237, 242, 255};
+    u->positive = dark ? (SDL_Color){91, 207, 152, 255} : (SDL_Color){22, 128, 71, 255};
 }
 static void save_preferences(ph_workspace *u)
 {
     char value[96];
-    snprintf(value, sizeof value, "%d %d %d %d %d %d", u->theme, u->tray, u->notifications, u->sync,
-             u->to_phone, u->to_pc);
+    snprintf(value, sizeof value, "%d %d %d %d %d %d %d", u->theme, u->tray, u->notifications,
+             u->sync, u->to_phone, u->to_pc, u->keep_aspect);
     ph_config_write_line("desktop-preferences", value);
 }
 ph_workspace *ph_workspace_create(void)
 {
     ph_workspace *u = calloc(1, sizeof *u);
     char value[96];
-    int theme = 2, tray = 1, notify = 1, sync = 1, to = 1, from = 1;
+    int theme = 2, tray = 1, notify = 1, sync = 1, to = 1, from = 1, keep_aspect = 1;
     if (!u)
         return NULL;
     if (ph_config_read_line("desktop-preferences", value, sizeof value))
-        if (sscanf(value, "%d %d %d %d %d %d", &theme, &tray, &notify, &sync, &to, &from) != 6)
+        if (sscanf(value, "%d %d %d %d %d %d %d",
+                   &theme, &tray, &notify, &sync, &to, &from, &keep_aspect) < 6)
             theme = 2;
     u->theme = theme >= 0 && theme <= 2 ? theme : 2;
     u->tray = tray != 0;
@@ -325,6 +335,9 @@ ph_workspace *ph_workspace_create(void)
     u->sync = sync != 0;
     u->to_phone = to != 0;
     u->to_pc = from != 0;
+    u->keep_aspect = keep_aspect != 0;
+    u->launch_at_sign_in = ph_config_launch_at_sign_in();
+    u->launch_managed = ph_config_launch_managed();
     atomic_init(&u->stop, false);
     atomic_init(&u->system_dark, false);
     const char *driver = SDL_GetCurrentVideoDriver();
@@ -383,6 +396,10 @@ bool ph_workspace_notifications(const ph_workspace *u)
 {
     return !u || u->notifications;
 }
+bool ph_workspace_keep_aspect(const ph_workspace *u)
+{
+    return !u || u->keep_aspect;
+}
 bool ph_workspace_clip_send(const ph_workspace *u)
 {
     return !u || (u->sync && u->to_phone);
@@ -399,6 +416,8 @@ void ph_workspace_open_section(ph_workspace *u, int section)
 {
     if (u) {
         u->section = section;
+        u->focused = (ui_hit){0};
+        u->expanded_guides = 0;
         u->section_menu = false;
         u->scroll = 0;
         if (u->editing)
@@ -530,9 +549,18 @@ static int text_span_width(const char *s, size_t bytes, int font)
 static void entry_box(ph_workspace *u, SDL_Rect box, const char *value, const char *label,
                       int action)
 {
-    rounded(u, box, 7, u->selected_bg);
-    int x = box.x + 10;
-    int width = box.w - 20;
+    bool help_search = action == UI_SEARCH && u->view == PH_WORKSPACE_SETTINGS;
+    if (help_search) {
+        rounded(u, box, 8, u->border);
+        rounded(u, (SDL_Rect){box.x + 1, box.y + 1, box.w - 2, box.h - 2}, 7, u->surface);
+        ph_icon_draw(u->renderer, PH_ICON_SEARCH,
+                     (SDL_Rect){box.x + 12, box.y + 11, 16, 16}, u->muted);
+    } else {
+        rounded(u, box, 7, u->selected_bg);
+    }
+    int x = box.x + (help_search ? 39 : 10);
+    int width = box.x + box.w - x - 10;
+    int label_y = box.y + (box.h - ph_text_line_height(PH_TEXT(12, PH_FONT_REGULAR))) / 2;
     if (u->editing && action == (u->confirm ? UI_EDIT_DEVICE : UI_SEARCH)) {
         int font = PH_TEXT(12, PH_FONT_REGULAR);
         size_t start = 0, cursor = SDL_min(u->cursor, strlen(value));
@@ -547,12 +575,12 @@ static void entry_box(ph_workspace *u, SDL_Rect box, const char *value, const ch
                  ph_workspace_dark(u) ? (SDL_Color){55, 75, 103, 255}
                                       : (SDL_Color){170, 199, 242, 255});
         }
-        fitted_label(u, value + start, x, box.y + 9, width, 12, false, u->ink);
+        fitted_label(u, value + start, x, label_y, width, 12, false, u->ink);
         int at = x + text_span_width(value + start, cursor - start, font);
         rect(u, (SDL_Rect){at, box.y + 7, 1, box.h - 14}, u->ink);
         SDL_SetTextInputRect(&box);
     } else {
-        fitted_label(u, value[0] ? value : label, x, box.y + 9, width, 12, false,
+        fitted_label(u, value[0] ? value : label, x, label_y, width, 12, false,
                      value[0] ? u->ink : u->muted);
     }
     hit(u, box, action, 0, label);
@@ -985,82 +1013,136 @@ static void pairing_actions(ph_workspace *u, int x, int y, int width)
            PH_WORKSPACE_SETTINGS_OPEN, 0, false, true);
 }
 
-static void connection_status(ph_workspace *u, SDL_Rect box)
+static void connection_status(ph_workspace *u, SDL_Rect box, bool spacious)
 {
-    const char *names[] = {"Wi-Fi connection", "Mouse and keyboard", "Clipboard sync"};
-    const char *details[] = {"Connect both devices to the same local network.",
-                             "Pair your iPhone over Bluetooth to use PC controls.",
-                             "Available after pairing."};
-    const char *states[] = {"Ready", "Inactive", "Waiting"};
-    const ph_control_icon icons[] = {PH_ICON_WIFI, PH_ICON_MOUSE, PH_ICON_CLIPBOARD};
-    int x = box.x + 16, y = box.y + 34;
-    text(u, "CONNECTION STATUS", x, box.y + 12, box.w - 32, 10, true, u->muted);
-    line(u, box.x + 1, y, box.w - 2);
-    const int heights[] = {67, 95, 61};
-    for (int i = 0; i < 3; i++) {
+    const char *names[] = {"Wi-Fi connection", "Screen sharing", "Mouse and keyboard",
+                           "Clipboard sync"};
+    const char *details[] = {"Available on your local network", "Start a broadcast from the iPhone app",
+                             "Inactive until screen sharing or Bluetooth setup",
+                             "Available after your iPhone connects"};
+    const char *states[] = {"Ready", u->live.share_checked && !u->live.share_available
+                                        ? "Unavailable" : "Waiting",
+                            "Inactive", "Waiting"};
+    const ph_control_icon icons[] = {PH_ICON_WIFI, PH_ICON_PHONE, PH_ICON_MOUSE, PH_ICON_CLIPBOARD};
+    int x = box.x + 17, y = box.y + (spacious ? 27 : 34);
+    text(u, "CONNECTION STATUS", box.x, box.y, box.w, 10, true, u->muted);
+    const int heights[] = {spacious ? 75 : 62, spacious ? 75 : 62,
+                           spacious ? 100 : 87, spacious ? 75 : 62};
+    card(u, (SDL_Rect){box.x, y, box.w, box.y + box.h - y});
+    for (int i = 0; i < 4; i++) {
         if (i)
             line(u, box.x + 1, y, box.w - 2);
-        rounded(u, (SDL_Rect){x, y + 14, 32, 32}, 8, u->background);
-        ph_icon_draw(u->renderer, icons[i], (SDL_Rect){x + 7, y + 21, 18, 18}, u->ink);
-        text(u, names[i], x + 44, y + 12, box.w - 145, 12, true, u->ink);
+        int dy = spacious ? 5 : 0;
+        rounded(u, (SDL_Rect){x, y + 14 + dy, 32, 32}, 8, u->background);
+        ph_icon_draw(u->renderer, icons[i], (SDL_Rect){x + 7, y + 21 + dy, 18, 18}, u->ink);
+        text(u, names[i], x + 44, y + 12 + dy, box.w - 145, 13, true, u->ink);
         int sw = ph_text_width(states[i], PH_TEXT(11, PH_FONT_REGULAR));
         int right = box.x + box.w - 16;
-        status_dot(u, right - sw - 11, y + 18, i == 0);
-        text(u, states[i], right - sw, y + 13, sw + 2, 11, false,
+        status_dot(u, right - sw - 11, y + 18 + dy, i == 0);
+        text(u, states[i], right - sw, y + 13 + dy, sw + 2, 11, false,
              i == 0 ? u->positive : u->muted);
-        text(u, details[i], x + 44, y + 34, box.w - 76, 11, false, u->muted);
-        if (i == 1)
-            action_button(u, (SDL_Rect){x + 39, y + 63, 108, 26}, "Set up controls",
+        text(u, details[i], x + 44, y + 34 + dy, box.w - 76, 12, false, u->muted);
+        if (i == 2)
+            action_button(u, (SDL_Rect){x + 39, y + 56 + dy, 108, 26}, "Set up controls",
                           PH_WORKSPACE_SETUP, 0, false, true, false, -1);
         y += heights[i];
     }
 }
 
-static void pairing_field(ph_workspace *u, SDL_Rect box, const char *label, const char *value,
-                          int action)
+static int sharing_hint(ph_workspace *u, int x, int y, int width)
 {
-    text(u, label, box.x + 12, box.y + 7, box.w - 48, 10, false, u->muted);
-    fitted_text(u, value, box.x + 12, box.y + 22, box.w - 48,
-                PH_TEXT(action == PH_WORKSPACE_COPY_CODE ? 17 : 13, PH_FONT_MONO_MEDIUM), u->ink);
-    bool available = action == PH_WORKSPACE_COPY_CODE ? u->live.code[0] != 0
-                                                     : u->live.address[0] != 0;
+    ph_icon_draw(u->renderer, PH_ICON_INFO, (SDL_Rect){x, y, 16, 16}, u->muted);
+    const char *parts[] = {"Screen sharing: ", "select ", "Share screen ",
+                           "on your iPhone, then ", "Start Broadcast", "."};
+    int fonts[] = {PH_TEXT(12, PH_FONT_MEDIUM), PH_TEXT(12, PH_FONT_REGULAR)};
+    int total = 0;
+    for (size_t i = 0; i < SDL_arraysize(parts); i++)
+        total += ph_text_width(parts[i], fonts[i % 2]);
+    if (total + 27 <= width) {
+        int left = x + 25;
+        for (size_t i = 0; i < SDL_arraysize(parts); i++) {
+            int advance = ph_text_width(parts[i], fonts[i % 2]);
+            ph_text_draw(u->renderer, parts[i], left, y, advance + 2, fonts[i % 2],
+                         i % 2 ? u->muted : u->ink);
+            left += advance;
+        }
+        y += ph_text_line_height(fonts[0]);
+    } else
+        y = text(u, "Screen sharing: select Share screen on your iPhone, then Start Broadcast.",
+                 x + 25, y, width - 25, 12, false, u->muted);
+    return text(u, "File transfers and clipboard sync are available without screen sharing.",
+                x + 25, y, width - 25, 12, false, u->muted);
+}
+
+static void pairing_field(ph_workspace *u, SDL_Rect box, const char *label, const char *value,
+                          int action, bool inline_label)
+{
+    bool code = action == PH_WORKSPACE_COPY_CODE;
+    int font = PH_TEXT(code ? 18 : 13, PH_FONT_MONO_MEDIUM);
+    char formatted[12];
+    if (code && strlen(value) == 8) {
+        snprintf(formatted, sizeof formatted, "%.4s %.4s", value, value + 4);
+        value = formatted;
+    }
+    bool available = code ? u->live.code[0] != 0 : u->live.address[0] != 0;
+    if (inline_label) {
+        text(u, label, box.x + 12, box.y + 16, 78, 12, false, u->muted);
+        int width = SDL_min(ph_text_width(value, font) + 1, box.w - 123);
+        fitted_text(u, value, box.x + box.w - 44 - width,
+                    box.y + (box.h - ph_text_line_height(font)) / 2, width, font, u->ink);
+    } else {
+        text(u, label, box.x + 12, box.y + 7, box.w - 48, 10, false, u->muted);
+        fitted_text(u, value, box.x + 12, box.y + 22, box.w - 48, font, u->ink);
+    }
     copy_button(u, (SDL_Rect){box.x + box.w - 36, box.y + 10, 28, 30}, action, available);
 }
 
-static void wide_pairing(ph_workspace *u, int x, int y, int width)
+static void wide_pairing(ph_workspace *u, int x, int y, int width, bool spacious)
 {
     int gap = 24, pair_width = (width - gap) * 57 / 100;
-    SDL_Rect pair = {x, y, pair_width, 266}, status = {x + pair_width + gap, y,
-                                                     width - pair_width - gap, 266};
+    SDL_Rect pair = {x, y, pair_width, spacious ? 352 : 307},
+             status = {x + pair_width + gap, y, width - pair_width - gap, pair.h};
     card(u, pair);
-    card(u, status);
-    int q = SDL_clamp(pair_width - 302, 128, 174);
-    int qr_x = x + 22, qr_y = y + 24;
+    int q = SDL_clamp(pair_width - 302, 128, spacious ? 196 : 174);
+    int qr_x = x + (spacious ? 26 : 22), qr_y = y + (spacious ? 26 : 24);
     rounded(u, (SDL_Rect){qr_x, qr_y, q, q}, 9, u->border);
     rounded(u, (SDL_Rect){qr_x + 1, qr_y + 1, q - 2, q - 2}, 8,
             (SDL_Color){255, 255, 255, 255});
     if (u->live.code[0])
         qr(u, (SDL_Rect){qr_x + 7, qr_y + 7, q - 14, q - 14});
-    text(u, "Scan in Porthole on your iPhone", qr_x, qr_y + q + 12, q, 11, false, u->muted);
-    int dx = qr_x + q + 24, dw = pair.x + pair.w - 22 - dx;
-    text(u, "THIS PC", dx, y + 19, dw, 10, true, u->muted);
-    fitted_label(u, u->live.pc[0] ? u->live.pc : "Porthole", dx, y + 37, dw, 22, true, u->ink);
-    rounded(u, (SDL_Rect){dx, y + 79, dw, 99}, 8, u->border);
-    rounded(u, (SDL_Rect){dx + 1, y + 80, dw - 2, 97}, 7, u->surface);
-    line(u, dx + 1, y + 128, dw - 2);
-    pairing_field(u, (SDL_Rect){dx, y + 79, dw, 49}, "Address",
-                  u->live.address[0] ? u->live.address : "Starting…", PH_WORKSPACE_COPY_ADDRESS);
-    pairing_field(u, (SDL_Rect){dx, y + 129, dw, 49}, "Connection code", u->live.code,
-                  PH_WORKSPACE_COPY_CODE);
-    button(u, (SDL_Rect){dx, y + 201, 100, 34}, "New code", PH_WORKSPACE_NEW_CODE, 0, false,
+    text(u, "Scan with the Porthole iPhone app", qr_x, qr_y + q + 12, q, 11, false, u->muted);
+    int dx = qr_x + q + (spacious ? 23 : 24);
+    int dw = pair.x + pair.w - (spacious ? 26 : 22) - dx;
+    text(u, "THIS PC", dx, y + (spacious ? 26 : 19), dw, 11, true, u->muted);
+    fitted_label(u, u->live.pc[0] ? u->live.pc : "Porthole", dx, y + (spacious ? 45 : 37),
+                 dw, 23, true, u->ink);
+    int fields_y = y + (spacious ? 96 : 79);
+    rounded(u, (SDL_Rect){dx, fields_y, dw, 100}, 8, u->border);
+    rounded(u, (SDL_Rect){dx + 1, fields_y + 1, dw - 2, 98}, 7, u->surface);
+    line(u, dx + 1, fields_y + 50, dw - 2);
+    pairing_field(u, (SDL_Rect){dx, fields_y, dw, 50}, "Address",
+                  u->live.address[0] ? u->live.address : "Starting…",
+                  PH_WORKSPACE_COPY_ADDRESS, spacious);
+    pairing_field(u, (SDL_Rect){dx, fields_y + 50, dw, 50}, "Code", u->live.code,
+                  PH_WORKSPACE_COPY_CODE, spacious);
+    int below = text(u, "Scan the QR code or enter the address and connection code in the iPhone app.",
+                     dx, fields_y + 117, dw, 12, false, u->muted);
+    button(u, (SDL_Rect){dx, below + 14, spacious ? 86 : 100, spacious ? 39 : 34},
+           "New code", PH_WORKSPACE_NEW_CODE, 0, false,
            u->live.code[0] != 0);
-    connection_status(u, status);
-    action_button(u, (SDL_Rect){x, y + 284, 158, 34}, "Certificate fingerprint", UI_FINGERPRINT,
+    connection_status(u, status, spacious);
+    int end = sharing_hint(u, x, y + pair.h + 24, width);
+    int footer = SDL_max(end + 14, u->rect.y + u->rect.h - 41 - u->scroll);
+    if (spacious)
+        line(u, u->rect.x, footer - 4, u->rect.w);
+    action_button(u, (SDL_Rect){x, footer, 158, 34}, "Certificate fingerprint", UI_FINGERPRINT,
                   0, false, true, false, -1);
-    action_button(u, (SDL_Rect){x + width - 272, y + 284, 148, 34}, "Connection options",
+    action_button(u, (SDL_Rect){x + width - 272, footer, 148, 34}, "Connection options",
                   UI_SECTION + 8, 0, false, true, false, PH_ICON_SLIDERS);
-    action_button(u, (SDL_Rect){x + width - 110, y + 284, 110, 34}, "Settings",
-                  PH_WORKSPACE_SETTINGS_OPEN, 0, false, true, true, PH_ICON_GEAR);
+    action_button(u, (SDL_Rect){x + width - 110, footer, 110, 34}, "Settings",
+                  PH_WORKSPACE_SETTINGS_OPEN, 0, false, true, !spacious,
+                  spacious ? -1 : PH_ICON_GEAR);
+    u->scroll_limit = SDL_max(0, end + 56 + u->scroll - u->rect.y - u->rect.h);
 }
 
 static void paired_features(ph_workspace *u, SDL_Rect box)
@@ -1147,16 +1229,29 @@ static void home(ph_workspace *u)
         return;
     }
     if (!u->live.paired) {
-        bool wide = width >= 810 && b.h >= 462 && u->live.address[0];
-        y = text(u, "Connect your iPhone", x, y, width, wide ? 37 : width < 350 ? 24 : 30,
-                 true, u->ink) + 10;
+        bool spacious = b.w >= 1150 && b.h >= 660 && u->live.address[0];
+        if (spacious) {
+            pad = 62;
+            x = b.x + pad;
+            width = b.w - 2 * pad;
+            y = b.y + 46;
+        }
+        y -= u->scroll;
+        bool wide = width >= 810 && b.h >= 545 && u->live.address[0];
+        if (spacious) {
+            ph_text_draw(u->renderer, "Connect your iPhone", x, y, width,
+                         PH_TEXT(38, PH_FONT_SEMIBOLD), u->ink);
+            y += 55;
+        } else
+            y = text(u, "Connect your iPhone", x, y, width, wide ? 37 : width < 350 ? 24 : 30,
+                     true, u->ink) + 10;
         y = text(u,
-                 "Open Porthole on your iPhone and scan this code. Connect both devices to the "
+                 "Open Porthole on your iPhone and select this PC. Connect both devices to the "
                  "same Wi-Fi network.",
-                 x, y, width, 14, false, u->muted) +
-            26;
+                 x, y, width, spacious ? 15 : 14, false, u->muted) +
+            (spacious ? 34 : 26);
         if (wide) {
-            wide_pairing(u, x, y, width);
+            wide_pairing(u, x, y, width, spacious);
             return;
         }
         if (width < 350) {
@@ -1183,6 +1278,8 @@ static void home(ph_workspace *u)
                    false, true);
             y += 38;
             pairing_actions(u, x, y, width);
+            int end = sharing_hint(u, x, y + 51, width);
+            u->scroll_limit = SDL_max(0, end + 16 + u->scroll - b.y - b.h);
             return;
         }
         SDL_Rect pair = {x, y, width, 250};
@@ -1209,6 +1306,8 @@ static void home(ph_workspace *u)
                true);
         y += 42;
         pairing_actions(u, x, y, width);
+        int end = sharing_hint(u, x, y + 51, width);
+        u->scroll_limit = SDL_max(0, end + 16 + u->scroll - b.y - b.h);
         return;
     }
     card(u, (SDL_Rect){x, y, 48, 58});
@@ -1293,14 +1392,369 @@ static void home(ph_workspace *u)
     action_button(u, (SDL_Rect){x + width - 126, files.y + files.h - 34, 106, 28},
                   "Change folder", PH_WORKSPACE_FOLDER, 0, false, true, false, -1);
 }
-static int setting(ph_workspace *u, int x, int y, int width, const char *title, const char *detail,
-                   int action, bool on)
+typedef enum { SETTING_VALUE, SETTING_TOGGLE, SETTING_BUTTON, SETTING_SEGMENTS, SETTING_VOLUME } setting_kind;
+typedef struct {
+    const char *title, *detail, *value, *alternate;
+    setting_kind kind;
+    int action;
+    bool on, enabled;
+} setting_row;
+
+static setting_row value_row(const char *title, const char *detail, const char *value)
 {
-    card(u, (SDL_Rect){x, y, width, 76});
-    text(u, title, x + 16, y + 14, width - 88, 13, true, u->ink);
-    text(u, detail, x + 16, y + 37, width - 88, 11, false, u->muted);
-    toggle(u, x + width - 56, y + 28, title, on, action, true);
-    return y + 88;
+    return (setting_row){.title = title, .detail = detail, .value = value, .kind = SETTING_VALUE};
+}
+
+static setting_row toggle_row(const char *title, const char *detail, int action, bool on)
+{
+    return (setting_row){.title = title, .detail = detail, .kind = SETTING_TOGGLE,
+                         .action = action, .on = on, .enabled = true};
+}
+
+static setting_row button_row(const char *title, const char *detail, const char *label, int action,
+                              bool enabled)
+{
+    return (setting_row){.title = title, .detail = detail, .value = label, .kind = SETTING_BUTTON,
+                         .action = action, .enabled = enabled};
+}
+
+static setting_row segment_row(const char *title, const char *detail, const char *first,
+                               const char *second, int action, bool second_selected)
+{
+    return (setting_row){.title = title, .detail = detail, .value = first, .alternate = second,
+                         .kind = SETTING_SEGMENTS, .action = action, .on = second_selected};
+}
+
+static int segments_width(const setting_row *row)
+{
+    int font = PH_TEXT(11, PH_FONT_REGULAR);
+    return ph_text_width(row->value, font) + ph_text_width(row->alternate, font) + 54;
+}
+
+static void segments(ph_workspace *u, const setting_row *row, int x, int y)
+{
+    rounded(u, (SDL_Rect){x, y, segments_width(row), 35}, 7, u->background);
+    x += 3;
+    const char *names[] = {row->value, row->alternate};
+    for (int i = 0; i < 2; i++) {
+        bool selected = i == (int)row->on;
+        int font = PH_TEXT(11, selected ? PH_FONT_MEDIUM : PH_FONT_REGULAR);
+        int width = 24 + ph_text_width(names[i], PH_TEXT(11, PH_FONT_REGULAR));
+        SDL_Rect b = {x, y + 3, width, 29};
+        if (selected)
+            rounded(u, b, 5, u->surface);
+        ph_text_draw(u->renderer, names[i], x + 12, y + 9, width - 12, font,
+                     selected ? u->ink : u->muted);
+        if (!selected)
+            hit(u, b, row->action, (uint64_t)i, names[i]);
+        x += width;
+    }
+}
+
+static int row_control_width(const setting_row *row)
+{
+    if (row->kind == SETTING_TOGGLE)
+        return 36;
+    if (row->kind == SETTING_SEGMENTS)
+        return segments_width(row);
+    if (row->kind == SETTING_VOLUME)
+        return 116;
+    return SDL_min(210, ph_text_width(row->value, PH_TEXT(12, PH_FONT_MEDIUM)) +
+                         (row->kind == SETTING_BUTTON ? 30 : 0));
+}
+
+static int setting_row_body(ph_workspace *u, SDL_Rect box, const setting_row *row, bool draw)
+{
+    int controls = row_control_width(row);
+    bool stacked = box.w - controls < 224 && row->kind != SETTING_TOGGLE;
+    int width = box.w - 36 - (stacked ? 0 : controls + 18);
+    int heading = ph_text_height(row->title, width, PH_TEXT(13, PH_FONT_MEDIUM));
+    int detail = row->detail ? 3 + ph_text_height(row->detail, width, PH_TEXT(12, PH_FONT_REGULAR))
+                             : 0;
+    int height = SDL_max(67, 24 + heading + detail + (stacked ? 45 : 0));
+    if (!draw)
+        return height;
+    int label_y = box.y + (height - heading - detail - (stacked ? 45 : 0)) / 2;
+    int center = stacked ? box.y + height - 29 : box.y + height / 2;
+    int control_x = box.x + box.w - 18 - controls;
+    text(u, row->title, box.x + 18, label_y, width, 13, true, u->ink);
+    if (row->detail)
+        text(u, row->detail, box.x + 18, label_y + heading + 3, width, 12, false, u->muted);
+    switch (row->kind) {
+    case SETTING_VALUE:
+        fitted_label(u, row->value, control_x, center - 9, controls + 2, 12, false, u->muted);
+        break;
+    case SETTING_TOGGLE:
+        toggle(u, control_x, center - 10, row->title, row->on, row->action, row->enabled);
+        break;
+    case SETTING_BUTTON:
+        button(u, (SDL_Rect){control_x, center - 17, controls, 34}, row->value, row->action, 0,
+               false, row->enabled);
+        break;
+    case SETTING_SEGMENTS:
+        segments(u, row, control_x, center - 17);
+        break;
+    case SETTING_VOLUME:
+        button(u, (SDL_Rect){control_x, center - 15, 30, 30}, "−", PH_WORKSPACE_VOLUME_DOWN, 0,
+               false, u->live.volume > 0);
+        fitted_label(u, row->value, control_x + 39, center - 9, 43, 12, true, u->muted);
+        button(u, (SDL_Rect){control_x + 86, center - 15, 30, 30}, "+", PH_WORKSPACE_VOLUME_UP, 0,
+               false, u->live.volume < 100);
+        break;
+    }
+    return height;
+}
+
+static int setting_group(ph_workspace *u, int x, int y, int width, const char *title,
+                         const setting_row *rows, size_t count)
+{
+    text(u, title, x, y, width, 10, true, u->muted);
+    y += 23;
+    SDL_Rect group = {x, y, width, 2};
+    for (size_t i = 0; i < count; i++)
+        group.h += setting_row_body(u, group, &rows[i], false);
+    card(u, group);
+    y++;
+    for (size_t i = 0; i < count; i++) {
+        if (i)
+            line(u, x + 1, y, width - 2);
+        y += setting_row_body(u, (SDL_Rect){x, y, width, 0}, &rows[i], true);
+    }
+    return y + 24;
+}
+
+static int settings_heading(ph_workspace *u, int x, int y, int width, bool inline_settings,
+                            const char *title, const char *subtitle)
+{
+    ph_text_draw(u->renderer, title, x, y, width,
+                 PH_TEXT(inline_settings ? 23 : 27, PH_FONT_SEMIBOLD), u->ink);
+    y += inline_settings ? 34 : 41;
+    if (subtitle)
+        y = text(u, subtitle, x, y, width, inline_settings ? 11 : 12, false, u->muted);
+    return y + 24;
+}
+
+/* The System thumbnail uses the same diagonal split as the preview. */
+static void theme_split(ph_workspace *u, SDL_Rect b, float top, float bottom, SDL_Color dark)
+{
+    SDL_Vertex polygon[] = {
+        {.position = {b.x + top * b.w, b.y}, .color = dark},
+        {.position = {b.x + b.w, b.y}, .color = dark},
+        {.position = {b.x + b.w, b.y + b.h}, .color = dark},
+        {.position = {b.x + bottom * b.w, b.y + b.h}, .color = dark}
+    };
+    const int triangles[] = {0, 1, 2, 0, 2, 3};
+    SDL_RenderGeometry(u->renderer, NULL, polygon, 4, triangles, 6);
+}
+
+static void theme_thumbnail(ph_workspace *u, SDL_Rect b, int theme)
+{
+    SDL_Color light_panel = {255, 255, 255, 255}, dark_panel = {36, 42, 50, 255};
+    SDL_Color light_edge = {217, 222, 230, 255}, dark_edge = {65, 73, 86, 255};
+    SDL_Color edge = theme == 1 ? dark_edge : light_edge;
+    SDL_Color panel = theme == 1 ? dark_panel : light_panel;
+    SDL_Color dark_canvas = {21, 24, 28, 255};
+    rounded(u, b, 5, edge);
+    rounded(u, (SDL_Rect){b.x + 1, b.y + 1, b.w - 2, b.h - 2}, 4,
+            theme == 1 ? dark_canvas : (SDL_Color){240, 242, 245, 255});
+    if (theme == 2)
+        theme_split(u, (SDL_Rect){b.x + 1, b.y + 4, b.w - 3, b.h - 8}, .62f, .4f, dark_canvas);
+    rounded(u, (SDL_Rect){b.x + 1, b.y + 1, b.w - 2, 13}, 4, panel);
+    if (theme == 2)
+        theme_split(u, (SDL_Rect){b.x + 1, b.y + 2, b.w - 3, 11}, .62f, .57f, dark_panel);
+    rounded(u, (SDL_Rect){b.x + 8, b.y + 5, 4, 4}, 2, (SDL_Color){50, 145, 93, 255});
+    rect(u, (SDL_Rect){b.x + 1, b.y + 13, b.w - 2, 1}, edge);
+    rect(u, (SDL_Rect){b.x + 1, b.y + 14, b.w / 4, b.h - 17}, panel);
+    rect(u, (SDL_Rect){b.x + b.w / 4, b.y + 14, 1, b.h - 16}, edge);
+    SDL_Rect example = {b.x + b.w / 3, b.y + 25, b.w * 58 / 100,
+                        SDL_max(15, b.h - 38)};
+    rounded(u, example, 3, theme == 2 ? (SDL_Color){119, 130, 146, 255} : edge);
+    rounded(u, (SDL_Rect){example.x + 1, example.y + 1, example.w - 2, example.h - 2}, 2, panel);
+    if (theme == 2)
+        theme_split(u, (SDL_Rect){example.x + 1, example.y + 1, example.w - 2, example.h - 2},
+                    .43f, .26f, dark_panel);
+}
+
+static int appearance_settings(ph_workspace *u, int x, int y, int width, bool inline_settings)
+{
+    text(u, "APPEARANCE", x, y, width, 10, true, u->muted);
+    y += 23;
+    int thumb_h = inline_settings || width < 450 ? 54 : 73;
+    int gap = width < 450 ? 9 : 13, padding = width < 450 ? 13 : 18;
+    int column = (width - 2 * padding - 2 * gap) / 3;
+    int tile_h = thumb_h + 48;
+    int copy_width = width - 2 * padding;
+    const char *subtitle = "Choose an appearance or follow your PC’s settings.";
+    const char *note = "System follows your PC’s light or dark appearance automatically.";
+    int subtitle_h = ph_text_height(subtitle, copy_width, PH_TEXT(12, PH_FONT_REGULAR));
+    int note_h = ph_text_height(note, copy_width, PH_TEXT(11, PH_FONT_REGULAR));
+    int tile_y = y + 58 + subtitle_h;
+    int height = tile_y - y + tile_h + 13 + note_h + 20;
+    card(u, (SDL_Rect){x, y, width, height});
+    text(u, "Theme", x + padding, y + 18, copy_width, 13, true, u->ink);
+    text(u, subtitle, x + padding, y + 40, copy_width, 12, false, u->muted);
+    const char *themes[] = {"Light", "Dark", "System"};
+    for (int i = 0; i < 3; i++) {
+        SDL_Rect tile = {x + padding + i * (column + gap), tile_y, column, tile_h};
+        bool selected = u->theme == i;
+        int edge = selected ? 2 : 1;
+        rounded(u, tile, 9, selected ? u->ink : u->border);
+        rounded(u, (SDL_Rect){tile.x + edge, tile.y + edge, tile.w - 2 * edge, tile.h - 2 * edge},
+                9 - edge, u->surface);
+        theme_thumbnail(u, (SDL_Rect){tile.x + 10, tile.y + 10, tile.w - 20, thumb_h}, i);
+        text(u, themes[i], tile.x + 12, tile.y + thumb_h + 21, tile.w - 32, 12, true, u->ink);
+        SDL_Rect radio = {tile.x + tile.w - 24, tile.y + thumb_h + 22, 13, 13};
+        rounded(u, radio, 7, selected ? u->ink : u->border);
+        int dot = selected ? 4 : 1;
+        rounded(u, (SDL_Rect){radio.x + dot, radio.y + dot, radio.w - 2 * dot, radio.h - 2 * dot},
+                7 - dot, u->surface);
+        hit(u, tile, UI_THEME + i, 0, themes[i]);
+    }
+    text(u, note, x + padding, tile_y + tile_h + 13, copy_width, 11, false, u->muted);
+    return y + height + 23;
+}
+
+static bool guide_matches(const help_guide *guide, const char *query)
+{
+    if (contains(guide->title, query) || contains(guide->summary, query) || contains(guide->note, query))
+        return true;
+    for (size_t i = 0; i < SDL_arraysize(guide->steps); i++)
+        if (contains(guide->steps[i], query))
+            return true;
+    return false;
+}
+
+static int guide_contents(ph_workspace *u, const help_guide *guide, size_t index, SDL_Rect box,
+                          bool draw)
+{
+    int left = box.x + (box.w < 400 ? 40 : 61), right = box.x + box.w - 18;
+    int y = box.y + 69;
+    for (size_t i = 0; i < SDL_arraysize(guide->steps); i++) {
+        if (draw) {
+            char number[8];
+            snprintf(number, sizeof number, "%u.", (unsigned)i + 1);
+            text(u, number, left, y, 22, 12, false, u->muted);
+            text(u, guide->steps[i], left + 19, y, right - left - 19, 12, false, u->muted);
+        }
+        y += ph_text_height(guide->steps[i], right - left - 19, PH_TEXT(12, PH_FONT_REGULAR)) + 6;
+    }
+    y += 8;
+    if (draw)
+        text(u, guide->note, left, y, right - left, 11, false, u->muted);
+    y += ph_text_height(guide->note, right - left, PH_TEXT(11, PH_FONT_REGULAR)) + 14;
+    if (index == 3) {
+        if (draw)
+            button(u, (SDL_Rect){left, y, 156, 31}, "Open control settings", UI_SECTION + 2, 0,
+                   false, true);
+        y += 44;
+    }
+    return y - box.y;
+}
+
+static int draw_guides(ph_workspace *u, int x, int y, int width)
+{
+    bool any = false;
+    for (size_t i = 0; i < SDL_arraysize(help_guides); i++) {
+        const help_guide *g = &help_guides[i];
+        if (!guide_matches(g, u->search))
+            continue;
+        any = true;
+        bool open = u->search[0] || (u->expanded_guides & (1u << i));
+        SDL_Rect box = {x, y, width, 72};
+        if (open)
+            box.h = guide_contents(u, g, i, box, false);
+        card(u, box);
+        rounded(u, (SDL_Rect){x + 16, y + 20, 32, 32}, 7, u->background);
+        ph_icon_draw(u->renderer, g->icon, (SDL_Rect){x + 23, y + 27, 18, 18}, u->muted);
+        fitted_label(u, g->title, x + 61, y + 17, width - 98, 13, true, u->ink);
+        fitted_label(u, g->summary, x + 61, y + 40, width - 98, 11, false, u->muted);
+        text(u, open ? "−" : "+", x + width - 26, y + 23, 17, 17, false, u->muted);
+        if (!u->search[0])
+            hit(u, (SDL_Rect){x, y, width, 65}, UI_HELP_GUIDE, i, g->title);
+        if (open)
+            guide_contents(u, g, i, box, true);
+        y += box.h + 10;
+    }
+    if (!any)
+        y = text(u, "No matching guides. Try a different search.", x, y + 16, width, 12, false,
+                 u->muted) + 16;
+    return y;
+}
+
+static bool shortcut_matches(const char *title, const help_shortcut *shortcut, const char *query)
+{
+    return contains(title, query) || contains(shortcut->action, query) ||
+           contains(shortcut->keys, query);
+}
+
+static int draw_shortcuts(ph_workspace *u, int x, int y, int width)
+{
+    y = text(u, "Use the left Alt key. iPhone controls require an active Bluetooth input connection. "
+                "Ctrl acts as Command when enabled in Controls. Window and capture shortcuts apply "
+                "while viewing a shared screen.", x, y, width, 11, false, u->muted) + 16;
+    bool any = false;
+    for (size_t i = 0; i < SDL_arraysize(help_shortcut_groups); i++) {
+        const char *title = help_shortcut_groups[i].title;
+        const help_shortcut *rows = help_shortcut_groups[i].shortcuts;
+        size_t count = help_shortcut_groups[i].count;
+        int box_height = 2;
+        for (size_t j = 0; j < count; j++) {
+            if (!shortcut_matches(title, &rows[j], u->search))
+                continue;
+            int keys = ph_text_width(rows[j].keys, PH_TEXT(10, PH_FONT_MONO));
+            int label = width - keys - 49;
+            box_height += SDL_max(42, ph_text_height(rows[j].action, label,
+                                                     PH_TEXT(12, PH_FONT_REGULAR)) + 20);
+        }
+        if (box_height == 2)
+            continue;
+        any = true;
+        y = text(u, title, x, y, width, 11, true, u->muted) + 8;
+        card(u, (SDL_Rect){x, y, width, box_height});
+        int row_y = ++y;
+        for (size_t j = 0; j < count; j++) {
+            const help_shortcut *shortcut = &rows[j];
+            if (!shortcut_matches(title, shortcut, u->search))
+                continue;
+            if (y > row_y)
+                line(u, x + 1, y, width - 2);
+            int keys = ph_text_width(shortcut->keys, PH_TEXT(10, PH_FONT_MONO));
+            int label = width - keys - 49;
+            int h = SDL_max(42, ph_text_height(shortcut->action, label,
+                                               PH_TEXT(12, PH_FONT_REGULAR)) + 20);
+            text(u, shortcut->action, x + 14, y + 11, label, 12, false, u->ink);
+            ph_text_draw(u->renderer, shortcut->keys, x + width - keys - 16, y + (h - 15) / 2,
+                         keys + 2, PH_TEXT(10, PH_FONT_MONO), u->muted);
+            y += h;
+        }
+        y += 23;
+    }
+    if (!any)
+        y = text(u, "No matching shortcuts. Try a different search.", x, y + 16, width, 12,
+                 false, u->muted) + 16;
+    return y;
+}
+
+static int help_settings(ph_workspace *u, int x, int y, int width)
+{
+    entry_box(u, (SDL_Rect){x, y, width, 39}, u->search, "Search help and shortcuts", UI_SEARCH);
+    y += 54;
+    const char *tabs[] = {"Guides", "Keyboard shortcuts"};
+    int tab_x = x;
+    line(u, x, y + 41, width);
+    for (int i = 0; i < 2; i++) {
+        bool active = (int)u->shortcuts == i;
+        int font = PH_TEXT(12, active ? PH_FONT_MEDIUM : PH_FONT_REGULAR);
+        int w = ph_text_width(tabs[i], font);
+        ph_text_draw(u->renderer, tabs[i], tab_x, y + 12, w + 2, font,
+                     active ? u->ink : u->muted);
+        if (active)
+            rect(u, (SDL_Rect){tab_x, y + 40, w, 2}, u->ink);
+        hit(u, (SDL_Rect){tab_x, y, w + 5, 42}, i ? UI_SHORTCUTS : UI_GUIDES, 0, tabs[i]);
+        tab_x += w + 23;
+    }
+    y += 62;
+    return u->shortcuts ? draw_shortcuts(u, x, y, width) : draw_guides(u, x, y, width);
 }
 bool ph_workspace_set_sessions(ph_workspace *u, const ph_session_state *state)
 {
@@ -1375,244 +1829,334 @@ static int device_row(ph_workspace *u, int x, int y, int width, int index)
     }
     return y + h + 12;
 }
+static int general_settings(ph_workspace *u, int x, int y, int width, bool inline_settings)
+{
+    y = appearance_settings(u, x, y, width, inline_settings);
+    setting_row rows[] = {
+        toggle_row("Keep Porthole available in the system tray",
+#ifdef _WIN32
+                   "Access connection and control options from the notification area.",
+#else
+                   "Keep transfers available when you close the window.",
+#endif
+                   UI_TRAY, u->tray),
+        toggle_row("Launch at sign-in", u->launch_managed
+                       ? "Managed by the Windows installer for all users."
+                       : "Start Porthole when you sign in to your PC.",
+                   UI_SIGN_IN, u->launch_at_sign_in || u->launch_managed)
+    };
+    rows[1].enabled = !u->launch_managed;
+    return setting_group(u, x, y, width, "APPLICATION", rows, SDL_arraysize(rows));
+}
+
+static int screen_settings(ph_workspace *u, int x, int y, int width)
+{
+    setting_row screen[] = {
+        toggle_row("Keep the iPhone aspect ratio",
+                   "Preserve the full phone display when resizing the window.",
+                   UI_KEEP_ASPECT, u->keep_aspect),
+        toggle_row("Always on top", "Keep the sharing window above other applications.",
+                   PH_WORKSPACE_ALWAYS_ON_TOP, u->live.always_on_top)
+    };
+    y = setting_group(u, x, y, width, "SCREEN", screen, SDL_arraysize(screen));
+    char volume[16];
+    snprintf(volume, sizeof volume, "%d%%", u->live.volume);
+    setting_row audio[] = {
+        value_row("iPhone app broadcast", "Audio remains on your iPhone.", "On iPhone"),
+        toggle_row("PC audio", "Play Screen Mirroring audio on this PC.",
+                   PH_WORKSPACE_SOUND, u->live.sound),
+        {.title = "Output volume", .value = volume, .kind = SETTING_VOLUME}
+    };
+    y = setting_group(u, x, y, width, "AUDIO", audio, SDL_arraysize(audio));
+    setting_row capture[] = {
+        button_row("Full screen", NULL, "Full screen", PH_WORKSPACE_FULLSCREEN, u->live.mirroring),
+        button_row("Screenshot", NULL, "Save screenshot", PH_WORKSPACE_CAPTURE, u->live.mirroring),
+        button_row("Recording", NULL, u->live.recording ? "Stop recording" : "Start recording",
+                   PH_WORKSPACE_RECORD, u->live.mirroring || u->live.recording),
+        button_row("Saved captures", NULL, "Open Captures folder", PH_WORKSPACE_CAPTURES, true)
+    };
+    return setting_group(u, x, y, width, "CAPTURE AND DISPLAY", capture, SDL_arraysize(capture));
+}
+
+static const char *controls_status(const ph_workspace *u)
+{
+    if (u->live.paused)
+        return "Disabled on this PC";
+    if (u->live.phone_controls_managed && !u->live.phone_controls_allowed)
+        return "Disabled on your iPhone";
+    if (u->live.controls)
+        return "Active · Mouse and keyboard enabled";
+    if (u->live.mirroring)
+        return "Enabled · Waiting for Bluetooth input";
+    return "Enabled · Waiting for screen sharing";
+}
+
+static int control_settings(ph_workspace *u, int x, int y, int width)
+{
+    const char *activation = !u->live.phone_controls_managed || u->live.phone_controls_screen_only
+                                 ? "Screen sharing only" : "When connected";
+    setting_row connection[] = {
+        toggle_row("Enable PC controls", "Allow this PC’s mouse and keyboard to control your iPhone.",
+                   PH_WORKSPACE_CONTROLS, !u->live.paused),
+        value_row("Activation", "Managed under Mouse and keyboard in the iPhone app.", activation)
+    };
+    y = setting_group(u, x, y, width, "CONNECTION", connection, SDL_arraysize(connection));
+    if (u->live.mirroring) {
+        setting_row sharing = toggle_row("Show control toolbar",
+                                         "Display navigation and volume buttons beside your iPhone.",
+                                         PH_WORKSPACE_TOOLBAR, u->live.toolbar);
+        y = setting_group(u, x, y, width, "SHARING WINDOW", &sharing, 1);
+    }
+    setting_row pointer[] = {
+        segment_row("Pointer mode", "Changes apply after restarting Porthole and pairing again.",
+                    "Absolute", "Relative", PH_WORKSPACE_POINTER, u->live.relative),
+        segment_row("Wheel scrolling", "Feed mode converts each scroll burst into a swipe. F4 toggles this mode.",
+                    "Normal", "Feed", PH_WORKSPACE_FEED, u->live.feed)
+    };
+    y = setting_group(u, x, y, width, "POINTER", pointer, SDL_arraysize(pointer));
+    setting_row keyboard[] = {
+        toggle_row("Use Ctrl as Command", "Use familiar shortcuts such as Ctrl+C, Ctrl+V and Ctrl+A.",
+                   PH_WORKSPACE_CTRL_COMMAND, u->live.ctrl_command),
+        toggle_row("Forward media keys", "Send playback and volume keys to your iPhone.",
+                   PH_WORKSPACE_MEDIA, u->live.media_keys),
+        toggle_row("Release input when switching apps",
+                   "Release held keys and mouse buttons when Porthole loses focus.",
+                   PH_WORKSPACE_RELEASE, u->live.release_blur)
+    };
+    y = setting_group(u, x, y, width, "KEYBOARD", keyboard, SDL_arraysize(keyboard));
+    const char *notice = u->live.paused
+                            ? "Enable PC controls to use this PC’s mouse and keyboard with your iPhone."
+                        : u->live.mirroring
+                            ? "Control your iPhone from the shared screen or toolbar. Settings input stays on this PC."
+                        : !u->live.phone_controls_managed || u->live.phone_controls_screen_only
+                            ? "PC controls activate when screen sharing starts."
+                            : "PC controls are available while your iPhone is connected.";
+    y = text(u, notice, x, y, width, 11, true, u->muted);
+    y = text(u, "File transfers and clipboard sync remain available independently.",
+             x, y + 2, width, 11, false, u->muted) + 12;
+    action_button(u, (SDL_Rect){x, y, 130, 31}, "Set up controls", PH_WORKSPACE_SETUP, 0,
+                  false, true, false, -1);
+    return y + 31;
+}
+
+static int transfer_settings(ph_workspace *u, int x, int y, int width)
+{
+    setting_row storage = button_row("Save received files", "Files shared from your iPhone are saved here.",
+                                     u->live.folder[0] ? u->live.folder : "Downloads",
+                                     PH_WORKSPACE_FOLDER, true);
+    y = setting_group(u, x, y, width, "FILE STORAGE", &storage, 1);
+    setting_row clipboard[] = {
+        toggle_row("Clipboard sync", "Manage synchronization permissions in the iPhone app.",
+                   UI_SYNC, u->sync),
+        toggle_row("PC to iPhone", "Send clipboard updates to your iPhone.", UI_TO_PHONE, u->to_phone),
+        toggle_row("iPhone to PC", "Receive clipboard updates from your iPhone.", UI_TO_PC, u->to_pc)
+    };
+    y = setting_group(u, x, y, width, "CLIPBOARD", clipboard, SDL_arraysize(clipboard));
+    setting_row history[] = {
+        button_row("File history", NULL, "Open file history", UI_HISTORY, true),
+        button_row("Clipboard history", NULL, "Open clipboard history", PH_WORKSPACE_CLIPBOARD_OPEN, true),
+        button_row("Clear clipboard history", "Remove saved clipboard items from this PC.",
+                   "Clear clipboard history", UI_CLEAR_ALL_CLIPBOARD, true)
+    };
+    return setting_group(u, x, y, width, "HISTORY", history, SDL_arraysize(history));
+}
+
+static int notification_settings(ph_workspace *u, int x, int y, int width)
+{
+    setting_row notifications = toggle_row("Transfer notifications",
+                                            "Notify me when files are received while Porthole is minimized.",
+                                            UI_NOTIFY, u->notifications);
+    y = setting_group(u, x, y, width, "DESKTOP NOTIFICATIONS", &notifications, 1);
+    setting_row behavior = value_row("Notification action",
+                                     "Select a received-file notification to show the saved files.",
+                                     "Show in folder");
+    y = setting_group(u, x, y, width, "BEHAVIOR", &behavior, 1);
+#ifdef _WIN32
+    y = text(u, "Windows notification settings and Do not disturb can suppress notifications.",
+             x, y, width, 11, false, u->muted) + 2;
+#endif
+    return text(u, "The bell in the sharing toolbar opens your iPhone’s Notification Center.",
+                x, y, width, 11, false, u->muted);
+}
+
+static int statistics_settings(ph_workspace *u, int x, int y, int width)
+{
+    setting_row session[] = {
+        value_row("Device", NULL, u->live.phone[0] ? u->live.phone : "—"),
+        value_row("Connection", NULL, u->live.connected ? "Wi-Fi"
+                                     : u->live.mirroring ? "Screen connected" : "Disconnected"),
+        value_row("Screen sharing", NULL, u->live.mirroring ? "Active" : "Inactive"),
+        value_row("Bluetooth input", NULL, u->live.controls_connected ? "Active" : "Inactive")
+    };
+    y = setting_group(u, x, y, width, "SESSION", session, SDL_arraysize(session));
+    const ph_metrics_snapshot *metrics = &u->live.metrics;
+    if (!u->live.mirroring && !u->live.controls_connected)
+        return y;
+    char fps[24] = "—", decode[24] = "—", present[24] = "—", input[24] = "—", ack[24] = "—";
+    if (u->live.mirroring && metrics->fps_known)
+        snprintf(fps, sizeof fps, "%.1f fps", metrics->fps);
+    if (u->live.mirroring && metrics->receive_to_decode.known)
+        snprintf(decode, sizeof decode, "%.1f ms", metrics->receive_to_decode.mean_ms);
+    if (u->live.mirroring && metrics->receive_to_present.known)
+        snprintf(present, sizeof present, "%.1f ms", metrics->receive_to_present.mean_ms);
+    if (u->live.controls_connected && metrics->input_handoff.known)
+        snprintf(input, sizeof input, "%.1f ms", metrics->input_handoff.mean_ms);
+    if (u->live.controls_connected && metrics->helper_ack.known)
+        snprintf(ack, sizeof ack, "%.1f ms", metrics->helper_ack.mean_ms);
+    setting_row measured[] = {
+        value_row("Video frame rate", NULL, fps),
+        value_row("Receive to decode", NULL, decode),
+        value_row("Receive to display", NULL, present),
+        value_row("Input handoff", NULL, input),
+        value_row("Bluetooth helper acknowledgement", NULL, ack)
+    };
+    y = setting_group(u, x, y, width, "MEASUREMENTS", measured, SDL_arraysize(measured));
+    return text(u, "Times measure processing on this PC.", x, y, width, 11, false, u->muted);
+}
+
+static const char *const setting_sections[] = {
+    "General", "Screen and audio", "Controls", "Transfers", "Notifications",
+    "Help and shortcuts", "Connection statistics", "About"
+};
+
+static void settings_navigation(ph_workspace *u, SDL_Rect box, bool compact, bool menu)
+{
+    const ph_control_icon icons[] = {PH_ICON_SUN, PH_ICON_PHONE, PH_ICON_MOUSE, PH_ICON_ARROWS,
+                                     PH_ICON_BELL, PH_ICON_HELP, PH_ICON_STATS, PH_ICON_INFO};
+    rect(u, box, u->surface);
+    int pad = compact ? 10 : 15, top = box.y + (compact ? 15 : 18);
+    int step = menu ? SDL_min(41, (box.h - 30) / (int)SDL_arraysize(setting_sections)) : 41;
+    for (size_t i = 0; i < SDL_arraysize(setting_sections); i++) {
+        SDL_Rect row = {box.x + pad, top + (int)i * step, box.w - 2 * pad, step - 3};
+        if (row.y + row.h > box.y + box.h - 10)
+            break;
+        bool selected = u->section == (int)i;
+        if (selected)
+            rounded(u, row, 7, u->selected_bg);
+        SDL_Color ink = selected ? u->ink : u->muted;
+        int glyph = compact ? 15 : 17;
+        ph_icon_draw(u->renderer, icons[i],
+                     (SDL_Rect){row.x + 12, row.y + (row.h - glyph) / 2, glyph, glyph}, ink);
+        int label_x = row.x + (compact ? 35 : 39);
+        fitted_label(u, setting_sections[i], label_x, row.y + (row.h - 18) / 2,
+                     row.x + row.w - label_x - 6, compact ? 11 : 12, selected, ink);
+        hit(u, row, UI_SECTION + (int)i, 0, setting_sections[i]);
+    }
+    if (!menu && box.h > 400)
+        text(u, "Porthole " PORTHOLE_VERSION " · GPL-3.0", box.x + 27, box.y + box.h - 31,
+             box.w - 40, 10, false, u->muted);
+}
+
+static int device_settings(ph_workspace *u, int x, int y, int width)
+{
+    if (u->sessions.request_id[0]) {
+        y = text(u, u->sessions.request_name, x, y, width, 17, true, u->ink) + 8;
+        y = text(u, "Screen Mirroring access requested", x, y, width, 12, false, u->muted) + 12;
+        button(u, (SDL_Rect){x, y, 108, 34}, "Review PIN", UI_REVIEW, 0, true, true);
+        button(u, (SDL_Rect){x + 118, y, 90, 34}, "Reject", UI_REJECT, 0, false, true);
+        y += 54;
+    }
+    bool registry = false, selected = false;
+    for (int i = 0; i < u->sessions.count; i++) {
+        if (u->sessions.devices[i].companion) {
+            registry = true;
+            selected = selected || u->sessions.devices[i].active;
+        }
+    }
+    button(u, (SDL_Rect){x, y, 118, 32}, "Add iPhone", PH_WORKSPACE_ADD_PHONE, 0, true,
+           u->live.paired);
+    if (u->live.paired && (selected || !registry))
+        button(u, (SDL_Rect){x + 128, y, 118, 32}, "New code", PH_WORKSPACE_NEW_CODE, 0, false, true);
+    y += 46;
+    if (!registry && u->live.paired)
+        y = device_row(u, x, y, width, 0);
+    for (int i = 0; i < u->sessions.count; i++)
+        y = device_row(u, x, y, width, i + 1);
+    setting_row approval = toggle_row("Require local approval",
+                                       "Verify a PIN on this PC before admitting a new Screen Mirroring device.",
+                                       PH_WORKSPACE_PIN_REQUIRED, u->sessions.pin_required);
+    return setting_group(u, x, y, width, "SCREEN MIRRORING", &approval, 1);
+}
+
 static void settings(ph_workspace *u)
 {
-    static const char *sections[] = {"General",
-                                     "Screen and audio",
-                                     "Controls",
-                                     "Transfers",
-                                     "Notifications",
-                                     "Help and shortcuts",
-                                     "Connection statistics",
-                                     "About",
-                                     "Devices"};
     SDL_Rect b = u->rect;
-    bool narrow = b.w < 600;
-    int nav = narrow ? 0 : b.w >= 650 ? 200 : 140, top = narrow ? 64 : 0;
-    int x = b.x + nav + (narrow ? 16 : 24), width = b.w - nav - (narrow ? 32 : 48),
-        y = b.y + top + 32 - u->scroll;
+    bool inline_settings = u->live.mirroring;
+    bool narrow = b.w < (inline_settings ? 510 : 600);
+    int nav = narrow ? 0 : inline_settings ? 180 : 224;
+    int pad = narrow ? 16 : inline_settings ? 23 : 44;
+    int width = SDL_min(b.w - nav - 2 * pad, 860);
+    int x = b.x + nav + pad;
+    int top = b.y + 47, bottom = b.y + b.h - (inline_settings ? 34 : 0);
+    rect(u, (SDL_Rect){b.x, b.y, b.w, 47}, u->surface);
+    line(u, b.x, top - 1, b.w);
+    ph_text_draw(u->renderer, "Settings", b.x + 19, b.y + 10, 140,
+                 PH_TEXT(17, PH_FONT_SEMIBOLD), u->ink);
+    close_button(u, b.x + b.w - 49, b.y + 10, PH_WORKSPACE_CLOSE);
     if (narrow) {
-        rect(u, (SDL_Rect){b.x, b.y, b.w, top}, u->surface);
-        button(u, (SDL_Rect){b.x + 16, b.y + 13, 130, 34}, "Settings menu", UI_SECTION_MENU, 0,
-               false, true);
-    } else {
-        rect(u, (SDL_Rect){b.x, b.y, nav, b.h}, u->surface);
-        text(u, "Settings", b.x + 20, b.y + 24, nav - 35, 24, true, u->ink);
+        ph_icon_draw(u->renderer, PH_ICON_CHEVRON,
+                     (SDL_Rect){b.x + 91, b.y + 16, 13, 13}, u->muted);
+        hit(u, (SDL_Rect){b.x + 10, b.y + 6, 110, 34}, UI_SECTION_MENU, 0, "Settings menu");
     }
     if (!narrow || u->section_menu) {
-        int menu_width = narrow ? b.w : nav;
-        int menu_y = b.y + (narrow ? 64 : 88);
-        if (narrow)
-            rect(u, (SDL_Rect){b.x, menu_y, b.w, b.h - top}, u->surface);
-        for (int i = 0; i < 9; i++) {
-            int step = narrow ? SDL_min(42, (b.h - top) / 9) : 44;
-            SDL_Rect row = {b.x + 10, menu_y + i * step, menu_width - 20, step - 4};
-            if (u->section == i)
-                rounded(u, row, 7, u->selected_bg);
-            text(u, sections[i], row.x + 10, row.y + 8, row.w - 18, 12, u->section == i,
-                 u->section == i ? u->ink : u->muted);
-            hit(u, row, UI_SECTION + i, 0, sections[i]);
+        SDL_Rect sidebar = {b.x, top, narrow ? b.w : nav, bottom - top};
+        settings_navigation(u, sidebar, inline_settings, narrow);
+        if (!narrow)
+            rect(u, (SDL_Rect){b.x + nav - 1, top, 1, bottom - top}, u->border);
+    }
+    if (!narrow || !u->section_menu) {
+        SDL_Rect clip = {b.x + nav, top, b.w - nav, bottom - top};
+        SDL_RenderSetClipRect(u->renderer, &clip);
+        int y = top + (inline_settings ? 22 : 30) - u->scroll;
+        const char *titles[] = {"General", "Screen and audio", "Mouse and keyboard", "Transfers",
+                                "Notifications", "Help and shortcuts", "Connection statistics",
+                                "About Porthole", "Devices"};
+        const char *subtitles[] = {"Application preferences", "Screen-sharing preferences", NULL,
+                                   "File storage and clipboard preferences", "Porthole alerts on this PC",
+                                   "Guides for connecting, sharing, and controlling your iPhone.",
+                                   "Current connection details", "Connect your iPhone and PC.", NULL};
+        int section = SDL_clamp(u->section, 0, 8);
+        y = settings_heading(u, x, y, width, inline_settings, titles[section], subtitles[section]);
+        switch (section) {
+        case 0: y = general_settings(u, x, y, width, inline_settings); break;
+        case 1: y = screen_settings(u, x, y, width); break;
+        case 2:
+            status_dot(u, x, y - 17, u->live.controls);
+            text(u, controls_status(u), x + 14, y - 22, width - 14, 12, false, u->muted);
+            y = control_settings(u, x, y + 16, width);
+            break;
+        case 3: y = transfer_settings(u, x, y, width); break;
+        case 4: y = notification_settings(u, x, y, width); break;
+        case 5: y = help_settings(u, x, y - 1, width); break;
+        case 6: y = statistics_settings(u, x, y, width); break;
+        case 7: {
+            setting_row about[] = {value_row("Porthole", NULL, PORTHOLE_VERSION),
+                                   value_row("License", NULL, "GPL-3.0")};
+            y = setting_group(u, x, y, width, "APPLICATION", about, SDL_arraysize(about));
+            break;
         }
-        if (narrow) {
-            close_button(u, b.x + b.w - 44, b.y + 15, PH_WORKSPACE_CLOSE);
-            return;
+        case 8: y = device_settings(u, x, y, width); break;
+        }
+        SDL_RenderSetClipRect(u->renderer, NULL);
+        int visible = bottom - top;
+        u->scroll_limit = SDL_max(0, y + u->scroll + 16 - bottom);
+        if (u->scroll_limit && visible > 0) {
+            int thumb = SDL_max(30, visible * visible / (u->scroll_limit + visible));
+            int dy = (visible - thumb) * u->scroll / u->scroll_limit;
+            rounded(u, (SDL_Rect){b.x + b.w - 7, top + dy, 3, thumb}, 2, u->border);
         }
     }
-    SDL_Rect clip = {x, b.y + top + 18, width, b.h - top - 30};
-    SDL_RenderSetClipRect(u->renderer, &clip);
-    text(u, sections[u->section], x, y, width - 35, 26, true, u->ink);
-    y += 55;
-    if (u->section == 0) {
-        text(u, "Appearance", x, y, width, 12, true, u->muted);
-        y += 27;
-        const char *themes[] = {"Light", "Dark", "System"};
-        for (int i = 0; i < 3; i++)
-            button(u, (SDL_Rect){x + i * (width / 3), y, width / 3 - 8, 40}, themes[i],
-                   UI_THEME + i, 0, u->theme == i, true);
-        y += 66;
-        y = setting(u, x, y, width, "Keep running in the background",
-                    "Closing the window keeps connections and transfers available.", UI_TRAY,
-                    u->tray);
-        button(u, (SDL_Rect){x, y, 140, 34}, "Quit Porthole", PH_WORKSPACE_QUIT, 0, false, true);
-        y += 50;
-    } else if (u->section == 1) {
-        y = setting(u, x, y, width, "PC audio", "Play Screen Mirroring audio on this PC.",
-                    PH_WORKSPACE_SOUND, u->live.sound);
-        char volume[48];
-        snprintf(volume, sizeof volume, "Output volume · %d%%", u->live.volume);
-        text(u, volume, x, y, width, 13, true, u->ink);
-        y += 30;
-        button(u, (SDL_Rect){x, y, 58, 32}, "−", PH_WORKSPACE_VOLUME_DOWN, 0, false, true);
-        button(u, (SDL_Rect){x + 70, y, 58, 32}, "+", PH_WORKSPACE_VOLUME_UP, 0, false, true);
-        y += 58;
-        button(u, (SDL_Rect){x, y, 136, 34}, "Full screen", PH_WORKSPACE_FULLSCREEN, 0, false,
-               u->live.mirroring);
-        y += 50;
-        button(u, (SDL_Rect){x, y, 136, 34}, "Save screenshot", PH_WORKSPACE_CAPTURE, 0, false,
-               u->live.mirroring);
-        y += 50;
-        button(u, (SDL_Rect){x, y, 136, 34},
-               u->live.recording ? "Stop recording" : "Start recording", PH_WORKSPACE_RECORD, 0,
-               false, u->live.mirroring || u->live.recording);
-        y += 50;
-        button(u, (SDL_Rect){x, y, 158, 34}, "Open Captures folder", PH_WORKSPACE_CAPTURES, 0,
-               false, true);
-        y += 50;
-    } else if (u->section == 2) {
-        y = setting(u, x, y, width, "Enable PC controls",
-                    "Use this PC’s mouse and keyboard during screen sharing.",
-                    PH_WORKSPACE_CONTROLS, !u->live.paused);
-        if (u->live.mirroring)
-            y = setting(u, x, y, width, "Show control toolbar",
-                        "Display navigation and volume controls beside your iPhone.",
-                        PH_WORKSPACE_TOOLBAR, u->live.toolbar);
-        y = setting(u, x, y, width, "Relative pointer",
-                    "Restart Porthole and pair again after changing pointer mode.",
-                    PH_WORKSPACE_POINTER, u->live.relative);
-        y = setting(u, x, y, width, "Feed scrolling",
-                    "Convert each wheel burst into a swipe. F4 toggles this mode.",
-                    PH_WORKSPACE_FEED, u->live.feed);
-        y = setting(u, x, y, width, "Use Ctrl as Command",
-                    "Use Ctrl+C, Ctrl+V and Ctrl+A on your iPhone.", PH_WORKSPACE_CTRL_COMMAND,
-                    u->live.ctrl_command);
-        y = setting(u, x, y, width, "Forward media keys",
-                    "Send playback and volume keys to your iPhone.", PH_WORKSPACE_MEDIA,
-                    u->live.media_keys);
-        y = setting(u, x, y, width, "Release input when switching apps",
-                    "Release held keys and mouse buttons when Porthole loses focus.",
-                    PH_WORKSPACE_RELEASE, u->live.release_blur);
-        button(u, (SDL_Rect){x, y, 164, 34}, "Set up controls", PH_WORKSPACE_SETUP, 0, false, true);
-        y += 50;
-    } else if (u->section == 3) {
-        text(u, "Receive folder", x, y, width, 13, true, u->ink);
-        y += 28;
-        text(u, u->live.folder, x, y, width, 12, false, u->muted);
-        y += 30;
-        button(u, (SDL_Rect){x, y, 140, 34}, "Change folder", PH_WORKSPACE_FOLDER, 0, false, true);
-        y += 54;
-        button(u, (SDL_Rect){x, y, 140, 34}, "File history", UI_HISTORY, 0, false, true);
-        y += 54;
-        button(u, (SDL_Rect){x, y, 140, 34}, "Clipboard history", PH_WORKSPACE_CLIPBOARD_OPEN, 0,
-               false, true);
-        y += 54;
-        button(u, (SDL_Rect){x, y, SDL_min(width, 230), 34}, "Clear clipboard history on this PC",
-               UI_CLEAR_ALL_CLIPBOARD, 0, false, true);
-        y += 54;
-        y = setting(u, x, y, width, "Clipboard sync",
-                    "Synchronize text and images between your devices.", UI_SYNC, u->sync);
-        y = setting(u, x, y, width, "PC to iPhone", "Send clipboard updates to your iPhone.",
-                    UI_TO_PHONE, u->to_phone);
-        y = setting(u, x, y, width, "iPhone to PC", "Receive clipboard updates from your iPhone.",
-                    UI_TO_PC, u->to_pc);
-    } else if (u->section == 4) {
-        y = setting(u, x, y, width, "Transfer notifications",
-                    "Notify me when files arrive while Porthole is minimized.", UI_NOTIFY,
-                    u->notifications);
-        y = text(u,
-                 "Windows notification settings and Do not disturb can suppress alerts. Transfers "
-                 "remain available in File history.",
-                 x, y, width, 12, false, u->muted) +
-            22;
-    } else if (u->section == 5) {
-        search_box(u, (SDL_Rect){x, y, width, 34});
-        y += 48;
-        button(u, (SDL_Rect){x, y, 112, 30}, "Guides", UI_GUIDES, 0, !u->shortcuts, true);
-        button(u, (SDL_Rect){x + 124, y, 154, 30}, "Keyboard shortcuts", UI_SHORTCUTS, 0,
-               u->shortcuts, true);
-        y += 48;
-        static const char *guides[] = {
-            "Connect your iPhone\nOpen Porthole on your iPhone. Scan the QR code, or enter the "
-            "address and connection code. Keep both devices on the same Wi-Fi network.",
-            "Screen sharing\nSelect Share screen in Porthole on your iPhone, then Start Broadcast. "
-            "File transfers and clipboard sync work without screen sharing.",
-            "Mouse and keyboard\nEnable AssistiveTouch and disable Dwell Control on your iPhone. "
-            "Pair the Porthole Bluetooth input device, then use Set up controls to check pointer "
-            "alignment.",
-            "Send and receive files\nDrop files into Porthole or select Send files. On iPhone, "
-            "select files in Photos or Files, tap Share, then choose Porthole.",
-            "Original files\nHold Ctrl and drag a photo or video from the shared screen to request "
-            "its original. If matching fails, use Choose original in the iPhone app.",
-            "Clipboard\nCopy text or an image to sync it. The Clipboard panel keeps up to 100 "
-            "recent items on this PC. Copy, send, delete selected items, or clear history.",
-            "File history\nView sent and received transfers. Show in folder selects the local "
-            "file. Use Locate file if it has moved. Removing records keeps your files."};
-        static const char *keys[] = {"F1   Help and shortcuts",
-                                     "F2   Set up controls",
-                                     "F3   Connection statistics",
-                                     "F4   Toggle feed scrolling",
-                                     "F8   Save screenshot",
-                                     "F9   Start or stop recording",
-                                     "Alt+Enter   Full screen",
-                                     "Alt+H   Home",
-                                     "Alt+S   App Switcher",
-                                     "Alt+C   Control Center",
-                                     "Alt+N   Notification Center",
-                                     "Alt+P   iPhone screenshot",
-                                     "Alt+Up / Alt+Down   iPhone volume",
-                                     "Alt+M   Mute PC audio",
-                                     "Ctrl+drag   Request original file",
-                                     "F6   Switch connected screen",
-                                     "Alt+T   Always on top",
-                                     "Alt+1   Actual pixels",
-                                     "Alt+F   Search on iPhone",
-                                     "Alt+Left   Back",
-                                     "Alt+Page Up / Page Down   Swipe",
-                                     "Alt+Shift+Arrow   Directional swipe",
-                                     "Alt+D   Double tap",
-                                     "Alt+L   Touch and hold",
-                                     "Alt+U   Swipe from the bottom",
-                                     "Alt+K   Toggle iPhone keyboard",
-                                     "Alt+- / =   Adjust PC volume",
-                                     "Alt+, / .   Adjust audio sync",
-                                     "Ctrl+Tab   Focus transfer controls during screen sharing",
-                                     "Escape   Cancel gesture or close local panel"};
-        int count = u->shortcuts ? (int)SDL_arraysize(keys) : (int)SDL_arraysize(guides);
-        for (int i = 0; i < count; i++) {
-            const char *s = u->shortcuts ? keys[i] : guides[i];
-            if (!contains(s, u->search))
-                continue;
-            y = text(u, s, x, y, width, u->shortcuts ? 13 : 12, false, u->ink) + 24;
-        }
-    } else if (u->section == 6) {
-        button(u, (SDL_Rect){x, y, 170, 34}, "Show statistics", PH_WORKSPACE_STATS, 0, false, true);
-        y += 54;
-    } else if (u->section == 8) {
-        if (u->sessions.request_id[0]) {
-            y = text(u, u->sessions.request_name, x, y, width, 17, true, u->ink) + 8;
-            y = text(u, "Screen Mirroring access requested", x, y, width, 12, false, u->muted) + 12;
-            button(u, (SDL_Rect){x, y, 108, 34}, "Review PIN", UI_REVIEW, 0, true, true);
-            button(u, (SDL_Rect){x + 118, y, 90, 34}, "Reject", UI_REJECT, 0, false, true);
-            y += 54;
-        }
-        bool registry = false;
-        bool selected = false;
-        for (int i = 0; i < u->sessions.count; i++) {
-            if (u->sessions.devices[i].companion) {
-                registry = true;
-                selected = selected || u->sessions.devices[i].active;
-            }
-        }
-        button(u, (SDL_Rect){x, y, 118, 32}, "Add iPhone", PH_WORKSPACE_ADD_PHONE, 0, true,
-               u->live.paired);
-        if (u->live.paired && (selected || !registry))
-            button(u, (SDL_Rect){x + 128, y, 118, 32}, "New code", PH_WORKSPACE_NEW_CODE, 0,
-                   false, true);
-        y += 46;
-        if (!registry && u->live.paired)
-            y = device_row(u, x, y, width, 0);
-        for (int i = 0; i < u->sessions.count; i++)
-            y = device_row(u, x, y, width, i + 1);
-        y = setting(u, x, y, width, "Require local approval",
-                    "Verify a PIN on this PC before admitting a new Screen Mirroring device.",
-                    PH_WORKSPACE_PIN_REQUIRED, u->sessions.pin_required);
-    } else {
-        y = text(u, "Porthole " PORTHOLE_VERSION "\nFree software · GPL-3.0", x, y, width, 15,
-                 false, u->ink) +
-            30;
+    if (inline_settings) {
+        rect(u, (SDL_Rect){b.x, bottom, b.w, 34}, u->surface);
+        line(u, b.x, bottom, b.w);
+        status_dot(u, b.x + 17, bottom + 15, true);
+        fitted_label(u, "Screen sharing continues", b.x + 30, bottom + 10, b.w / 2 - 30,
+                     10, false, u->muted);
+        const char *controls = u->live.paused ? "PC controls disabled" : "PC controls enabled";
+        int controls_width = ph_text_width(controls, PH_TEXT(10, PH_FONT_REGULAR));
+        text(u, controls, b.x + b.w - 16 - controls_width, bottom + 10, controls_width + 2,
+             10, false, u->muted);
     }
-    SDL_RenderSetClipRect(u->renderer, NULL);
-    close_button(u, b.x + b.w - 44, b.y + 15, PH_WORKSPACE_CLOSE);
-    u->scroll_limit = SDL_max(y + u->scroll - b.y - b.h + 24, 0);
 }
 static void confirmation(ph_workspace *u)
 {
@@ -1711,9 +2255,12 @@ static void draw_page(ph_workspace *u)
     SDL_RenderSetClipRect(u->renderer, NULL);
     rect(u, b,
          view == PH_WORKSPACE_CLIPBOARD || view == PH_WORKSPACE_FILES ? u->surface : u->background);
-    if (view == PH_WORKSPACE_HOME)
+    if (view == PH_WORKSPACE_HOME) {
+        if (!u->live.paired)
+            SDL_RenderSetClipRect(u->renderer, &b);
         home(u);
-    else if (view == PH_WORKSPACE_SETTINGS)
+        SDL_RenderSetClipRect(u->renderer, NULL);
+    } else if (view == PH_WORKSPACE_SETTINGS)
         settings(u);
     else if (view == PH_WORKSPACE_HISTORY)
         history_page(u);
@@ -1808,6 +2355,22 @@ static void activate(ph_workspace *u, ui_hit h)
     }
     if (a == UI_SECTION_MENU) {
         u->section_menu = !u->section_menu;
+        return;
+    }
+    if (a == UI_HELP_GUIDE && h.id < SDL_arraysize(help_guides)) {
+        u->expanded_guides ^= 1u << h.id;
+        return;
+    }
+    if (a == UI_SIGN_IN) {
+        if (ph_config_set_launch_at_sign_in(!u->launch_at_sign_in))
+            u->launch_at_sign_in = !u->launch_at_sign_in;
+        else
+            snprintf(u->error, sizeof u->error, "Could not change the launch at sign-in setting.");
+        return;
+    }
+    if (a == UI_KEEP_ASPECT) {
+        u->keep_aspect = !u->keep_aspect;
+        save_preferences(u);
         return;
     }
     if (a >= UI_SECTION && a < UI_SECTION + 9) {

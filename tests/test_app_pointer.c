@@ -420,6 +420,13 @@ void ph_window_set_setup(ph_window *w, const ph_setup *setup)
 ph_setup_action ph_window_setup_click(const ph_window *w, int x, int y)
 { (void)w; (void)x; (void)y; return PH_SETUP_ACTION_NONE; }
 void ph_window_toggle_diagnostics(ph_window *w) { (void)w; diagnostics_toggles++; }
+void ph_window_toggle_statistics(ph_window *w) { ph_window_toggle_diagnostics(w); }
+void ph_window_set_input_policy(ph_window *w, bool ready, ph_control_policy policy)
+{
+    (void)w;
+    (void)ready;
+    (void)policy;
+}
 void ph_window_set_metrics(ph_window *w, const ph_metrics_snapshot *m, unsigned int queued,
                            uint64_t discarded, uint64_t superseded)
 { (void)w; (void)m; (void)queued; (void)discarded; (void)superseded; }

@@ -186,6 +186,7 @@ typedef struct app {
     ph_drag_ghost *ghost;
     ph_transfer_card *card;
     ph_wintray *tray;
+    char notified_file[1024];
     int place_x, place_y;
     Uint64 place_at;
     ph_origin *origin;
@@ -456,6 +457,7 @@ static void update_title(app *a)
             snprintf(title + used, sizeof title - used, "  PIN %s", pin);
     }
     ph_window_set_title(a->win, title);
+    ph_window_set_input_policy(a->win, bluetooth_ready, policy);
     ph_window_set_status(a->win, a->phone_name[0] != 0,
                          !layout_pauses_pointer && a->input.enabled,
                          layout_pauses_pointer ? "Return to phone view" : control);
@@ -1107,8 +1109,10 @@ static bool tray_notice(app *a, const char *path, int count, const char *where)
     char title[128], text[256], shown[96];
     const char *name = path ? ph_path_base(path) : "";
     size_t i = 0;
+    SDL_Window *window = SDL_GetWindowFromID(ph_window_id(a->win));
 
-    if (!a->tray || !ph_workspace_notifications(ph_window_workspace(a->win)) || !path || !path[0])
+    if (!a->tray || !(SDL_GetWindowFlags(window) & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED)) ||
+        !ph_workspace_notifications(ph_window_workspace(a->win)) || !path || !path[0])
         return false;
     for (; name[i] && i + 1 < sizeof shown; i++)
         shown[i] = name[i];
@@ -1118,9 +1122,15 @@ static bool tray_notice(app *a, const char *path, int count, const char *where)
         snprintf(text, sizeof text, "%s and %d more, in %.40s", shown, count - 1, where ? where : "");
     } else {
         snprintf(title, sizeof title, "%s received from iPhone", shown);
-        snprintf(text, sizeof text, "Saved in %.40s. Open Received files.", where ? where : "Downloads");
+        snprintf(text, sizeof text, "Saved to %.40s. Show in folder.", where ? where : "Downloads");
     }
-    return ph_wintray_notify(a->tray, title, text);
+    if (!ph_wintray_notify(a->tray, title, text))
+        return false;
+    if (strlen(path) < sizeof a->notified_file)
+        memcpy(a->notified_file, path, strlen(path) + 1);
+    else
+        a->notified_file[0] = '\0';
+    return true;
 }
 
 static void end_pull(app *a)
@@ -1792,7 +1802,7 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
     if (down && sc == SDL_SCANCODE_F3 && plain && !a->input.down[sc]) {
         a->gesture_keys[sc] = true;
         if (e->type == SDL_KEYDOWN && !e->repeat)
-            ph_window_toggle_diagnostics(a->win);
+            ph_window_toggle_statistics(a->win);
         return;
     }
     if (a->polish && ph_polish_key(a->polish, e, &a->input,
@@ -3392,14 +3402,17 @@ static void apply_window_action(app *a, bool *running)
         if (!ph_polish_capture_folder(path, sizeof path) || !ph_place_reveal(path, false))
             ph_window_set_detail(a->win, "Unable to open the Captures folder.");
     } else if (action == PH_WORKSPACE_RECORD || action == PH_WORKSPACE_CAPTURE ||
-               action == PH_WORKSPACE_FULLSCREEN) {
+               action == PH_WORKSPACE_FULLSCREEN || action == PH_WORKSPACE_ALWAYS_ON_TOP) {
         SDL_KeyboardEvent e = {.type = SDL_KEYDOWN};
         e.keysym.scancode = action == PH_WORKSPACE_RECORD    ? SDL_SCANCODE_F9
                             : action == PH_WORKSPACE_CAPTURE ? SDL_SCANCODE_F8
-                                                             : SDL_SCANCODE_RETURN;
-        e.keysym.mod = action == PH_WORKSPACE_FULLSCREEN ? KMOD_LALT : KMOD_NONE;
+                            : action == PH_WORKSPACE_ALWAYS_ON_TOP ? SDL_SCANCODE_T
+                                                                  : SDL_SCANCODE_RETURN;
+        if (action == PH_WORKSPACE_FULLSCREEN || action == PH_WORKSPACE_ALWAYS_ON_TOP)
+            e.keysym.mod = KMOD_LALT;
         ph_polish_key(a->polish, &e, &a->input, native, a->picture_w, a->picture_h, a->view_frame,
                       true);
+        ph_window_redraw(a->win);
     } else if (action == PH_WORKSPACE_CLIP_COPY || action == PH_WORKSPACE_CLIP_SEND) {
         for (size_t i = 0; i < ph_history_clip_count(a->history); i++) {
             const ph_clip_entry *c = ph_history_clip(a->history, i);
@@ -3483,6 +3496,11 @@ static void follow_tray(app *a, bool *running)
     case PH_WINTRAY_COPY:
         ph_window_copy_pairing(a->win);
         break;
+    case PH_WINTRAY_SHOW_RECEIVED_FILE:
+        if (a->notified_file[0] && ph_place_reveal(a->notified_file, true))
+            break;
+        /* Fall back to transfer history when the saved path is unavailable. */
+        /* fall through */
     case PH_WINTRAY_RECEIVED:
         SDL_ShowWindow(native);
         SDL_RestoreWindow(native);

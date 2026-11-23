@@ -69,7 +69,7 @@ static LRESULT CALLBACK tray_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else if (event == WM_RBUTTONUP || event == WM_CONTEXTMENU)
             show_menu(t);
         else if (event == NIN_BALLOONUSERCLICK)
-            t->pending = PH_WINTRAY_RECEIVED;
+            t->pending = PH_WINTRAY_SHOW_RECEIVED_FILE;
         return 0;
     }
     /* Explorer restarted: the icon must be added again. */

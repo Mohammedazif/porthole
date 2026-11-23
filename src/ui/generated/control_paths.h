@@ -127,6 +127,37 @@ static const glyph_point file_points[] = {
     {96,32},{224,32},{304,112},{304,352},{80,352},{80,48},{96,32},
     {-1,-1},{224,32},{224,112},{304,112}
 };
+static const glyph_point sun_points[] = {
+    {192,128},{224,137},{247,160},{256,192},{247,224},{224,247},{192,256},
+    {160,247},{137,224},{128,192},{137,160},{160,137},{192,128},
+    {-1,-1},{192,32},{192,80},{-1,-1},{192,304},{192,352},
+    {-1,-1},{32,192},{80,192},{-1,-1},{304,192},{352,192},
+    {-1,-1},{80,80},{112,112},{-1,-1},{272,272},{304,304},
+    {-1,-1},{80,304},{112,272},{-1,-1},{272,112},{304,80}
+};
+static const glyph_point arrows_points[] = {
+    {112,64},{112,320},{-1,-1},{64,272},{112,320},{160,272},
+    {-1,-1},{272,320},{272,64},{-1,-1},{224,112},{272,64},{320,112}
+};
+static const glyph_point help_points[] = {
+    {144,128},{148,110},{158,94},{174,84},{192,80},{210,84},{226,94},{236,110},{240,128},
+    {236,145},{224,156},{209,166},{198,179},{192,192},{192,208},
+    {-1,-1},{192,272},{192,275}
+};
+static const glyph_point stats_points[] = {
+    {80,304},{80,144},{-1,-1},{192,304},{192,80},{-1,-1},{304,304},{304,192}
+};
+static const glyph_point info_points[] = {
+    {192,32},{233,37},{272,53},{305,79},{331,112},{347,151},{352,192},{347,233},{331,272},
+    {305,305},{272,331},{233,347},{192,352},{151,347},{112,331},{79,305},{53,272},{37,233},
+    {32,192},{37,151},{53,112},{79,79},{112,53},{151,37},{192,32},
+    {-1,-1},{192,160},{192,272},{-1,-1},{192,112},{192,112}
+};
+static const glyph_point search_points[] = {
+    {160,48},{194,53},{226,69},{251,94},{267,126},{272,160},{267,194},{251,226},{226,251},
+    {194,267},{160,272},{126,267},{94,251},{69,226},{53,194},{48,160},{53,126},{69,94},
+    {94,69},{126,53},{160,48},{-1,-1},{240,240},{336,336}
+};
 static const struct {const glyph_point *p; size_t n;} shapes[] = {
     [PH_ICON_HOME]={home_points, SDL_arraysize(home_points)},
     [PH_ICON_APPS]={apps_points, SDL_arraysize(apps_points)},
@@ -149,4 +180,10 @@ static const struct {const glyph_point *p; size_t n;} shapes[] = {
     [PH_ICON_COPY]={copy_points, SDL_arraysize(copy_points)},
     [PH_ICON_CLOSE]={close_points, SDL_arraysize(close_points)},
     [PH_ICON_FILE]={file_points, SDL_arraysize(file_points)},
+    [PH_ICON_SUN]={sun_points, SDL_arraysize(sun_points)},
+    [PH_ICON_ARROWS]={arrows_points, SDL_arraysize(arrows_points)},
+    [PH_ICON_HELP]={help_points, SDL_arraysize(help_points)},
+    [PH_ICON_STATS]={stats_points, SDL_arraysize(stats_points)},
+    [PH_ICON_INFO]={info_points, SDL_arraysize(info_points)},
+    [PH_ICON_SEARCH]={search_points, SDL_arraysize(search_points)},
 };

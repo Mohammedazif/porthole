@@ -10,6 +10,7 @@
 
 #include "video/crop.h"
 #include "ui/workspace.h"
+#include "control/connection_policy.h"
 #include "control/setup.h"
 #include "core/metrics.h"
 
@@ -114,12 +115,14 @@ void ph_window_set_history_profile(ph_window *w, const char *profile);
 
 /* F1 opens/closes local help. Picture coordinates are rejected while it is open. */
 void ph_window_toggle_help(ph_window *w);
+void ph_window_toggle_statistics(ph_window *w);
+void ph_window_set_input_policy(ph_window *w, bool bluetooth_ready, ph_control_policy policy);
 bool ph_window_help_visible(const ph_window *w);
 
 /* F2 guided setup is local and consumes input while visible. */
 void ph_window_set_setup(ph_window *w, const ph_setup *setup);
 ph_setup_action ph_window_setup_click(const ph_window *w, int x, int y);
-/* F3 diagnostics never intercepts phone input. All timings are local measurements. */
+/* Detailed diagnostics overlay used by the latency option. */
 void ph_window_toggle_diagnostics(ph_window *w);
 void ph_window_set_metrics(ph_window *w, const ph_metrics_snapshot *metrics,
                            unsigned int queued_packets, uint64_t discarded_packets,

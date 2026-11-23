@@ -56,6 +56,8 @@ struct ph_window {
     int pending_w, pending_h; /* a different size waiting to settle */
     Uint64 pending_since;
     bool mirroring, control_ready, help_visible;
+    bool bluetooth_ready;
+    ph_control_policy input_policy;
     char control_detail[96];
     ph_setup setup;
     bool diagnostics_visible;
@@ -1864,6 +1866,16 @@ void ph_window_set_status(ph_window *w, bool mirroring, bool control_ready, cons
     ph_window_redraw(w);
 }
 
+void ph_window_set_input_policy(ph_window *w, bool bluetooth_ready, ph_control_policy policy)
+{
+    if (w->bluetooth_ready == bluetooth_ready && w->input_policy.managed == policy.managed &&
+        w->input_policy.enabled == policy.enabled && w->input_policy.screen_only == policy.screen_only)
+        return;
+    w->bluetooth_ready = bluetooth_ready;
+    w->input_policy = policy;
+    ph_window_redraw(w);
+}
+
 void ph_window_set_detail(ph_window *w, const char *detail)
 {
     if (!w)
@@ -2232,6 +2244,23 @@ void ph_window_toggle_help(ph_window *w)
     ph_window_redraw(w);
 }
 
+void ph_window_toggle_statistics(ph_window *w)
+{
+    if (!w->workspace || w->diagnostics_visible) {
+        ph_window_toggle_diagnostics(w);
+        return;
+    }
+    if (w->settings_visible && w->page == PH_WORKSPACE_HOME &&
+        ph_workspace_current_section(w->workspace) == 6) {
+        set_settings(w, false);
+        return;
+    }
+    w->page = PH_WORKSPACE_HOME;
+    ph_workspace_open_section(w->workspace, 6);
+    set_settings(w, true);
+    ph_window_redraw(w);
+}
+
 bool ph_window_help_visible(const ph_window *w)
 {
     return w &&
@@ -2289,7 +2318,9 @@ void ph_window_set_metrics(ph_window *w, const ph_metrics_snapshot *metrics,
     w->queued_packets = queued_packets;
     w->discarded_packets = discarded_packets;
     w->superseded_frames = superseded_frames;
-    if (w->diagnostics_visible && !w->setup.visible && !w->help_visible)
+    if (!w->setup.visible && !w->help_visible &&
+        (w->diagnostics_visible || (w->settings_visible && w->page == PH_WORKSPACE_HOME &&
+                                    ph_workspace_current_section(w->workspace) == 6)))
         ph_window_redraw(w);
 }
 
@@ -2424,7 +2455,8 @@ void ph_window_keep_aspect(ph_window *w)
         return;
     flags = SDL_GetWindowFlags(w->window);
     SDL_GetWindowSize(w->window, &ww, &wh);
-    if (flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) {
+    if (!ph_workspace_keep_aspect(w->workspace) ||
+        (flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP))) {
         w->sized_w = ww;
         w->sized_h = wh;
         return;
@@ -2980,6 +3012,12 @@ static void draw_workspace(ph_window *w, SDL_Rect area, ph_workspace_view page)
                               .share_checked = w->share_checked,
                               .share_available = w->share_available,
                               .clipboard_available = w->clipboard_available,
+                              .always_on_top = (SDL_GetWindowFlags(w->window) & SDL_WINDOW_ALWAYS_ON_TOP) != 0,
+                              .controls_connected = w->bluetooth_ready,
+                              .phone_controls_managed = w->input_policy.managed,
+                              .phone_controls_allowed = w->input_policy.enabled,
+                              .phone_controls_screen_only = w->input_policy.screen_only,
+                              .metrics = w->metrics,
                               .modal = w->settings_visible || w->page != PH_WORKSPACE_HOME ||
                                        (area.x <= RAIL_W && w->has_picture),
                               .unread_files = w->unread_files,
@@ -3149,12 +3187,13 @@ static void dispatch_workspace_action(ph_window *w)
         } else if (w->transfers_open)
             flip_panel(w, &w->transfers_open, TRANSFERS_W);
         break;
-    case PH_WORKSPACE_SETUP:
     case PH_WORKSPACE_STATS:
+        ph_window_toggle_statistics(w);
+        break;
+    case PH_WORKSPACE_SETUP:
         w->page = PH_WORKSPACE_HOME;
         set_settings(w, false);
-        push_shortcut(w, action == PH_WORKSPACE_SETUP ? SDL_SCANCODE_F2 : SDL_SCANCODE_F3,
-                      KMOD_NONE);
+        push_shortcut(w, SDL_SCANCODE_F2, KMOD_NONE);
         break;
     case PH_WORKSPACE_NEW_CODE:
     case PH_WORKSPACE_FORGET:

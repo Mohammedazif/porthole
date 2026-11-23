@@ -19,4 +19,8 @@ bool ph_config_read_line(const char *name, char *out, size_t out_len);
 /* Replaces a config file with one line of text. */
 bool ph_config_write_line(const char *name, const char *line);
 
+bool ph_config_launch_at_sign_in(void);
+bool ph_config_set_launch_at_sign_in(bool enabled);
+bool ph_config_launch_managed(void);
+
 #endif

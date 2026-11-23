@@ -92,14 +92,11 @@ bool ph_config_read_line(const char *name, char *out, size_t out_len)
     return ok;
 }
 
-bool ph_config_write_line(const char *name, const char *line)
+static bool write_config_file(const char *path, const char *line)
 {
-    char path[1100];
     FILE *f;
     bool ok;
 
-    if (!ph_config_path(name, path, sizeof path))
-        return false;
     unsigned char random[8];
     char temporary[1140];
     if (RAND_bytes(random, sizeof random) != 1)
@@ -124,3 +121,98 @@ bool ph_config_write_line(const char *name, const char *line)
     ph_remove(temporary);
     return false;
 }
+
+bool ph_config_write_line(const char *name, const char *line)
+{
+    char path[1100];
+    return ph_config_path(name, path, sizeof path) && write_config_file(path, line);
+}
+
+#ifdef _WIN32
+static const wchar_t startup_key[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+bool ph_config_launch_managed(void)
+{
+    PWSTR directory = NULL;
+    if (FAILED(SHGetKnownFolderPath(&FOLDERID_CommonStartup, 0, NULL, &directory)))
+        return false;
+    wchar_t link[1024];
+    int n = swprintf(link, sizeof link / sizeof *link, L"%ls\\Porthole.lnk", directory);
+    CoTaskMemFree(directory);
+    return n > 0 && (size_t)n < sizeof link / sizeof *link &&
+           GetFileAttributesW(link) != INVALID_FILE_ATTRIBUTES;
+}
+
+static bool startup_command(wchar_t command[261])
+{
+    DWORD length = GetModuleFileNameW(NULL, command + 1, 259);
+    if (!length || length >= 259)
+        return false;
+    command[0] = L'"';
+    command[length + 1] = L'"';
+    command[length + 2] = L'\0';
+    return true;
+}
+
+bool ph_config_launch_at_sign_in(void)
+{
+    wchar_t command[261], saved[261];
+    DWORD size = sizeof saved;
+    return startup_command(command) &&
+           RegGetValueW(HKEY_CURRENT_USER, startup_key, L"Porthole", RRF_RT_REG_SZ,
+                        NULL, saved, &size) == ERROR_SUCCESS &&
+           _wcsicmp(command, saved) == 0;
+}
+
+bool ph_config_set_launch_at_sign_in(bool enabled)
+{
+    if (ph_config_launch_managed())
+        return false;
+    if (!enabled) {
+        LSTATUS status = RegDeleteKeyValueW(HKEY_CURRENT_USER, startup_key, L"Porthole");
+        return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
+    }
+    wchar_t command[261];
+    if (!startup_command(command))
+        return false;
+    return RegSetKeyValueW(HKEY_CURRENT_USER, startup_key, L"Porthole", REG_SZ, command,
+                           (DWORD)((wcslen(command) + 1) * sizeof *command)) == ERROR_SUCCESS;
+}
+#else
+bool ph_config_launch_managed(void)
+{
+    return false;
+}
+
+static bool startup_path(char out[1100], bool create)
+{
+    char parent[1024];
+    if (!ph_config_dir(parent, sizeof parent))
+        return false;
+    *strrchr(parent, '/') = '\0';
+    char directory[1050];
+    int n = snprintf(directory, sizeof directory, "%s/autostart", parent);
+    if (n < 0 || (size_t)n >= sizeof directory || (create && !ensure_dir(directory)))
+        return false;
+    n = snprintf(out, 1100, "%s/porthole-startup.desktop", directory);
+    return n >= 0 && n < 1100;
+}
+
+bool ph_config_launch_at_sign_in(void)
+{
+    char path[1100];
+    return startup_path(path, false) && access(path, F_OK) == 0;
+}
+
+bool ph_config_set_launch_at_sign_in(bool enabled)
+{
+    char path[1100];
+    if (!startup_path(path, enabled))
+        return false;
+    if (!enabled)
+        return ph_remove(path) == 0 || errno == ENOENT;
+    return access("/usr/bin/porthole", X_OK) == 0 &&
+           write_config_file(path, "[Desktop Entry]\nType=Application\nName=Porthole\n"
+                                   "Exec=/usr/bin/porthole\nTryExec=/usr/bin/porthole\nTerminal=false");
+}
+#endif
