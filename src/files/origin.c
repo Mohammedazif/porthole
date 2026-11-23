@@ -109,7 +109,7 @@ struct ph_origin {
     char in_kind;
     uint8_t *in_data;
     size_t in_len;
-    bool note_sent, note_got, note_ready;
+    bool note_sent, note_got;
 };
 
 static bool make_token(char *out, size_t len)
@@ -481,6 +481,11 @@ static bool send_verification_reset(ph_origin *o, int fd)
     return !notify || send_all(fd, "IV RESET\n", 9);
 }
 
+static bool paired_client(const ph_origin *o)
+{
+    return o->have_client && o->client_generation == o->pairing_generation && o->reconnect_key[0];
+}
+
 static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consumed)
 {
     char kind;
@@ -519,7 +524,6 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
             return false;
         pthread_mutex_lock(&o->lock);
         o->clip_ready = enable != 0;
-        o->note_ready = enable != 0;
         if (!enable) {
             o->out_pending = false;
             free(o->out_data);
@@ -1717,7 +1721,7 @@ static void invalidate_session(ph_origin *o)
     clear_verification(o, false);
     o->verification_reset = false;
     o->clip_ready = false;
-    o->note_got = o->note_ready = o->note_sent = false;
+    o->note_got = o->note_sent = false;
     o->push_count = 0;
     o->push_cancel = true;
     while (o->results) {
@@ -2096,11 +2100,10 @@ unsigned ph_origin_clip_flags(ph_origin *o)
         flags |= PH_ORIGIN_CLIP_SENT;
     if (o->note_got)
         flags |= PH_ORIGIN_CLIP_GOT;
-    if (o->note_ready)
+    if (o->clip_ready && paired_client(o))
         flags |= PH_ORIGIN_CLIP_READY;
     o->note_sent = false;
     o->note_got = false;
-    o->note_ready = false;
     pthread_mutex_unlock(&o->lock);
     return flags;
 }

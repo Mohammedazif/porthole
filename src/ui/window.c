@@ -72,7 +72,7 @@ struct ph_window {
     uint64_t discarded_packets, superseded_frames;
     SDL_Texture *lockup;
     SDL_Texture *mark;
-    SDL_Texture *mark_on_dark; /* the same mark, light, for the dark phone bar */
+    SDL_Texture *mark_on_dark, *lockup_on_dark;
     char title[320];
     char pull_hint[96];
     char pc_name[64];
@@ -1231,6 +1231,24 @@ static SDL_Texture *texture_from_rgba(SDL_Renderer *renderer, const unsigned cha
     return texture;
 }
 
+static SDL_Texture *brand_on_dark(SDL_Renderer *renderer, const unsigned char *pixels,
+                                 int width, int height)
+{
+    size_t size = (size_t)width * (size_t)height * 4;
+    unsigned char *light = malloc(size);
+    if (!light)
+        return NULL;
+    for (size_t i = 0; i < size; i += 4) {
+        /* Map brand ink and reflection to their on-dark colors, preserving edge alpha. */
+        int tint = 255 - SDL_clamp(((int)pixels[i] - 17) * 92 / 167, 0, 92);
+        light[i] = light[i + 1] = light[i + 2] = (unsigned char)tint;
+        light[i + 3] = pixels[i + 3];
+    }
+    SDL_Texture *texture = texture_from_rgba(renderer, light, width, height);
+    free(light);
+    return texture;
+}
+
 static int bar_output_px(const ph_window *w, int out_h)
 {
     int win_w = 1, win_h = 1, bar;
@@ -1636,28 +1654,56 @@ static void draw_bar(ph_window *w, int width, int height)
     bool dark = live || ph_workspace_dark(w->workspace);
     paint(w->renderer, (SDL_Rect){0, 0, width, PH_WINDOW_BAR_PX}, dark ? 15 : 255, dark ? 17 : 255,
           dark ? 20 : 255, 255);
+    SDL_Rect lockup = {8, 0, PH_WINDOW_BAR_PX * ph_brand_lockup_w / ph_brand_lockup_h,
+                       PH_WINDOW_BAR_PX};
     SDL_Rect mark = {12, (PH_WINDOW_BAR_PX - 18) / 2, 18, 18};
     SDL_Texture *logo = dark ? w->mark_on_dark : w->mark;
-    if (logo)
-        SDL_RenderCopy(w->renderer, logo, NULL, &mark);
-    if (!live)
-        draw_text(w->renderer, "Porthole", 38, 7, 120, PH_TEXT(14, PH_FONT_MEDIUM),
-                  dark ? color_on_ink : color_text);
+    SDL_Texture *wordmark = dark ? w->lockup_on_dark : w->lockup;
+    bool show_lockup = wordmark && (!live || live_settings_box(width).x >= lockup.x + lockup.w + 112);
+    if (show_lockup) {
+        SDL_RenderCopy(w->renderer, wordmark, NULL, &lockup);
+    } else {
+        if (logo)
+            SDL_RenderCopy(w->renderer, logo, NULL, &mark);
+        if (!live)
+            draw_text(w->renderer, "Porthole", 38, 7, 120, PH_TEXT(14, PH_FONT_MEDIUM),
+                      dark ? color_on_ink : color_text);
+    }
     if (live) {
         SDL_Rect rail = rail_toggle_box(width);
         SDL_Rect transfers = transfers_toggle_box(width);
         SDL_Rect gear = live_settings_box(width);
         const char *who = w->phone_label[0] ? w->phone_label : "Connected";
-        int name_x = 52;
-        int name_y = (PH_WINDOW_BAR_PX - ph_text_line_height(PH_TEXT(13, PH_FONT_MEDIUM))) / 2;
-        status_dot(w->renderer, 38, (PH_WINDOW_BAR_PX - 8) / 2, 61, 214, 140);
-        draw_text(w->renderer, who, name_x, name_y, 160, PH_TEXT(13, PH_FONT_MEDIUM), color_on_ink);
+        int name_x = show_lockup ? lockup.x + lockup.w + 17 : 52;
+        int name_font = PH_TEXT(13, PH_FONT_MEDIUM);
+        int name_y = (PH_WINDOW_BAR_PX - ph_text_line_height(name_font)) / 2;
+        int stop_x = gear.x - 32;
+        bool recording_label = w->recording &&
+                               stop_x > name_x + ph_text_width(who, name_font) + 84;
+        int name_right = w->recording ? stop_x - (recording_label ? 74 : 10) : gear.x - 10;
+        if ((w->rail_open || w->transfers_open) && w->metrics.fps_known && w->metrics.fps > 0) {
+            char fps[24];
+            snprintf(fps, sizeof fps, "%.0f fps", w->metrics.fps);
+            int fps_width = ph_text_width(fps, 1);
+            int fps_x = name_right - fps_width;
+            if (fps_x > name_x + 64) {
+                draw_text(w->renderer, fps, fps_x, 6, fps_width + 2, 1, color_stage_muted);
+                name_right = fps_x - 8;
+            }
+        }
+        status_dot(w->renderer, name_x - 14, (PH_WINDOW_BAR_PX - 8) / 2, 61, 214, 140);
+        if (name_right > name_x) {
+            SDL_Rect name_clip = {name_x, name_y, name_right - name_x, ph_text_line_height(name_font)};
+            SDL_RenderSetClipRect(w->renderer, &name_clip);
+            draw_text(w->renderer, who, name_x, name_y, 160, name_font, color_on_ink);
+            SDL_RenderSetClipRect(w->renderer, NULL);
+        }
         if (w->recording) {
-            SDL_Rect stop = {gear.x - 32, 3, 28, 26};
+            SDL_Rect stop = {stop_x, 3, 28, 26};
             rounded(w->renderer, stop, 6, color_stage_raised);
             rounded(w->renderer, (SDL_Rect){stop.x + 9, stop.y + 8, 10, 10}, 2,
                     (SDL_Color){251, 99, 91, 255});
-            if (stop.x > name_x + ph_text_width(who, PH_TEXT(13, PH_FONT_MEDIUM)) + 84)
+            if (recording_label)
                 draw_text(w->renderer, "Recording", stop.x - 66, 8, 66, PH_TEXT(11, PH_FONT_MEDIUM),
                           color_on_ink);
         }
@@ -1671,12 +1717,6 @@ static void draw_bar(ph_window *w, int width, int height)
                     color_live);
         }
         paint(w->renderer, (SDL_Rect){width - 120 - 5, 9, 1, PH_WINDOW_BAR_PX - 18}, 42, 45, 49, 255);
-        if ((w->rail_open || w->transfers_open) && w->metrics.fps_known && w->metrics.fps > 0) {
-            char fps[24];
-            snprintf(fps, sizeof fps, "%.0f fps", w->metrics.fps);
-            draw_text(w->renderer, fps, gear.x - 10 - ph_text_width(fps, 1), 6, 80, 1,
-                      color_stage_muted);
-        }
     } else if (!w->workspace) {
         SDL_Rect buttons[3];
         toolbar_buttons(width, buttons);
@@ -1813,21 +1853,9 @@ ph_window *ph_window_create(const char *title)
         goto fail;
     w->lockup = texture_from_rgba(w->renderer, ph_brand_lockup, ph_brand_lockup_w, ph_brand_lockup_h);
     w->mark = texture_from_rgba(w->renderer, ph_brand_icon, ph_brand_icon_w, ph_brand_icon_h);
-    {
-        /* Inverting keeps the shape and its grey reflection: ink becomes white. */
-        size_t n = (size_t)ph_brand_icon_w * (size_t)ph_brand_icon_h * 4;
-        unsigned char *light = malloc(n);
-        if (light) {
-            for (size_t i = 0; i < n; i += 4) {
-                light[i] = (unsigned char)(255 - ph_brand_icon[i]);
-                light[i + 1] = (unsigned char)(255 - ph_brand_icon[i + 1]);
-                light[i + 2] = (unsigned char)(255 - ph_brand_icon[i + 2]);
-                light[i + 3] = ph_brand_icon[i + 3];
-            }
-            w->mark_on_dark = texture_from_rgba(w->renderer, light, ph_brand_icon_w, ph_brand_icon_h);
-            free(light);
-        }
-    }
+    w->mark_on_dark = brand_on_dark(w->renderer, ph_brand_icon, ph_brand_icon_w, ph_brand_icon_h);
+    w->lockup_on_dark = brand_on_dark(w->renderer, ph_brand_lockup, ph_brand_lockup_w,
+                                      ph_brand_lockup_h);
     {
         SDL_Surface *icon = SDL_CreateRGBSurfaceWithFormatFrom(
             (void *)ph_brand_icon, ph_brand_icon_w, ph_brand_icon_h, 32, ph_brand_icon_w * 4,
@@ -3549,6 +3577,8 @@ void ph_window_destroy(ph_window *w)
         SDL_DestroyTexture(w->mark);
     if (w->mark_on_dark)
         SDL_DestroyTexture(w->mark_on_dark);
+    if (w->lockup_on_dark)
+        SDL_DestroyTexture(w->lockup_on_dark);
     if (w->renderer) {
         ph_ui_release_drawing(w->renderer);
         ph_icon_release(w->renderer);

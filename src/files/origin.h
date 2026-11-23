@@ -130,6 +130,7 @@ ph_origin_result ph_origin_take(ph_origin *origin, char *path, size_t path_len);
 
 bool ph_origin_put_clip(ph_origin *origin, char kind, const void *data, size_t len);
 bool ph_origin_take_clip(ph_origin *origin, char *kind, void **data, size_t *len);
+/* SENT and GOT are consumed by this call. READY describes the current authenticated session. */
 unsigned ph_origin_clip_flags(ph_origin *origin);
 
 /* Asks the connected phone to send its pasteboard. Phones that do not know CLIP? ignore it.

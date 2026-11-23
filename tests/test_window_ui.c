@@ -205,6 +205,29 @@ static void check_clipboard_thumbnail(SDL_Renderer *renderer)
     CHECK(colored > 100);
 }
 
+static void check_titlebar_wordmark(SDL_Window *window, bool dark)
+{
+    SDL_Renderer *renderer = SDL_GetRenderer(window);
+    int width, height, pixel_width, pixel_height;
+    SDL_GetWindowSize(window, &width, &height);
+    CHECK(SDL_GetRendererOutputSize(renderer, &pixel_width, &pixel_height) == 0);
+    SDL_Rect tail = {93 * pixel_width / width, 4 * pixel_height / height,
+                     26 * pixel_width / width, 24 * pixel_height / height};
+    SDL_Surface *pixels = SDL_CreateRGBSurfaceWithFormat(
+        0, tail.w, tail.h, 32, SDL_PIXELFORMAT_RGBA32);
+    CHECK(pixels);
+    CHECK(SDL_RenderReadPixels(renderer, &tail, pixels->format->format,
+                               pixels->pixels, pixels->pitch) == 0);
+    int visible = 0;
+    for (int y = 0; y < pixels->h; y++)
+        for (int x = 0; x < pixels->w; x++) {
+            const Uint8 *point = (const Uint8 *)pixels->pixels + y * pixels->pitch + x * 4;
+            visible += dark ? point[0] > 180 : point[0] < 90;
+        }
+    SDL_FreeSurface(pixels);
+    CHECK(visible > 12);
+}
+
 static int section_y(int index)
 {
     return PH_WINDOW_BAR_PX + 47 + 18 + index * 41 + 19;
@@ -213,7 +236,7 @@ static int section_y(int index)
 static void capture_settings_pages(ph_window *w, const char *dir, const char *prefix)
 {
     const char *names[] = {"appearance", "screen-and-audio", "controls", "transfers",
-                          "notifications", "help", "connection-statistics", "about"};
+                          "notifications", "help", "connection-statistics", "about", "devices"};
     SDL_Window *native = SDL_GetWindowFromID(ph_window_id(w));
     ph_workspace *workspace = ph_window_workspace(w);
     SDL_SetWindowSize(native, 1280, 800);
@@ -365,6 +388,7 @@ static void windows_visual_review(ph_window *w, SDL_Window *native, const char *
     click_role(w, "Light");
     CHECK(!ph_workspace_dark(workspace));
     close_workspace_view(w);
+    check_titlebar_wordmark(native, false);
     screenshot(w, dir, "connect");
     const int sizes[][2] = {{1024, 680}, {460, 740}};
     const char *sizes_names[] = {"connect-1024", "connect-compact"};
@@ -518,7 +542,16 @@ static void windows_visual_review(ph_window *w, SDL_Window *native, const char *
     }
     click_role(w, "Dark");
     CHECK(ph_workspace_dark(workspace));
+    check_titlebar_wordmark(native, true);
     capture_settings_pages(w, dir, "dark-");
+    SDL_SetWindowSize(native, 460, 480);
+    ph_window_redraw(w);
+    click_role(w, "Settings menu");
+    click_role(w, "Devices");
+    CHECK(ph_workspace_current_section(workspace) == 8);
+    screenshot(w, dir, "devices-compact");
+    SDL_SetWindowSize(native, 1280, 800);
+    ph_window_redraw(w);
     click_role(w, "General");
     click_role(w, "System");
     char prefs[96];
@@ -543,6 +576,9 @@ static void windows_visual_review(ph_window *w, SDL_Window *native, const char *
     ph_window_present(w, frame, &screen);
     screenshot(w, dir, "sharing");
     ph_window_open_settings(w);
+    click_role(w, "Devices");
+    CHECK(ph_workspace_current_section(workspace) == 8);
+    screenshot(w, dir, "sharing-devices");
     ph_workspace_open_section(workspace, 0);
     ph_window_redraw(w);
     screenshot(w, dir, "sharing-settings");
@@ -635,6 +671,8 @@ int main(int argc, char **argv)
     ph_window_set_pc_name(w, "Porthole Windows");
     ph_window_set_share_available(w, true);
     ph_window_redraw(w);
+    if (!native_review && !test_accessibility)
+        check_titlebar_wordmark(native, false);
 #ifdef _WIN32
     if (native_review) {
         windows_visual_review(w, native, dir);

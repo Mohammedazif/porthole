@@ -577,11 +577,23 @@ int main(int argc, char **argv)
     CHECK(!strcmp(reply, "SYNC OK 1eecc050-8818-4079-9fb0-2e0143e55d96 1"));
     nap(400);
     CHECK(ph_origin_clip_flags(o) & PH_ORIGIN_CLIP_READY);
+    CHECK(ph_origin_clip_flags(o) & PH_ORIGIN_CLIP_READY);
 
     /* Authenticated input preferences are acknowledged and can change live. */
+    say(phone, "CLIP T 5\nphone");
     say(phone, "INPUT 00000000-0000-0000-0000-000000000001 1 1\n");
     line(phone, reply, sizeof reply);
     CHECK(!strcmp(reply, "INPUT OK 00000000-0000-0000-0000-000000000001 1 1"));
+    unsigned clipboard_flags = ph_origin_clip_flags(o);
+    CHECK((clipboard_flags & (PH_ORIGIN_CLIP_READY | PH_ORIGIN_CLIP_GOT)) ==
+          (PH_ORIGIN_CLIP_READY | PH_ORIGIN_CLIP_GOT));
+    CHECK(ph_origin_clip_flags(o) == PH_ORIGIN_CLIP_READY);
+    char kind;
+    void *clipboard;
+    size_t clipboard_size;
+    CHECK(ph_origin_take_clip(o, &kind, &clipboard, &clipboard_size));
+    CHECK(kind == 'T' && clipboard_size == 5 && !memcmp(clipboard, "phone", 5));
+    free(clipboard);
     ph_control_policy policy = ph_origin_control_policy(o);
     CHECK(policy.managed && policy.connected && policy.enabled && policy.screen_only);
     CHECK(!ph_control_connection_wanted(policy, false, false, false));
@@ -625,10 +637,21 @@ int main(int argc, char **argv)
     line(phone, reply, sizeof reply);
     CHECK(!strcmp(reply, "CLIP T 5"));
     CHECK(read_peer(phone, reply, 5, 0) == 5 && !memcmp(reply, "hello", 5));
+    CHECK(ph_origin_clip_flags(o) & PH_ORIGIN_CLIP_READY);
+    say(phone, "SYNC 1eecc050-8818-4079-9fb0-2e0143e55d96 0\n");
+    line(phone, reply, sizeof reply);
+    CHECK(!strcmp(reply, "SYNC OK 1eecc050-8818-4079-9fb0-2e0143e55d96 0"));
+    CHECK(!(ph_origin_clip_flags(o) & PH_ORIGIN_CLIP_READY));
+    CHECK(!ph_origin_put_clip(o, 'T', "disabled", 8));
+    say(phone, "SYNC 1eecc050-8818-4079-9fb0-2e0143e55d96 1\n");
+    line(phone, reply, sizeof reply);
+    CHECK(!strcmp(reply, "SYNC OK 1eecc050-8818-4079-9fb0-2e0143e55d96 1"));
+    CHECK(ph_origin_clip_flags(o) & PH_ORIGIN_CLIP_READY);
 
     /* The phone leaving fails anything still queued instead of showing it forever. */
     close_peer(phone);
     nap(400);
+    CHECK(!(ph_origin_clip_flags(o) & PH_ORIGIN_CLIP_READY));
     policy = ph_origin_control_policy(o);
     CHECK(policy.managed && !policy.connected);
     CHECK(!ph_control_connection_wanted(policy, true, true, false));

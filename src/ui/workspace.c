@@ -2217,19 +2217,22 @@ static int statistics_settings(ph_workspace *u, int x, int y, int width)
 
 static const char *const setting_sections[] = {
     "General", "Screen and audio", "Controls", "Transfers", "Notifications",
-    "Help and shortcuts", "Connection statistics", "About"
+    "Help and shortcuts", "Connection statistics", "About", "Devices"
 };
 
 static void settings_navigation(ph_workspace *u, SDL_Rect box, bool compact, bool menu)
 {
     const ph_control_icon icons[] = {PH_ICON_SUN, PH_ICON_PHONE, PH_ICON_MOUSE, PH_ICON_ARROWS,
-                                     PH_ICON_BELL, PH_ICON_HELP, PH_ICON_STATS, PH_ICON_INFO};
+                                     PH_ICON_BELL, PH_ICON_HELP, PH_ICON_STATS, PH_ICON_INFO,
+                                     PH_ICON_DEVICES};
     rect(u, box, u->surface);
     int pad = compact ? 10 : 15, top = box.y + (compact ? 15 : 18);
-    int step = menu ? SDL_min(41, (box.h - 30) / (int)SDL_arraysize(setting_sections)) : 41;
+    bool footer = !menu && box.h > 400;
+    int bottom = box.y + box.h - (footer ? 41 : 10);
+    int step = SDL_min(41, (bottom - top) / (int)SDL_arraysize(setting_sections));
     for (size_t i = 0; i < SDL_arraysize(setting_sections); i++) {
         SDL_Rect row = {box.x + pad, top + (int)i * step, box.w - 2 * pad, step - 3};
-        if (row.y + row.h > box.y + box.h - 10)
+        if (row.h < 20 || row.y + row.h > bottom)
             break;
         bool selected = u->section == (int)i;
         if (selected)
@@ -2243,7 +2246,7 @@ static void settings_navigation(ph_workspace *u, SDL_Rect box, bool compact, boo
                      row.x + row.w - label_x - 6, compact ? 11 : 12, selected, ink);
         hit(u, row, UI_SECTION + (int)i, 0, setting_sections[i]);
     }
-    if (!menu && box.h > 400)
+    if (footer)
         text(u, "Porthole " PORTHOLE_VERSION " · GPL-3.0", box.x + 27, box.y + box.h - 31,
              box.w - 40, 10, false, u->muted);
 }
