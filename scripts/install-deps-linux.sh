@@ -10,7 +10,7 @@ fi
 
 packages=(
     # Toolchain
-    build-essential cmake ninja-build pkg-config git
+    build-essential cmake ninja-build pkg-config git file
     # AirPlay receiver core (UxPlay lib): crypto, plists, mDNS
     libssl-dev libplist-dev libavahi-compat-libdnssd-dev
     # Video/audio decoding and the mirror window (Phase 1)
