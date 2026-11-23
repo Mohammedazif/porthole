@@ -384,8 +384,20 @@ int main(int argc, char **argv)
     CHECK(ph_window_take_workspace_action(w, &item) == PH_WORKSPACE_CLIP_COPY &&
           item == ph_history_clip(history, 0)->id);
     screenshot(w, dir, "13-clipboard");
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLOSE, &tx, &ty));
     workspace_key(w, SDL_SCANCODE_TAB, KMOD_NONE);
     CHECK(ph_workspace_owns_keyboard(workspace));
+#ifdef _WIN32
+    ph_workspace_control focused = {0};
+    for (int i = 0; i < ph_workspace_accessible_count(workspace); ++i) {
+        ph_workspace_control control;
+        if (ph_workspace_accessible_control(workspace, i, &control) && control.focused)
+            focused = control;
+    }
+    if (focused.action != PH_WORKSPACE_CLOSE)
+        fprintf(stderr, "Clipboard Tab focus: %s (action %d)\n", focused.name, focused.action);
+    CHECK(focused.action == PH_WORKSPACE_CLOSE);
+#endif
     workspace_key(w, SDL_SCANCODE_RETURN, KMOD_NONE);
     CHECK(!ph_window_help_visible(w));
     ph_window_set_code_open(w, true);

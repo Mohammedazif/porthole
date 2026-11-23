@@ -1499,6 +1499,7 @@ static void draw_page(ph_workspace *u)
     ph_workspace_view view = u->view;
     u->hits_n = 0;
     u->scroll_limit = 0;
+    SDL_RenderSetClipRect(u->renderer, NULL);
     rect(u, b,
          view == PH_WORKSPACE_CLIPBOARD || view == PH_WORKSPACE_FILES ? u->surface : u->background);
     if (view == PH_WORKSPACE_HOME)

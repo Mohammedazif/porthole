@@ -147,7 +147,9 @@ jobs:
         run: cmake --build --preset windows-release
 
       - name: Test
-        run: ctest --preset windows-release
+        run: |
+          ctest --preset windows-release -R '^window_ui$'
+          ctest --preset windows-release -E '^window_ui$'
 
       - name: Test Windows Bluetooth sender
         shell: pwsh
