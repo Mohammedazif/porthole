@@ -5,9 +5,15 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      windows_payload_run:
+        description: Rebuild Windows Setup from another run's Windows payload
+        type: string
+        default: ''
 
 jobs:
   linux:
+    if: ${{ !inputs.windows_payload_run }}
     name: Linux (full build)
     runs-on: ubuntu-24.04
     steps:
@@ -49,6 +55,7 @@ jobs:
           if-no-files-found: error
 
   debian:
+    if: ${{ !inputs.windows_payload_run }}
     name: Linux installer (Debian 13)
     runs-on: ubuntu-24.04
     container: debian:13
@@ -85,6 +92,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    if: ${{ !inputs.windows_payload_run }}
     name: Windows Wi-Fi mirror and Bluetooth (MSYS2 UCRT64)
     runs-on: windows-2022
     defaults:
@@ -147,9 +155,7 @@ jobs:
         run: cmake --build --preset windows-release
 
       - name: Test
-        run: |
-          ctest --preset windows-release -R '^window_ui$'
-          ctest --preset windows-release -E '^window_ui$'
+        run: ctest --preset windows-release
 
       - name: Test Windows Bluetooth sender
         shell: pwsh
@@ -176,6 +182,41 @@ jobs:
           compression-level: 0
           if-no-files-found: error
 
+  windows-installer:
+    name: Windows Setup installer
+    needs: windows
+    if: ${{ !cancelled() && (needs.windows.result == 'success' || inputs.windows_payload_run) }}
+    runs-on: windows-2022
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate the selected payload run
+        if: ${{ inputs.windows_payload_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAYLOAD_RUN: ${{ inputs.windows_payload_run }}
+        run: |
+          if ($env:PAYLOAD_RUN -notmatch '^\d+$') { throw 'Expected a numeric workflow run ID' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:PAYLOAD_RUN" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_repository.full_name -ne $env:GITHUB_REPOSITORY -or $run.head_branch -ne $env:GITHUB_REF_NAME) {
+            throw 'Select a payload run from this repository and branch'
+          }
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: porthole-windows-x64
+          path: out/porthole-windows-x64
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.windows_payload_run || github.run_id }}
+
+      - name: Verify the setup payload
+        run: >-
+          python scripts/portable-windows/verify_payload.py out/porthole-windows-x64
+          --report out/porthole-windows-x64-verification.json
+
       - name: Compile the Windows setup installer
         shell: pwsh
         run: |
@@ -201,8 +242,13 @@ jobs:
             $hash = (Get-FileHash -LiteralPath (Join-Path $destination $file.path)).Hash
             if ($hash -ne $file.sha256) { throw "Installed file differs: $($file.path)" }
           }
-          & (Join-Path $destination 'porthole.exe') --version
-          if ($LASTEXITCODE -ne 0) { throw "Installed Porthole failed: $LASTEXITCODE" }
+          $versionLog = Join-Path $env:RUNNER_TEMP 'porthole-version.txt'
+          $app = Start-Process -FilePath (Join-Path $destination 'porthole.exe') -ArgumentList '--version' -Wait -PassThru -RedirectStandardOutput $versionLog
+          $version = Get-Content $versionLog -Raw
+          if ($app.ExitCode -ne 0 -or $version -notmatch '^Porthole \d+\.\d+\.\d+') {
+            throw "Installed Porthole failed: $($app.ExitCode) $version"
+          }
+          Write-Output $version.Trim()
           $uninstaller = Get-Item (Join-Path $destination 'unins*.exe')
           $removed = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
           if ($removed.ExitCode -ne 0 -or (Test-Path (Join-Path $destination 'porthole.exe'))) {
@@ -217,6 +263,7 @@ jobs:
           if-no-files-found: error
 
   windows-minimal:
+    if: ${{ !inputs.windows_payload_run }}
     name: Windows minimal CLI
     runs-on: windows-2022
     defaults:

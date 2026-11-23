@@ -35,13 +35,11 @@ Source: "{#BuildDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 Name: "{group}\Porthole"; Filename: "{app}\porthole.exe"; WorkingDir: "{app}"
 Name: "{group}\Uninstall Porthole"; Filename: "{uninstallexe}"
+Name: "{commonstartup}\Porthole"; Filename: "{app}\porthole.exe"; WorkingDir: "{app}"; Tasks: startwithwindows
 
 [Tasks]
-Name: "startwithwindows"; Description: "Start with Windows"; GroupDescription: "Additional tasks:"; Flags: unchecked
+Name: "startwithwindows"; Description: "Start with Windows for all users"; GroupDescription: "Additional tasks:"; Flags: unchecked
 Name: "localnetwork"; Description: "Allow Porthole on Private networks"; GroupDescription: "Local network:"; Flags: unchecked
-
-[Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Porthole"; ValueData: """{app}\porthole.exe"""; Tasks: startwithwindows; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Porthole Installed TCP"" dir=in action=allow program=""{app}\porthole.exe"" protocol=TCP localport=7000,7001,7100,47731,47732,47733 profile=private remoteip=localsubnet"; Tasks: localnetwork; Flags: runhidden
