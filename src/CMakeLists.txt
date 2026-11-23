@@ -94,6 +94,7 @@ if(PORTHOLE_WITH_AIRPLAY)
         hid/link.c
         ui/window.c
         ui/control_icons.c
+        ui/drawing.c
         ui/workspace.c
         ui/text.c
         ui/drag_ghost.c

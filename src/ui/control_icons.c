@@ -1,4 +1,5 @@
 #include "ui/control_icons.h"
+#include "ui/drawing.h"
 #include <math.h>
 #include <stdlib.h>
 
@@ -50,7 +51,7 @@ static SDL_Texture *render_icon(SDL_Renderer *renderer, ph_control_icon kind, in
     SDL_FreeSurface(s);
     if (texture) {
         SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-        SDL_SetTextureScaleMode(texture, SDL_ScaleModeLinear);
+        SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest);
     }
     return texture;
 }
@@ -58,7 +59,9 @@ void ph_icon_draw(SDL_Renderer *renderer, ph_control_icon kind, SDL_Rect box, SD
 {
     float sx, sy;
     SDL_RenderGetScale(renderer, &sx, &sy);
-    int size = SDL_clamp((int)lroundf(fmaxf(sx, sy) * box.w), 8, 144);
+    int size = SDL_clamp((int)lroundf(fminf(sx * box.w, sy * box.h)), 1, 144);
+    int px = (int)lroundf(sx * (box.x + box.w / 2.f) - size / 2.f);
+    int py = (int)lroundf(sy * (box.y + box.h / 2.f) - size / 2.f);
     glyph_cache *entry = cache;
     while (entry && !(entry->renderer == renderer && entry->kind == kind && entry->size == size))
         entry = entry->next;
@@ -78,7 +81,9 @@ void ph_icon_draw(SDL_Renderer *renderer, ph_control_icon kind, SDL_Rect box, SD
         cache = entry;
     }
     SDL_SetTextureColorMod(entry->texture, color.r, color.g, color.b);
-    SDL_RenderCopy(renderer, entry->texture, NULL, &box);
+    SDL_SetTextureAlphaMod(entry->texture, color.a);
+    SDL_FRect dest = ph_ui_pixel_rect(px, py, size, size, sx, sy);
+    SDL_RenderCopyF(renderer, entry->texture, NULL, &dest);
 }
 void ph_icon_release(SDL_Renderer *renderer)
 {

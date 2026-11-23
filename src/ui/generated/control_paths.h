@@ -95,6 +95,38 @@ static const glyph_point transfer_points[] = {
     {210,345},{188,347},{167,344},{147,339},{127,330},{110,319},{94,305},{80,288},{-1,-1},
     {128,288},{80,288},{80,336}
 };
+static const glyph_point phone_points[] = {
+    {128,32},{256,32},{273,37},{283,47},{288,64},{288,320},{283,337},{273,347},
+    {256,352},{128,352},{111,347},{101,337},{96,320},{96,64},{101,47},{111,37},{128,32},
+    {-1,-1},{160,288},{224,288}
+};
+static const glyph_point mouse_points[] = {
+    {192,48},{226,54},{253,72},{275,103},{288,144},{288,240},{283,277},{263,309},
+    {230,329},{192,336},{154,329},{121,309},{101,277},{96,240},{96,144},{109,103},
+    {131,72},{158,54},{192,48},{-1,-1},{192,112},{192,176}
+};
+static const glyph_point clipboard_points[] = {
+    {144,48},{240,48},{240,112},{144,112},{144,48},
+    {-1,-1},{128,80},{80,80},{80,336},{304,336},{304,80},{256,80}
+};
+static const glyph_point wifi_points[] = {
+    {48,136},{80,113},{116,95},{154,86},{192,83},{230,86},{268,95},{304,113},{336,136},
+    {-1,-1},{96,192},{125,172},{158,160},{192,156},{226,160},{259,172},{288,192},
+    {-1,-1},{144,248},{167,235},{192,231},{217,235},{240,248},{-1,-1},{192,304},{192,304}
+};
+static const glyph_point folder_points[] = {
+    {48,96},{160,96},{192,144},{336,144},{336,320},{48,320},{48,96}
+};
+static const glyph_point chevron_points[] = {{144,88},{240,192},{144,296}};
+static const glyph_point copy_points[] = {
+    {144,144},{320,144},{320,320},{144,320},{144,144},
+    {-1,-1},{80,240},{64,240},{64,64},{240,64},{240,80}
+};
+static const glyph_point close_points[] = {{96,96},{288,288},{-1,-1},{288,96},{96,288}};
+static const glyph_point file_points[] = {
+    {96,32},{224,32},{304,112},{304,352},{80,352},{80,48},{96,32},
+    {-1,-1},{224,32},{224,112},{304,112}
+};
 static const struct {const glyph_point *p; size_t n;} shapes[] = {
     [PH_ICON_HOME]={home_points, SDL_arraysize(home_points)},
     [PH_ICON_APPS]={apps_points, SDL_arraysize(apps_points)},
@@ -108,4 +140,13 @@ static const struct {const glyph_point *p; size_t n;} shapes[] = {
     [PH_ICON_SEND]={send_points, SDL_arraysize(send_points)},
     [PH_ICON_RECEIVE]={receive_points, SDL_arraysize(receive_points)},
     [PH_ICON_TRANSFER]={transfer_points, SDL_arraysize(transfer_points)},
+    [PH_ICON_PHONE]={phone_points, SDL_arraysize(phone_points)},
+    [PH_ICON_MOUSE]={mouse_points, SDL_arraysize(mouse_points)},
+    [PH_ICON_CLIPBOARD]={clipboard_points, SDL_arraysize(clipboard_points)},
+    [PH_ICON_WIFI]={wifi_points, SDL_arraysize(wifi_points)},
+    [PH_ICON_FOLDER]={folder_points, SDL_arraysize(folder_points)},
+    [PH_ICON_CHEVRON]={chevron_points, SDL_arraysize(chevron_points)},
+    [PH_ICON_COPY]={copy_points, SDL_arraysize(copy_points)},
+    [PH_ICON_CLOSE]={close_points, SDL_arraysize(close_points)},
+    [PH_ICON_FILE]={file_points, SDL_arraysize(file_points)},
 };

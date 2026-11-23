@@ -16,6 +16,7 @@
 #include "ui/text.h"
 #include "ui/brand_art.h"
 #include "ui/control_icons.h"
+#include "ui/drawing.h"
 #include "ui/accessibility.h"
 #include "ui/placement.h"
 #include "ui/vendor/qrcodegen.h"
@@ -170,29 +171,9 @@ static void paint(SDL_Renderer *renderer, SDL_Rect rect, int r, int g, int b, in
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 }
 
-static void crisp_rect(SDL_Renderer *renderer, int x, int y, int w, int h, SDL_Rect *out,
-                        float *sx, float *sy);
-
 static void rounded(SDL_Renderer *renderer, SDL_Rect box, int radius, SDL_Color color)
 {
-    SDL_Rect px;
-    float sx, sy;
-    int rad;
-
-    if (box.w < 1 || box.h < 1) return;
-    crisp_rect(renderer, box.x, box.y, box.w, box.h, &px, &sx, &sy);
-    rad = (int)lroundf((float)radius * sy);
-    if (rad > px.w / 2) rad = px.w / 2;
-    if (rad > px.h / 2) rad = px.h / 2;
-    SDL_RenderSetScale(renderer, 1, 1);
-    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
-    for (int y = 0; y < px.h; y++) {
-        int inset = 0;
-        int dy = y < rad ? rad - y - 1 : y >= px.h - rad ? y - (px.h - rad) : 0;
-        if (dy > 0) inset = rad - (int)sqrt((double)(rad * rad - dy * dy));
-        SDL_RenderDrawLine(renderer, px.x + inset, px.y + y, px.x + px.w - inset - 1, px.y + y);
-    }
-    SDL_RenderSetScale(renderer, sx, sy);
+    ph_ui_round_rect(renderer, box, radius, color);
 }
 
 static void fill_px(SDL_Renderer *renderer, int x, int y, int w, int h);
@@ -1232,8 +1213,10 @@ static SDL_Texture *texture_from_rgba(SDL_Renderer *renderer, const unsigned cha
         return NULL;
     texture = SDL_CreateTextureFromSurface(renderer, surface);
     SDL_FreeSurface(surface);
-    if (texture)
+    if (texture) {
         SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureScaleMode(texture, SDL_ScaleModeLinear);
+    }
     return texture;
 }
 
@@ -1533,12 +1516,9 @@ static void paint_icon(SDL_Renderer *renderer, SDL_Rect dest, SDL_Color color,
 
     if (dest.w < 4 || dest.h < 4)
         return;
-    SDL_RenderGetScale(renderer, &sx, &sy);
-    n = (int)lroundf(dest.w * (sx > sy ? sx : sy));
-    if (n < 16)
-        n = 16;
-    if (n > 96)
-        n = 96;
+    SDL_Rect pixels;
+    crisp_rect(renderer, dest.x, dest.y, dest.w, dest.h, &pixels, &sx, &sy);
+    n = SDL_clamp(SDL_min(pixels.w, pixels.h), 1, 96);
     cov = calloc((size_t)n * (size_t)n, sizeof *cov);
     surface = SDL_CreateRGBSurfaceWithFormat(0, n, n, 32, SDL_PIXELFORMAT_RGBA32);
     if (!cov || !surface) {
@@ -1561,7 +1541,8 @@ static void paint_icon(SDL_Renderer *renderer, SDL_Rect dest, SDL_Color color,
     SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
     SDL_SetTextureColorMod(tex, color.r, color.g, color.b);
     SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
-    SDL_RenderCopy(renderer, tex, NULL, &dest);
+    SDL_FRect output = ph_ui_pixel_rect(pixels.x, pixels.y, pixels.w, pixels.h, sx, sy);
+    SDL_RenderCopyF(renderer, tex, NULL, &output);
     SDL_DestroyTexture(tex);
 }
 
@@ -2809,15 +2790,20 @@ static void draw_transfers(ph_window *w, int width, int height)
     bool dark = w->workspace && ph_workspace_dark(w->workspace);
     SDL_Color panel = dark ? (SDL_Color){30, 35, 42, 255} : ((SDL_Color){255, 255, 255, 255});
     rounded(r, (SDL_Rect){t.x, PH_WINDOW_BAR_PX, t.width, height - PH_WINDOW_BAR_PX}, 0, panel);
-    draw_text(r, "Transfers", t.x + 16, PH_WINDOW_BAR_PX + 14, inner, 2,
-              dark ? color_on_ink : color_text);
+    draw_text(r, "Transfers", t.x + 16, PH_WINDOW_BAR_PX + 10, inner,
+              PH_TEXT(15, PH_FONT_SEMIBOLD), dark ? color_on_ink : color_text);
+    SDL_Color inset = dark ? (SDL_Color){21, 25, 30, 255} : color_ground;
+    rounded(r, (SDL_Rect){t.files.x - 3, t.files.y - 3, inner, t.files.h + 6}, 7, inset);
     for (int i = 0; i < 2; i++) {
         SDL_Rect tab = i ? t.clip : t.files;
         const char *label = i ? "Clipboard" : "Files";
         bool selected = w->transfer_tab == i;
-        rounded(r, tab, 6, selected ? (dark ? color_stage_raised : color_ground) : panel);
-        draw_text(r, label, tab.x + (tab.w - ph_text_width(label, 1)) / 2, tab.y + 5, tab.w - 8, 1,
-                  dark ? color_on_ink : color_text);
+        if (selected)
+            rounded(r, tab, 5, dark ? color_stage_raised : panel);
+        int font = PH_TEXT(12, selected ? PH_FONT_MEDIUM : PH_FONT_REGULAR);
+        draw_text(r, label, tab.x + (tab.w - ph_text_width(label, font)) / 2, tab.y + 5,
+                  tab.w - 8, font, selected ? (dark ? color_on_ink : color_text)
+                                             : (dark ? color_stage_muted : color_muted));
     }
     if (w->workspace || w->transfer_tab)
         return;
@@ -3492,6 +3478,7 @@ void ph_window_destroy(ph_window *w)
     if (w->mark_on_dark)
         SDL_DestroyTexture(w->mark_on_dark);
     if (w->renderer) {
+        ph_ui_release_drawing(w->renderer);
         ph_icon_release(w->renderer);
         ph_text_detach(w->renderer);
     }

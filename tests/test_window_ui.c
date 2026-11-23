@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include <SDL.h>
 #include <libavcodec/avcodec.h>
@@ -16,8 +17,11 @@
 #include "control/setup.h"
 #include "core/config.h"
 #include "core/secure_link.h"
+#include "files/hostclip.h"
 #include "temp_path.h"
 #include "core/version.h"
+#include "ui/control_icons.h"
+#include "ui/drawing.h"
 #include "ui/text.h"
 #include "ui/vendor/qrcodegen.h"
 #include "ui/window.h"
@@ -26,10 +30,9 @@
     fprintf(stderr, "%s:%d: %s (%s)\n", __FILE__, __LINE__, #condition, SDL_GetError()); \
     exit(1); } } while (0)
 
-static void screenshot(ph_window *window, const char *dir, const char *name)
+static void screenshot_renderer(SDL_Renderer *renderer, const char *dir, const char *name)
 {
     if (!dir) return;
-    SDL_Renderer *renderer = SDL_GetRenderer(SDL_GetWindowFromID(ph_window_id(window)));
     int width, height;
     CHECK(SDL_GetRendererOutputSize(renderer, &width, &height) == 0);
     AVFrame *frame = av_frame_alloc();
@@ -55,6 +58,99 @@ static void screenshot(ph_window *window, const char *dir, const char *name)
     CHECK(fwrite(packet->data, 1, (size_t)packet->size, file) == (size_t)packet->size);
     CHECK(fclose(file) == 0);
     av_packet_free(&packet); avcodec_free_context(&ctx); av_frame_free(&frame);
+}
+
+static void screenshot(ph_window *window, const char *dir, const char *name)
+{
+    screenshot_renderer(SDL_GetRenderer(SDL_GetWindowFromID(ph_window_id(window))), dir, name);
+}
+
+static Uint8 pixel_red(const SDL_Surface *surface, int x, int y)
+{
+    return ((const Uint8 *)surface->pixels)[y * surface->pitch + x * 4];
+}
+
+static void test_scaled_corners_and_icons(SDL_Surface *surface, SDL_Renderer *renderer, float dpi)
+{
+    CHECK(SDL_RenderSetScale(renderer, dpi, dpi) == 0);
+    CHECK(SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255) == 0);
+    CHECK(SDL_RenderClear(renderer) == 0);
+    SDL_Rect clip = {0, 0, 96, 62};
+    CHECK(SDL_RenderSetClipRect(renderer, &clip) == 0);
+    ph_ui_round_rect(renderer, (SDL_Rect){12, 12, 48, 28}, 8, (SDL_Color){0, 0, 0, 255});
+    ph_ui_round_rect(renderer, (SDL_Rect){92, 42, 20, 20}, 6, (SDL_Color){0, 0, 0, 255});
+    ph_icon_draw(renderer, PH_ICON_CLOSE, (SDL_Rect){68, 12, 20, 20}, (SDL_Color){0, 0, 0, 255});
+    SDL_Rect actual;
+    SDL_RenderGetClipRect(renderer, &actual);
+    CHECK(SDL_RenderIsClipEnabled(renderer) && SDL_RectEquals(&clip, &actual));
+    float sx, sy;
+    SDL_RenderGetScale(renderer, &sx, &sy);
+    CHECK(sx == dpi && sy == dpi);
+    SDL_RenderPresent(renderer);
+
+    int left = (int)lroundf(12 * dpi), top = left, right = (int)lroundf(60 * dpi);
+    int radius = (int)lroundf(8 * dpi);
+    CHECK(pixel_red(surface, left, top) == 255);
+    for (int x = left + radius; x < right - radius; x++)
+        CHECK(pixel_red(surface, x, top) == 0);
+    CHECK(pixel_red(surface, (int)(101 * dpi), (int)(53 * dpi)) == 255);
+    int corner_pixels = 0, icon_pixels = 0;
+    for (int y = 0; y < radius; y++)
+        for (int x = 0; x < radius; x++) {
+            Uint8 red = pixel_red(surface, left + x, top + y);
+            CHECK(red == pixel_red(surface, right - 1 - x, top + y));
+            corner_pixels += red > 0 && red < 255;
+        }
+    for (int y = (int)(12 * dpi); y < (int)(32 * dpi); y++)
+        for (int x = (int)(68 * dpi); x < (int)(88 * dpi); x++) {
+            Uint8 red = pixel_red(surface, x, y);
+            icon_pixels += red > 0 && red < 255;
+        }
+    CHECK(corner_pixels >= radius && icon_pixels > 8);
+    CHECK(SDL_RenderSetClipRect(renderer, NULL) == 0);
+}
+
+static void test_scaled_workspace(ph_history *history, const char *dir)
+{
+    ph_workspace *workspace = ph_workspace_create();
+    CHECK(workspace);
+    ph_workspace_set_history(workspace, history);
+    enum { WIDTH = 1120, HEIGHT = 650 };
+    const int scales[] = {100, 125, 150, 200};
+    for (size_t i = 0; i < SDL_arraysize(scales); i++) {
+        int percent = scales[i], x, y;
+        SDL_Surface *surface = SDL_CreateRGBSurfaceWithFormat(
+            0, WIDTH * percent / 100, HEIGHT * percent / 100, 32, SDL_PIXELFORMAT_RGBA32);
+        CHECK(surface);
+        SDL_Renderer *renderer = SDL_CreateSoftwareRenderer(surface);
+        CHECK(renderer && ph_text_attach(renderer));
+        test_scaled_corners_and_icons(surface, renderer, percent / 100.f);
+        SDL_Rect area = {0, 0, WIDTH, HEIGHT};
+        ph_workspace_live live = {.pc = "Porthole Windows", .address = "192.0.2.42:47731",
+                                  .code = "SAMPLE42", .share_available = true};
+        ph_workspace_draw(workspace, renderer, area, PH_WORKSPACE_HOME, &live);
+        CHECK(ph_workspace_target(workspace, PH_WORKSPACE_COPY_ADDRESS, &x, &y) && x < WIDTH * 2 / 3);
+        CHECK(ph_workspace_target(workspace, PH_WORKSPACE_SETUP, &x, &y) && x > WIDTH / 2);
+        SDL_RenderPresent(renderer);
+        char label[40];
+        snprintf(label, sizeof label, "connect-%d-percent", percent);
+        screenshot_renderer(renderer, dir, label);
+
+        live.paired = live.connected = live.clipboard_available = true;
+        snprintf(live.phone, sizeof live.phone, "iPhone");
+        ph_workspace_draw(workspace, renderer, area, PH_WORKSPACE_HOME, &live);
+        CHECK(ph_workspace_target(workspace, PH_WORKSPACE_SEND_FILES, &x, &y) && x > WIDTH / 2);
+        CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLIPBOARD_OPEN, &x, &y));
+        SDL_RenderPresent(renderer);
+        snprintf(label, sizeof label, "connected-%d-percent", percent);
+        screenshot_renderer(renderer, dir, label);
+        ph_ui_release_drawing(renderer);
+        ph_icon_release(renderer);
+        ph_text_detach(renderer);
+        SDL_DestroyRenderer(renderer);
+        SDL_FreeSurface(surface);
+    }
+    ph_workspace_destroy(workspace);
 }
 
 static void click_at(ph_window *window, int x, int y)
@@ -202,7 +298,18 @@ int main(int argc, char **argv)
     ph_window_redraw(w);
 #ifdef _WIN32
     if (test_accessibility) {
+        ph_hostclip_init();
         test_windows_accessibility(w, native);
+        char kind;
+        void *data;
+        size_t length;
+        CHECK(ph_hostclip_copy_text("private\r\nmultiline"));
+        CHECK(!ph_hostclip_changed(true, &kind, &data, &length));
+        CHECK(SDL_SetClipboardText("external copy") == 0);
+        CHECK(ph_hostclip_changed(true, &kind, &data, &length));
+        CHECK(kind == 'T' && length == 13 && !memcmp(data, "external copy", length));
+        free(data);
+        ph_hostclip_shutdown();
         ph_window_destroy(w);
         SDL_Quit();
         puts("Windows accessibility: named controls, roles, values and actions passed");
@@ -556,6 +663,7 @@ int main(int argc, char **argv)
     screenshot(w, dir, "08-sharing-unavailable");
     copy.type = SDL_MOUSEBUTTONDOWN;
     CHECK(!ph_workspace_target(workspace, PH_WORKSPACE_COPY_ADDRESS, &tx, &ty));
+    test_scaled_workspace(history, dir);
     ph_history_close(history);
     ph_window_destroy(w);
 

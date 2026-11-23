@@ -1,5 +1,6 @@
 #include "ui/workspace.h"
 #include "ui/control_icons.h"
+#include "ui/drawing.h"
 #include "ui/text.h"
 #include "ui/vendor/qrcodegen.h"
 #include "core/config.h"
@@ -95,12 +96,7 @@ static void rect(ph_workspace *u, SDL_Rect b, SDL_Color c)
 }
 static void rounded(ph_workspace *u, SDL_Rect b, int radius, SDL_Color c)
 {
-    color(u->renderer, c);
-    for (int y = 0; y < b.h; y++) {
-        int d = y < radius ? radius - y - 1 : y >= b.h - radius ? y - (b.h - radius) : 0;
-        int inset = d > 0 ? radius - (int)sqrt((double)(radius * radius - d * d)) : 0;
-        SDL_RenderDrawLine(u->renderer, b.x + inset, b.y + y, b.x + b.w - inset - 1, b.y + y);
-    }
+    ph_ui_round_rect(u->renderer, b, radius, c);
 }
 static int text(ph_workspace *u, const char *s, int x, int y, int width, int size, bool bold,
                 SDL_Color c)
@@ -108,12 +104,11 @@ static int text(ph_workspace *u, const char *s, int x, int y, int width, int siz
     return ph_text_draw(u->renderer, s, x, y, width,
                         PH_TEXT(size, bold ? PH_FONT_MEDIUM : PH_FONT_REGULAR), c);
 }
-static void fitted_label(ph_workspace *u, const char *s, int x, int y, int width, int size,
-                         bool bold, SDL_Color c)
+static void fitted_text(ph_workspace *u, const char *s, int x, int y, int width, int font,
+                        SDL_Color c)
 {
     if (width < 12)
         return;
-    int font = PH_TEXT(size, bold ? PH_FONT_MEDIUM : PH_FONT_REGULAR);
     char buf[320];
     size_t n = strcspn(s, "\r\n");
     bool truncated = s[n] != 0 || n >= sizeof buf - 4;
@@ -133,7 +128,12 @@ static void fitted_label(ph_workspace *u, const char *s, int x, int y, int width
     }
     if (truncated)
         strcat(buf, "…");
-    text(u, buf, x, y, width, size, bold, c);
+    ph_text_draw(u->renderer, buf, x, y, width, font, c);
+}
+static void fitted_label(ph_workspace *u, const char *s, int x, int y, int width, int size,
+                         bool bold, SDL_Color c)
+{
+    fitted_text(u, s, x, y, width, PH_TEXT(size, bold ? PH_FONT_MEDIUM : PH_FONT_REGULAR), c);
 }
 static void line(ph_workspace *u, int x, int y, int width)
 {
@@ -181,32 +181,44 @@ static int focused_index(const ph_workspace *u)
     return -1;
 }
 
-static void button(ph_workspace *u, SDL_Rect b, const char *label, int action, uint64_t id,
-                   bool primary, bool enabled)
+static void action_button(ph_workspace *u, SDL_Rect b, const char *label, int action, uint64_t id,
+                          bool primary, bool enabled, bool framed, int icon)
 {
     SDL_Color bg = primary ? u->ink : u->surface, fg = primary ? u->surface : u->ink;
     if (!enabled) {
         bg = u->selected_bg;
         fg = u->muted;
     }
-    rounded(u, b, 7, u->border);
-    SDL_Rect fill = {b.x + 1, b.y + 1, b.w - 2, b.h - 2};
-    rounded(u, fill, 6, bg);
-    int font = PH_TEXT(12, PH_FONT_MEDIUM), tw = ph_text_width(label, font);
+    if (framed) {
+        if (primary && enabled)
+            rounded(u, b, 7, bg);
+        else {
+            rounded(u, b, 7, u->border);
+            rounded(u, (SDL_Rect){b.x + 1, b.y + 1, b.w - 2, b.h - 2}, 6, bg);
+        }
+    } else
+        fg = u->muted;
+    int icon_space = icon < 0 ? 0 : 22;
+    int font = PH_TEXT(12, PH_FONT_MEDIUM), tw = ph_text_width(label, font) + icon_space;
     int padding = SDL_max(4, (b.w - tw) / 2);
-    fitted_label(u, label, b.x + padding, b.y + (b.h - ph_text_line_height(font)) / 2,
-                 b.w - padding - 4, 12, true, fg);
+    if (icon >= 0)
+        ph_icon_draw(u->renderer, (ph_control_icon)icon,
+                     (SDL_Rect){b.x + padding, b.y + (b.h - 15) / 2, 15, 15}, fg);
+    fitted_text(u, label, b.x + padding + icon_space, b.y + (b.h - ph_text_line_height(font)) / 2,
+                b.w - padding - icon_space - 4, font, fg);
     if (enabled)
         hit(u, b, action, id, label);
 }
+static void button(ph_workspace *u, SDL_Rect b, const char *label, int action, uint64_t id,
+                   bool primary, bool enabled)
+{
+    action_button(u, b, label, action, id, primary, enabled, true, -1);
+}
 static void copy_button(ph_workspace *u, SDL_Rect b, int action, bool enabled)
 {
-    color(u->renderer, enabled ? u->ink : u->muted);
-    SDL_Rect page = {b.x + 11, b.y + 10, 10, 12}, back = {b.x + 8, b.y + 7, 10, 12};
-    SDL_RenderDrawRect(u->renderer, &back);
-    rect(u, page, u->surface);
-    color(u->renderer, enabled ? u->ink : u->muted);
-    SDL_RenderDrawRect(u->renderer, &page);
+    ph_icon_draw(u->renderer, PH_ICON_COPY,
+                 (SDL_Rect){b.x + (b.w - 18) / 2, b.y + (b.h - 18) / 2, 18, 18},
+                 u->muted);
     if (enabled)
         hit(u, b, action, 0, action == PH_WORKSPACE_COPY_ADDRESS ? "Copy address"
                             : action == PH_WORKSPACE_COPY_CODE ? "Copy connection code"
@@ -215,9 +227,7 @@ static void copy_button(ph_workspace *u, SDL_Rect b, int action, bool enabled)
 static void close_button(ph_workspace *u, int x, int y, int action)
 {
     SDL_Rect b = {x, y, 28, 28};
-    color(u->renderer, u->muted);
-    SDL_RenderDrawLine(u->renderer, x + 9, y + 9, x + 19, y + 19);
-    SDL_RenderDrawLine(u->renderer, x + 19, y + 9, x + 9, y + 19);
+    ph_icon_draw(u->renderer, PH_ICON_CLOSE, (SDL_Rect){x + 5, y + 5, 18, 18}, u->muted);
     hit(u, b, action, 0, action == PH_WORKSPACE_CANCEL_SEND ? "Cancel send" : "Close");
 }
 static void status_dot(ph_workspace *u, int x, int y, bool good)
@@ -234,12 +244,6 @@ static void toggle(ph_workspace *u, int x, int y, const char *name, bool on, int
         snprintf(label, sizeof label, "%s (%s)", name, on ? "on" : "off");
         hit(u, (SDL_Rect){x - 8, y - 8, 52, 36}, action, 0, label);
     }
-}
-static void phone_icon(ph_workspace *u, int x, int y)
-{
-    rounded(u, (SDL_Rect){x, y, 18, 30}, 4, u->ink);
-    rounded(u, (SDL_Rect){x + 2, y + 3, 14, 23}, 2, u->surface);
-    rounded(u, (SDL_Rect){x + 6, y + 26, 6, 2}, 1, u->ink);
 }
 static bool system_preference(void)
 {
@@ -469,16 +473,31 @@ static void qr(ph_workspace *u, SDL_Rect box)
     if (!qrcodegen_encodeText(uri, tmp, code, qrcodegen_Ecc_MEDIUM, 1, 8, qrcodegen_Mask_AUTO,
                               true))
         return;
-    int n = qrcodegen_getSize(code), scale = box.w / (n + 8);
+    float sx, sy;
+    SDL_RenderGetScale(u->renderer, &sx, &sy);
+    int left = (int)lroundf(box.x * sx), top = (int)lroundf(box.y * sy);
+    int width = (int)lroundf((box.x + box.w) * sx) - left;
+    int height = (int)lroundf((box.y + box.h) * sy) - top;
+    int n = qrcodegen_getSize(code), scale = SDL_min(width, height) / (n + 8);
     if (scale < 1)
         return;
-    int x = box.x + (box.w - scale * (n + 8)) / 2, y = box.y + (box.h - scale * (n + 8)) / 2;
-    rect(u, box, (SDL_Color){255, 255, 255, 255});
+    int x = left + (width - scale * n) / 2, y = top + (height - scale * n) / 2;
+    rounded(u, box, 0, (SDL_Color){255, 255, 255, 255});
+    color(u->renderer, (SDL_Color){17, 17, 17, 255});
+    SDL_FRect modules[64];
+    int count = 0;
     for (int cy = 0; cy < n; cy++)
         for (int cx = 0; cx < n; cx++)
-            if (qrcodegen_getModule(code, cx, cy))
-                rect(u, (SDL_Rect){x + (cx + 4) * scale, y + (cy + 4) * scale, scale, scale},
-                     (SDL_Color){17, 17, 17, 255});
+            if (qrcodegen_getModule(code, cx, cy)) {
+                modules[count++] = ph_ui_pixel_rect(x + cx * scale, y + cy * scale,
+                                                    scale, scale, sx, sy);
+                if (count == (int)SDL_arraysize(modules)) {
+                    SDL_RenderFillRectsF(u->renderer, modules, count);
+                    count = 0;
+                }
+            }
+    if (count)
+        SDL_RenderFillRectsF(u->renderer, modules, count);
 }
 static size_t previous_char(const char *s, size_t at)
 {
@@ -543,6 +562,44 @@ static void search_box(ph_workspace *u, SDL_Rect box)
 {
     entry_box(u, box, u->search, "Search", UI_SEARCH);
 }
+
+static void file_badge(ph_workspace *u, SDL_Rect box, const char *name)
+{
+    const char *extension = strrchr(name, '.');
+    size_t length = extension ? strlen(++extension) : 0;
+    char type[6];
+    if (length > 0 && length < sizeof type) {
+        for (size_t i = 0; i < length; i++) {
+            if (!SDL_isalnum((unsigned char)extension[i])) {
+                length = 0;
+                break;
+            }
+            type[i] = (char)SDL_toupper((unsigned char)extension[i]);
+        }
+    } else
+        length = 0;
+    type[length] = 0;
+    rounded(u, box, 5, u->border);
+    rounded(u, (SDL_Rect){box.x + 1, box.y + 1, box.w - 2, box.h - 2}, 4, u->surface);
+    if (!length) {
+        ph_icon_draw(u->renderer, PH_ICON_FILE,
+                     (SDL_Rect){box.x + 7, box.y + 10, 20, 20}, u->muted);
+        return;
+    }
+    SDL_Color fill = !strcmp(type, "PDF") ? (SDL_Color){153, 52, 48, 255}
+                                         : u->selected_bg;
+    SDL_Color ink = !strcmp(type, "PDF") ? (SDL_Color){255, 255, 255, 255}
+                                        : u->ink;
+    int points = 9;
+    while (points > 6 && ph_text_width(type, PH_TEXT(points, PH_FONT_SEMIBOLD)) > box.w - 8)
+        points--;
+    int font = PH_TEXT(points, PH_FONT_SEMIBOLD);
+    int width = ph_text_width(type, font);
+    rounded(u, (SDL_Rect){box.x + 3, box.y + box.h - 18, box.w - 6, 13}, 2, fill);
+    ph_text_draw(u->renderer, type, box.x + (box.w - width) / 2, box.y + box.h - 17,
+                 box.w - 4, font, ink);
+}
+
 static void draw_file_rows(ph_workspace *u, SDL_Rect b, bool full)
 {
     const char *filters[] = {"All transfers", "Sent", "Received"};
@@ -594,13 +651,13 @@ static void draw_file_rows(ph_workspace *u, SDL_Rect b, bool full)
             char when[40], size[40], sub[128];
             timestamp(f->time, when);
             size_text(f->bytes, size);
-            snprintf(sub, sizeof sub, "%s · %s · %s", size,
-                     f->incoming ? "From iPhone" : "To iPhone", when);
+            snprintf(sub, sizeof sub, "%s · %s", size, f->incoming ? "From iPhone" : "To iPhone");
             int right = b.w > 420 ? 120 : 86;
+            file_badge(u, (SDL_Rect){b.x + 2, cy + 13, 34, 40}, f->name);
+            fitted_label(u, f->name, b.x + 50, cy + 12, b.w - right - 58, 13, true, u->ink);
             ph_icon_draw(u->renderer, f->incoming ? PH_ICON_RECEIVE : PH_ICON_SEND,
-                         (SDL_Rect){b.x + 10, cy + 19, 20, 20}, u->muted);
-            fitted_label(u, f->name, b.x + 40, cy + 12, b.w - right - 52, 13, true, u->ink);
-            fitted_label(u, sub, b.x + 40, cy + 35, b.w - right - 52, 10, false, u->muted);
+                         (SDL_Rect){b.x + 50, cy + 35, 13, 13}, u->muted);
+            fitted_label(u, sub, b.x + 68, cy + 35, b.w - right - 76, 10, false, u->muted);
             const char *state = f->state == PH_TRANSFER_COMPLETE
                                     ? (f->incoming ? "Received" : "Sent")
                                 : f->state == PH_TRANSFER_CHANGED  ? "Source changed"
@@ -609,13 +666,18 @@ static void draw_file_rows(ph_workspace *u, SDL_Rect b, bool full)
                                 : f->state == PH_TRANSFER_PAUSED   ? "Paused"
                                 : f->state == PH_TRANSFER_ACTIVE   ? "Transferring"
                                                                    : "Queued";
-            text(u, state, b.x + b.w - right, cy + 12, right - 8, 11, false,
-                 f->state == PH_TRANSFER_COMPLETE ? u->positive : u->muted);
             ph_file_availability state_on_disk = availability(u, f);
-            if (state_on_disk != PH_FILE_PRESENT && state_on_disk != PH_FILE_NO_PATH)
-                text(u,
-                     state_on_disk == PH_FILE_MISSING ? "File not found" : "Location unavailable",
-                     b.x + b.w - right, cy + 35, right - 8, 10, false, u->muted);
+            const char *detail = state_on_disk == PH_FILE_MISSING ? "File not found"
+                                 : state_on_disk == PH_FILE_LOCATION_UNAVAILABLE
+                                     ? "Location unavailable" : when;
+            int edge = b.x + b.w - 10;
+            int state_width = ph_text_width(state, PH_TEXT(11, PH_FONT_REGULAR));
+            int detail_width = ph_text_width(detail, PH_TEXT(10, PH_FONT_REGULAR));
+            fitted_label(u, state, edge - SDL_min(state_width, right - 10), cy + 12,
+                         right - 10, 11, false,
+                         f->state == PH_TRANSFER_COMPLETE ? u->positive : u->muted);
+            fitted_label(u, detail, edge - SDL_min(detail_width, right - 10), cy + 35,
+                         right - 10, 10, false, u->muted);
             hit(u, row, UI_SELECT, f->id, f->name);
             line(u, b.x + 12, cy + 65, b.w - 24);
         }
@@ -891,10 +953,13 @@ static void files_panel(ph_workspace *u)
     SDL_Rect b = u->rect;
     int inset = b.h < 220 ? 4 : 12;
     int x = b.x + 12, y = b.y + inset, width = b.w - 24;
-    text(u, "File transfers", x, y, width - 40, 18, true, u->ink);
-    if (u->view == PH_WORKSPACE_FILES)
-        close_button(u, b.x + b.w - 42, y - 3, PH_WORKSPACE_CLOSE);
-    y += 34;
+    if (u->view == PH_WORKSPACE_FILES) {
+        close_button(u, b.x + b.w - 39, y + 1, PH_WORKSPACE_CLOSE);
+        width -= 32;
+    } else {
+        text(u, "File transfers", x, y, width, 18, true, u->ink);
+        y += 34;
+    }
     int cell = (width - 12) / 3;
     char history_name[32];
     button(u, (SDL_Rect){x, y, cell, 30}, "Send files", PH_WORKSPACE_SEND_FILES, 0,
@@ -904,6 +969,7 @@ static void files_panel(ph_workspace *u)
     button(u, (SDL_Rect){x + 2 * (cell + 6), y, cell, 30}, "Open folder", PH_WORKSPACE_REVEAL, 0,
            false, true);
     y += 44;
+    width = b.w - 24;
     y = transfer_progress(u, x, y, width);
     if (b.y + b.h > y + 90)
         draw_file_rows(u, (SDL_Rect){x, y, width, b.y + b.h - y - 12}, false);
@@ -919,10 +985,160 @@ static void pairing_actions(ph_workspace *u, int x, int y, int width)
            PH_WORKSPACE_SETTINGS_OPEN, 0, false, true);
 }
 
+static void connection_status(ph_workspace *u, SDL_Rect box)
+{
+    const char *names[] = {"Wi-Fi connection", "Mouse and keyboard", "Clipboard sync"};
+    const char *details[] = {"Connect both devices to the same local network.",
+                             "Pair your iPhone over Bluetooth to use PC controls.",
+                             "Available after pairing."};
+    const char *states[] = {"Ready", "Inactive", "Waiting"};
+    const ph_control_icon icons[] = {PH_ICON_WIFI, PH_ICON_MOUSE, PH_ICON_CLIPBOARD};
+    int x = box.x + 16, y = box.y + 34;
+    text(u, "CONNECTION STATUS", x, box.y + 12, box.w - 32, 10, true, u->muted);
+    line(u, box.x + 1, y, box.w - 2);
+    const int heights[] = {67, 95, 61};
+    for (int i = 0; i < 3; i++) {
+        if (i)
+            line(u, box.x + 1, y, box.w - 2);
+        rounded(u, (SDL_Rect){x, y + 14, 32, 32}, 8, u->background);
+        ph_icon_draw(u->renderer, icons[i], (SDL_Rect){x + 7, y + 21, 18, 18}, u->ink);
+        text(u, names[i], x + 44, y + 12, box.w - 145, 12, true, u->ink);
+        int sw = ph_text_width(states[i], PH_TEXT(11, PH_FONT_REGULAR));
+        int right = box.x + box.w - 16;
+        status_dot(u, right - sw - 11, y + 18, i == 0);
+        text(u, states[i], right - sw, y + 13, sw + 2, 11, false,
+             i == 0 ? u->positive : u->muted);
+        text(u, details[i], x + 44, y + 34, box.w - 76, 11, false, u->muted);
+        if (i == 1)
+            action_button(u, (SDL_Rect){x + 39, y + 63, 108, 26}, "Set up controls",
+                          PH_WORKSPACE_SETUP, 0, false, true, false, -1);
+        y += heights[i];
+    }
+}
+
+static void pairing_field(ph_workspace *u, SDL_Rect box, const char *label, const char *value,
+                          int action)
+{
+    text(u, label, box.x + 12, box.y + 7, box.w - 48, 10, false, u->muted);
+    fitted_text(u, value, box.x + 12, box.y + 22, box.w - 48,
+                PH_TEXT(action == PH_WORKSPACE_COPY_CODE ? 17 : 13, PH_FONT_MONO_MEDIUM), u->ink);
+    bool available = action == PH_WORKSPACE_COPY_CODE ? u->live.code[0] != 0
+                                                     : u->live.address[0] != 0;
+    copy_button(u, (SDL_Rect){box.x + box.w - 36, box.y + 10, 28, 30}, action, available);
+}
+
+static void wide_pairing(ph_workspace *u, int x, int y, int width)
+{
+    int gap = 24, pair_width = (width - gap) * 57 / 100;
+    SDL_Rect pair = {x, y, pair_width, 266}, status = {x + pair_width + gap, y,
+                                                     width - pair_width - gap, 266};
+    card(u, pair);
+    card(u, status);
+    int q = SDL_clamp(pair_width - 302, 128, 174);
+    int qr_x = x + 22, qr_y = y + 24;
+    rounded(u, (SDL_Rect){qr_x, qr_y, q, q}, 9, u->border);
+    rounded(u, (SDL_Rect){qr_x + 1, qr_y + 1, q - 2, q - 2}, 8,
+            (SDL_Color){255, 255, 255, 255});
+    if (u->live.code[0])
+        qr(u, (SDL_Rect){qr_x + 7, qr_y + 7, q - 14, q - 14});
+    text(u, "Scan in Porthole on your iPhone", qr_x, qr_y + q + 12, q, 11, false, u->muted);
+    int dx = qr_x + q + 24, dw = pair.x + pair.w - 22 - dx;
+    text(u, "THIS PC", dx, y + 19, dw, 10, true, u->muted);
+    fitted_label(u, u->live.pc[0] ? u->live.pc : "Porthole", dx, y + 37, dw, 22, true, u->ink);
+    rounded(u, (SDL_Rect){dx, y + 79, dw, 99}, 8, u->border);
+    rounded(u, (SDL_Rect){dx + 1, y + 80, dw - 2, 97}, 7, u->surface);
+    line(u, dx + 1, y + 128, dw - 2);
+    pairing_field(u, (SDL_Rect){dx, y + 79, dw, 49}, "Address",
+                  u->live.address[0] ? u->live.address : "Starting…", PH_WORKSPACE_COPY_ADDRESS);
+    pairing_field(u, (SDL_Rect){dx, y + 129, dw, 49}, "Connection code", u->live.code,
+                  PH_WORKSPACE_COPY_CODE);
+    button(u, (SDL_Rect){dx, y + 201, 100, 34}, "New code", PH_WORKSPACE_NEW_CODE, 0, false,
+           u->live.code[0] != 0);
+    connection_status(u, status);
+    action_button(u, (SDL_Rect){x, y + 284, 158, 34}, "Certificate fingerprint", UI_FINGERPRINT,
+                  0, false, true, false, -1);
+    action_button(u, (SDL_Rect){x + width - 272, y + 284, 148, 34}, "Connection options",
+                  UI_SECTION + 8, 0, false, true, false, PH_ICON_SLIDERS);
+    action_button(u, (SDL_Rect){x + width - 110, y + 284, 110, 34}, "Settings",
+                  PH_WORKSPACE_SETTINGS_OPEN, 0, false, true, true, PH_ICON_GEAR);
+}
+
+static void paired_features(ph_workspace *u, SDL_Rect box)
+{
+    const char *names[] = {"Screen sharing", "Mouse and keyboard", "Clipboard sync"};
+    const char *compact_names[] = {"Screen", "Controls", "Clipboard"};
+    const char *states[] = {u->live.mirroring ? "Active"
+                              : !u->live.connected ? "Disconnected"
+                              : u->live.share_checked && !u->live.share_available ? "Unavailable"
+                                                                                 : "Off",
+                            u->live.controls && !u->live.paused ? "Active" : "Inactive",
+                            clipboard_status(u, true)};
+    const bool active[] = {u->live.mirroring, u->live.controls && !u->live.paused,
+                           clipboard_ready(u)};
+    const ph_control_icon icons[] = {PH_ICON_PHONE, PH_ICON_MOUSE, PH_ICON_CLIPBOARD};
+    card(u, box);
+    for (int i = 0; i < 3; i++) {
+        int x = box.x + i * box.w / 3, w = box.x + (i + 1) * box.w / 3 - x;
+        int right = x + w - (box.w < 450 ? 9 : 18);
+        const char *label = box.w < 450 ? compact_names[i] : names[i];
+        int label_width = ph_text_width(label, PH_TEXT(12, PH_FONT_MEDIUM));
+        int state_width = ph_text_width(states[i], PH_TEXT(11, PH_FONT_REGULAR));
+        bool inline_state = label_width + state_width + 87 < w;
+        int left = x + (box.w < 450 ? 10 : 16), title_y = box.y + (inline_state ? 16 : 8);
+        if (i)
+            rect(u, (SDL_Rect){x, box.y + 1, 1, box.h - 2}, u->border);
+        ph_icon_draw(u->renderer, icons[i], (SDL_Rect){left, title_y - 1, 17, 17}, u->muted);
+        fitted_label(u, label, left + 23, title_y, right - left - 23, 12, true, u->ink);
+        int state_x = inline_state ? right - 19 - state_width : left + 23;
+        int state_y = box.y + (inline_state ? 17 : 30);
+        status_dot(u, state_x - 10, state_y + 5, active[i]);
+        fitted_label(u, states[i], state_x, state_y, right - state_x, 11, false,
+                     active[i] ? u->positive : u->muted);
+        if (box.w >= 450)
+            ph_icon_draw(u->renderer, PH_ICON_CHEVRON,
+                         (SDL_Rect){right - 8, box.y + 19, 11, 11}, u->muted);
+        hit(u, (SDL_Rect){x, box.y, w, box.h},
+            i == 2 ? PH_WORKSPACE_CLIPBOARD_OPEN : UI_SECTION + (i == 0 ? 1 : 2), 0, names[i]);
+    }
+}
+
+static void drop_zone(ph_workspace *u, SDL_Rect box)
+{
+    SDL_Color edge = ph_workspace_dark(u) ? (SDL_Color){87, 101, 120, 255}
+                                          : (SDL_Color){181, 193, 210, 255};
+    rounded(u, box, 10, edge);
+    rounded(u, (SDL_Rect){box.x + 1, box.y + 1, box.w - 2, box.h - 2}, 9, u->background);
+    /* Paint over short intervals on the straight sides, keeping the rounded corners smooth. */
+    float sx, sy;
+    SDL_RenderGetScale(u->renderer, &sx, &sy);
+    color(u->renderer, u->background);
+    for (int vertical = 0; vertical < 2; vertical++) {
+        int length = vertical ? box.h : box.w;
+        SDL_FRect gaps[48];
+        int n = 0;
+        for (int p = 14; p + 4 <= length - 11; p += 9) {
+            for (int side = 0; side < 2; side++) {
+                int x = box.x + (vertical ? side * (box.w - 1) : p);
+                int y = box.y + (vertical ? p : side * (box.h - 1));
+                int px = (int)lroundf(x * sx), py = (int)lroundf(y * sy);
+                int pw = (int)lroundf((x + (vertical ? 1 : 4)) * sx) - px;
+                int ph = (int)lroundf((y + (vertical ? 4 : 1)) * sy) - py;
+                gaps[n++] = ph_ui_pixel_rect(px, py, pw, ph, sx, sy);
+            }
+            if (n == (int)SDL_arraysize(gaps)) {
+                SDL_RenderFillRectsF(u->renderer, gaps, n);
+                n = 0;
+            }
+        }
+        if (n)
+            SDL_RenderFillRectsF(u->renderer, gaps, n);
+    }
+}
+
 static void home(ph_workspace *u)
 {
     SDL_Rect b = u->rect;
-    int pad = b.w < 600 ? 20 : 38, x = b.x + pad, width = b.w - 2 * pad, y = b.y + 30;
+    int pad = b.w < 600 ? 20 : 44, x = b.x + pad, width = b.w - 2 * pad, y = b.y + 30;
     if (!u->live.paired && !u->live.address[0] && u->live.share_checked) {
         y = text(u, "iPhone connection unavailable", x, y, width, 24, true, u->ink) + 14;
         y = text(u, "Restart Porthole and verify that your PC is connected to Wi-Fi.", x, y, width,
@@ -931,12 +1147,18 @@ static void home(ph_workspace *u)
         return;
     }
     if (!u->live.paired) {
-        y = text(u, "Connect your iPhone", x, y, width, width < 350 ? 24 : 30, true, u->ink) + 10;
+        bool wide = width >= 810 && b.h >= 462 && u->live.address[0];
+        y = text(u, "Connect your iPhone", x, y, width, wide ? 37 : width < 350 ? 24 : 30,
+                 true, u->ink) + 10;
         y = text(u,
                  "Open Porthole on your iPhone and scan this code. Connect both devices to the "
                  "same Wi-Fi network.",
                  x, y, width, 14, false, u->muted) +
             26;
+        if (wide) {
+            wide_pairing(u, x, y, width);
+            return;
+        }
         if (width < 350) {
             card(u, (SDL_Rect){x, y, width, 194});
             int q = 100, dx = x + q + 20;
@@ -990,41 +1212,22 @@ static void home(ph_workspace *u)
         return;
     }
     card(u, (SDL_Rect){x, y, 48, 58});
-    phone_icon(u, x + 15, y + 14);
+    ph_icon_draw(u->renderer, PH_ICON_PHONE, (SDL_Rect){x + 8, y + 13, 32, 32}, u->ink);
     fitted_label(u, u->live.phone[0] ? u->live.phone : "iPhone", x + 66, y,
-                 width - (width < 550 ? 76 : 288), 28, true, u->ink);
+                 width - (width < 550 ? 76 : 348), 28, true, u->ink);
     status_dot(u, x + 66, y + 44, u->live.connected);
-    text(u, u->live.connected ? "Connected · Wi-Fi" : "Disconnected", x + 80, y + 38,
-         width - (width < 550 ? 88 : 220), 12, false, u->live.connected ? u->positive : u->muted);
+    text(u, u->live.connected ? "Connected" : "Disconnected", x + 80, y + 38, 100, 12, false,
+         u->live.connected ? u->positive : u->muted);
+    if (u->live.connected)
+        text(u, "Wi-Fi", x + 154, y + 38, 55, 12, false, u->muted);
     int button_y = y + (width < 550 ? 65 : 10);
-    button(u, (SDL_Rect){x + width - 226, button_y, 104, 34}, "Devices", UI_SECTION + 8, 0, false,
-           true);
-    button(u, (SDL_Rect){x + width - 110, button_y, 110, 34}, "Settings", PH_WORKSPACE_SETTINGS_OPEN,
-           0, false, true);
+    action_button(u, (SDL_Rect){x + width - 272, button_y, 148, 34}, "Connection options",
+                  UI_SECTION + 8, 0, false, true, false, PH_ICON_SLIDERS);
+    action_button(u, (SDL_Rect){x + width - 110, button_y, 110, 34}, "Settings",
+                  PH_WORKSPACE_SETTINGS_OPEN, 0, false, true, true, PH_ICON_GEAR);
     y += width < 550 ? 115 : 78;
-
-    card(u, (SDL_Rect){x, y, width, 54});
-    int cell = width / 3;
-    const char *names[] = {"Screen sharing", "Mouse and keyboard", "Clipboard sync"};
-    const char *states[] = {u->live.mirroring ? "Active"
-                              : !u->live.connected ? "Disconnected"
-                              : u->live.share_checked && !u->live.share_available ? "Unavailable"
-                                                                                 : "Off",
-                            u->live.controls && !u->live.paused ? "Active" : "Inactive",
-                            clipboard_status(u, true)};
-    for (int i = 0; i < 3; i++) {
-        int xx = x + i * cell;
-        if (i)
-            rect(u, (SDL_Rect){xx, y, 1, 54}, u->border);
-        const char *compact_names[] = {"Screen", "Controls", "Clipboard"};
-        text(u, width < 450 ? compact_names[i] : names[i], xx + 14, y + 10, cell - 24,
-             cell < 230 ? 11 : 12, true, u->ink);
-        fitted_label(u, states[i], xx + 14, y + 30, cell - 24, 10, false,
-                     i == 2 && clipboard_ready(u) ? u->positive : u->muted);
-        hit(u, (SDL_Rect){xx, y, cell, 54},
-            i == 2 ? PH_WORKSPACE_CLIPBOARD_OPEN : UI_SECTION + (i == 0 ? 1 : 2), 0, names[i]);
-    }
-    y += 68;
+    paired_features(u, (SDL_Rect){x, y, width, 52});
+    y += 74;
     if (!u->live.connected) {
         y = text(u, "Open Porthole on your iPhone to reconnect.", x, y, width, 14, false,
                  u->muted) +
@@ -1043,7 +1246,7 @@ static void home(ph_workspace *u)
     }
     int available = b.y + b.h - y - 22;
     int rows = (int)SDL_min(ph_history_file_count(u->history), 4);
-    int needed = 58 + 92 + 44 + SDL_max(rows, 1) * 66 + 55;
+    int needed = 58 + 113 + 44 + SDL_max(rows, 1) * 66 + 55;
     if (u->live.active_file[0])
         needed += 38;
     if (u->live.incoming_file[0])
@@ -1052,24 +1255,30 @@ static void home(ph_workspace *u)
         needed += 30;
     SDL_Rect files = {x, y, width, SDL_min(needed, available)};
     card(u, files);
-    text(u, "File transfers", x + 20, y + 18, width - 230, 18, true, u->ink);
+    text(u, "File transfers", x + 20, y + 18, width - 290, 18, true, u->ink);
     char history_name[32];
-    button(u, (SDL_Rect){x + width - 232, y + 12, 104, 30}, history_button_label(u, history_name),
-           UI_HISTORY, 0, false, true);
-    button(u, (SDL_Rect){x + width - 116, y + 12, 98, 30}, "Open folder", PH_WORKSPACE_REVEAL, 0,
-           false, true);
+    const char *folder = u->live.folder[0] ? u->live.folder : "Downloads";
+    char open_folder[160] = "Open folder";
+    if (strcmp(folder, "Folder unavailable"))
+        snprintf(open_folder, sizeof open_folder, "Open %s", folder);
+    int folder_width = SDL_clamp(ph_text_width(open_folder, PH_TEXT(12, PH_FONT_MEDIUM)) + 32,
+                                 115, 175);
+    action_button(u, (SDL_Rect){x + width - folder_width - 123, y + 12, 96, 32},
+                  history_button_label(u, history_name), UI_HISTORY, 0, false, true, false, -1);
+    action_button(u, (SDL_Rect){x + width - folder_width - 15, y + 12, folder_width, 32},
+                  open_folder, PH_WORKSPACE_REVEAL, 0, false, true, false, PH_ICON_FOLDER);
     y += 58;
-    SDL_Rect drop = {x + 18, y, width - 36, 76};
-    rounded(u, drop, 9, u->background);
-    ph_icon_draw(u->renderer, PH_ICON_SEND, (SDL_Rect){x + 33, y + 24, 28, 28}, u->ink);
-    text(u, "Send to iPhone", x + 80, y + 15, width - 244, 15, true, u->ink);
-    text(u,
-         u->live.connected ? "Drop files here or browse your PC."
-                           : "Reconnect your iPhone to send files.",
-         x + 80, y + 40, width - 244, 11, false, u->muted);
-    button(u, (SDL_Rect){x + width - 124, y + 20, 92, 34}, "Send files", PH_WORKSPACE_SEND_FILES, 0,
-           true, u->live.connected);
-    y += 92;
+    int drop_height = b.y + b.h - y >= 285 ? 94 : 74;
+    drop_zone(u, (SDL_Rect){x + 19, y, width - 38, drop_height});
+    ph_icon_draw(u->renderer, PH_ICON_SEND,
+                 (SDL_Rect){x + 39, y + (drop_height - 34) / 2, 34, 34}, u->ink);
+    text(u, "Send to iPhone", x + 90, y + drop_height / 2 - 22, width - 244,
+         15, true, u->ink);
+    text(u, "Drop files here or browse your PC.", x + 90, y + drop_height / 2 + 2,
+         width - 244, 11, false, u->muted);
+    button(u, (SDL_Rect){x + width - 133, y + (drop_height - 36) / 2, 96, 36}, "Send files",
+           PH_WORKSPACE_SEND_FILES, 0, true, true);
+    y += drop_height + 19;
     y = transfer_progress(u, x + 22, y, width - 44);
     if (files.y + files.h - y >= 89)
         draw_file_rows(u, (SDL_Rect){x + 20, y, width - 40, files.y + files.h - y - 45}, false);
@@ -1081,8 +1290,8 @@ static void home(ph_workspace *u)
         snprintf(save, sizeof save, "Receive folder · %s",
                  u->live.folder[0] ? u->live.folder : "Downloads");
     text(u, save, x + 20, files.y + files.h - 27, width - 160, 10, false, u->muted);
-    button(u, (SDL_Rect){x + width - 126, files.y + files.h - 34, 106, 28}, "Change folder",
-           PH_WORKSPACE_FOLDER, 0, false, true);
+    action_button(u, (SDL_Rect){x + width - 126, files.y + files.h - 34, 106, 28},
+                  "Change folder", PH_WORKSPACE_FOLDER, 0, false, true, false, -1);
 }
 static int setting(ph_workspace *u, int x, int y, int width, const char *title, const char *detail,
                    int action, bool on)
