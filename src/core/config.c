@@ -1,4 +1,6 @@
 #include "core/config.h"
+#include "core/upath.h"
+#include <openssl/rand.h>
 
 #include <errno.h>
 #include <stdio.h>
@@ -7,17 +9,15 @@
 #include <sys/stat.h>
 
 #ifdef _WIN32
-#include <direct.h>
-#define PH_MKDIR(path) _mkdir(path)
+#include <shlobj.h>
 #define PH_SEP "\\"
 #else
-#define PH_MKDIR(path) mkdir(path, 0700)
 #define PH_SEP "/"
 #endif
 
 static bool ensure_dir(const char *path)
 {
-    if (PH_MKDIR(path) == 0 || errno == EEXIST)
+    if (ph_mkdir(path) == 0 || errno == EEXIST)
         return true;
     return false;
 }
@@ -26,9 +26,20 @@ bool ph_config_dir(char *out, size_t out_len)
 {
     int n;
 #ifdef _WIN32
-    const char *appdata = getenv("APPDATA");
-    if (!appdata || !*appdata)
+    wchar_t wide[1024];
+    char appdata[1024];
+    DWORD length = GetEnvironmentVariableW(L"APPDATA", wide, (DWORD)(sizeof wide / sizeof *wide));
+    if (!length) {
+        PWSTR known = NULL;
+        if (FAILED(SHGetKnownFolderPath(&FOLDERID_RoamingAppData, 0, NULL, &known)))
+            return false;
+        bool ok = ph_narrow(known, appdata, sizeof appdata);
+        CoTaskMemFree(known);
+        if (!ok)
+            return false;
+    } else if (length >= sizeof wide / sizeof *wide || !ph_narrow(wide, appdata, sizeof appdata)) {
         return false;
+    }
     n = snprintf(out, out_len, "%s\\Porthole", appdata);
 #else
     const char *xdg = getenv("XDG_CONFIG_HOME");
@@ -70,7 +81,7 @@ bool ph_config_read_line(const char *name, char *out, size_t out_len)
 
     if (!ph_config_path(name, path, sizeof path))
         return false;
-    f = fopen(path, "r");
+    f = ph_fopen(path, "rb");
     if (!f)
         return false;
     if (fgets(out, (int)out_len, f)) {
@@ -89,9 +100,27 @@ bool ph_config_write_line(const char *name, const char *line)
 
     if (!ph_config_path(name, path, sizeof path))
         return false;
-    f = fopen(path, "w");
+    unsigned char random[8];
+    char temporary[1140];
+    if (RAND_bytes(random, sizeof random) != 1)
+        return false;
+    int n = snprintf(temporary, sizeof temporary, "%s.%02x%02x%02x%02x%02x%02x%02x%02x.tmp", path,
+                     random[0], random[1], random[2], random[3], random[4], random[5], random[6],
+                     random[7]);
+    if (n < 0 || (size_t)n >= sizeof temporary)
+        return false;
+    f = ph_fopen(temporary, "wbx");
     if (!f)
         return false;
-    ok = fprintf(f, "%s\n", line) > 0;
-    return fclose(f) == 0 && ok;
+    ok = true;
+#ifndef _WIN32
+    ok = fchmod(fileno(f), 0600) == 0;
+#endif
+    ok = ok && fprintf(f, "%s\n", line) > 0 && fflush(f) == 0;
+    if (fclose(f) != 0)
+        ok = false;
+    if (ok && ph_rename(temporary, path) == 0)
+        return true;
+    ph_remove(temporary);
+    return false;
 }

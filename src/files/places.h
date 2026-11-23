@@ -28,6 +28,14 @@ bool ph_place_set_save_dir(const char *dir);
 /* Modal folder picker. False if the user cancels or this system has no picker. */
 bool ph_place_pick_folder(char *out, size_t cap);
 
+int ph_place_pick_files(bool (*accept)(void *, const char *), void *user);
+bool ph_place_pick_file(char *out, size_t cap);
+bool ph_place_reveal(const char *path, bool select_file);
+
+/* Retain source, publish a complete copy under an unused name, and return its path. */
+bool ph_place_copy_unique(const char *source, const char *folder, const char *name,
+                          char *out, size_t capacity);
+
 /* One regular file the user copied (Ctrl+C in Explorer or a file manager). UTF-8. */
 bool ph_place_clipboard_file(char *out, size_t cap);
 

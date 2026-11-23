@@ -11,6 +11,8 @@
 #include <SDL.h>
 
 #include "control/input.h"
+#include "session/devices.h"
+#include "usb/switch.h"
 
 struct AVFrame;
 struct ph_audio;
@@ -40,9 +42,16 @@ bool ph_polish_accepts_video(ph_polish *polish);
 /* USB screen uses the device id "usb". Present selects it; absent drops it. */
 void ph_polish_usb_present(ph_polish *polish, bool present);
 bool ph_polish_accepts_usb(ph_polish *polish);
+void ph_polish_sessions(ph_polish *polish, ph_session_state *out);
+bool ph_polish_select(ph_polish *polish, const char *id);
+bool ph_polish_rename(ph_polish *polish, const char *id, const char *name);
+bool ph_polish_forget(ph_polish *polish, const char *id);
+bool ph_polish_resolve_request(ph_polish *polish, const char *id, const char *pin);
+bool ph_polish_require_pin(ph_polish *polish, bool required);
 bool ph_polish_copy_pin(ph_polish *polish, char *out, size_t out_len);
 
-void ph_polish_on_video(ph_polish *polish, const uint8_t *annexb, size_t len, uint64_t pts_ns);
+void ph_polish_on_video(ph_polish *polish, ph_src source, const uint8_t *annexb, size_t len,
+                        uint64_t pts_ns);
 
 /* True when the key was local and must not reach the phone. */
 bool ph_polish_key(ph_polish *polish, const SDL_KeyboardEvent *event, ph_input *input,
@@ -53,6 +62,10 @@ void ph_polish_tick(ph_polish *polish, ph_input *input);
 
 /* Types the PC clipboard into the focused field when it is plain US-QWERTY. */
 bool ph_polish_type_clipboard(ph_polish *polish);
+bool ph_polish_capture_folder(char *path, size_t capacity);
+const char *ph_polish_capture_notice(ph_polish *polish);
+void ph_polish_stop_recording(ph_polish *polish);
+bool ph_polish_recording(ph_polish *polish);
 bool ph_polish_quit(const ph_polish *polish);
 bool ph_polish_precise(const ph_polish *polish);
 

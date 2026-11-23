@@ -9,6 +9,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#include <fcntl.h>
+#include <errno.h>
+#endif
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -171,6 +177,55 @@ static inline const char *ph_path_base(const char *path)
         slash = back;
 #endif
     return slash ? slash + 1 : path;
+}
+
+/* Atomically publish a completed file alongside its temporary file. */
+static inline bool ph_publish_new(const char *from, const char *to)
+{
+#ifdef _WIN32
+    wchar_t *source = ph_wide(from), *target = ph_wide(to);
+    bool ok = source && target && MoveFileW(source, target);
+    free(source);
+    free(target);
+    return ok;
+#else
+#if defined(SYS_renameat2) && (defined(_GNU_SOURCE) || defined(__USE_MISC))
+    if (syscall(SYS_renameat2, AT_FDCWD, from, AT_FDCWD, to, 1) == 0)
+        return true;
+    if (errno != ENOSYS && errno != EINVAL && errno != EOPNOTSUPP)
+        return false;
+#endif
+    if (link(from, to) != 0)
+        return false;
+    ph_remove(from);
+    return true;
+#endif
+}
+
+/* Flush buffered bytes before publishing a file or acknowledging its receipt. */
+static inline time_t ph_file_mtime(const char *path)
+{
+#ifdef _WIN32
+    wchar_t *wide = ph_wide(path);
+    struct _stat64 st;
+    time_t stamp = wide && _wstat64(wide, &st) == 0 ? (time_t)st.st_mtime : 0;
+    free(wide);
+    return stamp;
+#else
+    struct stat st;
+    return stat(path, &st) == 0 ? st.st_mtime : 0;
+#endif
+}
+
+static inline bool ph_flush_file(FILE *file)
+{
+    if (fflush(file) != 0)
+        return false;
+#ifdef _WIN32
+    return _commit(_fileno(file)) == 0;
+#else
+    return fsync(fileno(file)) == 0;
+#endif
 }
 
 #endif

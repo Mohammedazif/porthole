@@ -32,6 +32,59 @@ static void quit(void)
 }
 
 void ph_window_show(ph_window *w) { (void)w; }
+void ph_window_set_clipboard_available(ph_window *w, bool available)
+{
+    (void)w;
+    (void)available;
+}
+void ph_window_note_received(ph_window *w, unsigned files)
+{
+    (void)w;
+    (void)files;
+}
+void ph_window_open_received_history(ph_window *w) { (void)w; }
+void ph_window_open_pairing(ph_window *w) { (void)w; }
+void ph_window_set_history_profile(ph_window *w, const char *profile)
+{
+    (void)w;
+    (void)profile;
+}
+
+void ph_window_refresh_folder(ph_window *w)
+{
+    (void)w;
+}
+ph_workspace *ph_window_workspace(ph_window *w)
+{
+    (void)w;
+    return NULL;
+}
+void ph_window_set_companion(ph_window *w, bool connected, bool recording, int volume)
+{
+    (void)w;
+    (void)connected;
+    (void)recording;
+    (void)volume;
+}
+void ph_window_set_incoming(ph_window *w, const char *name, uint64_t bytes, uint64_t total)
+{
+    (void)w;
+    (void)name;
+    (void)bytes;
+    (void)total;
+}
+void ph_window_set_receiving(ph_window *w, int done, int total)
+{
+    (void)w;
+    (void)done;
+    (void)total;
+}
+ph_workspace_action ph_window_take_workspace_action(ph_window *w, uint64_t *id)
+{
+    (void)w;
+    *id = 0;
+    return PH_WORKSPACE_NONE;
+}
 
 ph_window *ph_window_create(const char *title)
 {
@@ -196,6 +249,10 @@ ph_receiver *ph_receiver_start(const ph_receiver_options *opt, const ph_receiver
     receivers_started++;
     cb->connected(cb->user, "Test Phone", "test");
     return &receiver;
+}
+void ph_receiver_disconnect(ph_receiver *r)
+{
+    (void)r;
 }
 void ph_receiver_poll(ph_receiver *r) { (void)r; }
 void ph_receiver_stop(ph_receiver *r) { (void)r; receivers_stopped++; }

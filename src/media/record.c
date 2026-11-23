@@ -109,12 +109,16 @@ static int append_avcc_nal(struct buf *buffer, const uint8_t *nal, size_t len)
     return 0;
 }
 
-static int save_param(uint8_t **dst, size_t *dst_len, const uint8_t *nal, size_t len)
+static int save_param(uint8_t **dst, size_t *dst_len, const uint8_t *nal, size_t len, bool frozen)
 {
     uint8_t *copy;
 
     if (!len || len > 4096)
         return -1;
+    if (*dst_len == len && memcmp(*dst, nal, len) == 0)
+        return 0;
+    if (frozen)
+        return PH_RECORD_FORMAT_CHANGED;
     copy = malloc(len);
     if (!copy)
         return -1;
@@ -577,11 +581,17 @@ int ph_record_video(ph_record *rec, const uint8_t *annexb, size_t len, uint64_t 
             int type = nal[0] & 0x1f;
             saw_nal = true;
             if (type == 7) {
-                if (save_param(&rec->sps, &rec->sps_len, nal, nal_len))
+                int saved = save_param(&rec->sps, &rec->sps_len, nal, nal_len, rec->header_written);
+                if (saved) {
+                    rc = saved;
                     goto done;
+                }
             } else if (type == 8) {
-                if (save_param(&rec->pps, &rec->pps_len, nal, nal_len))
+                int saved = save_param(&rec->pps, &rec->pps_len, nal, nal_len, rec->header_written);
+                if (saved) {
+                    rc = saved;
                     goto done;
+                }
             } else if (type != 9 && type != 10 && type != 11 && type != 12) {
                 if (type >= 1 && type <= 5)
                     saw_vcl = true;
@@ -601,8 +611,12 @@ int ph_record_video(ph_record *rec, const uint8_t *annexb, size_t len, uint64_t 
         goto done;
     }
     if (!rec->header_written) {
+        if (!keyframe && !idr && !rec->pending) {
+            rc = 0;
+            goto done;
+        }
         if (!rec->sps || !rec->pps) {
-            rc = stash(rec, payload.data, payload.len, pts_ns, keyframe || idr);
+            rc = keyframe || idr ? stash(rec, payload.data, payload.len, pts_ns, true) : 0;
             goto done;
         }
         if (write_header(rec) || flush_pending(rec))
@@ -633,8 +647,10 @@ int ph_record_close(ph_record *rec)
             if (av_write_trailer(rec->fmt) < 0)
                 rc = -1;
         }
-        if (rec->fmt->pb)
-            avio_closep(&rec->fmt->pb);
+        if (!rec->have_out)
+            rc = -1;
+        if (rec->fmt->pb && avio_closep(&rec->fmt->pb) < 0)
+            rc = -1;
         avformat_free_context(rec->fmt);
     }
     free(rec->sps);

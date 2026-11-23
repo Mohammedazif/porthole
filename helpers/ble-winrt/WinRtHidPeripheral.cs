@@ -521,29 +521,32 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         }
     }
 
-    private async void ReadReport(GattLocalCharacteristic sender, GattReadRequestedEventArgs args)
-    {
-        byte[] value;
-        lock (stateLock)
+    private bool IsSelectedSessionLocked(GattSession session) =>
+        !disposed && !closing && !retiring && !pipeLifetime.RestartRequired
+        && activePeer is PeerSession peer && gate.CurrentPeer == peer
+        && sessionPeers.TryGetValue(session, out PeerSession selected) && selected == peer
+        && rawSessions.TryGetOrdinal(session, out long ordinal)
+        && !closedObservations.Contains((session, ordinal))
+        && session.SessionStatus == GattSessionStatus.Active;
+
+    private async void ReadReport(GattLocalCharacteristic sender, GattReadRequestedEventArgs args) =>
+        await RespondReadAsync(args, () =>
         {
             ReportKind kind = reports.FirstOrDefault(p => p.Value == sender).Key;
-            value = lastReports.TryGetValue(kind, out byte[]? bytes) ? bytes.ToArray() : [];
+            if (!lastReports.TryGetValue(kind, out byte[]? bytes)) return [];
+            // Startup reads are valid before subscription. Only the current
+            // recipient may read live input cached by this provider.
+            return gate.IsReady && IsSelectedSessionLocked(args.Session)
+                ? bytes : new byte[bytes.Length];
+        });
 
-        }
-        await RespondReadAsync(args, value);
-    }
+    private async void ReadKeyboardOutput(GattLocalCharacteristic sender, GattReadRequestedEventArgs args) =>
+        await RespondReadAsync(args, () => IsSelectedSessionLocked(args.Session) ? keyboardLeds : [0]);
 
-    private async void ReadKeyboardOutput(GattLocalCharacteristic sender, GattReadRequestedEventArgs args)
-    {
-        byte[] value;
-        lock (stateLock) value = keyboardLeds.ToArray();
-        await RespondReadAsync(args, value);
-    }
+    private async void ReadProtocol(GattLocalCharacteristic sender, GattReadRequestedEventArgs args) =>
+        await RespondReadAsync(args, () => [1]); // Descriptor declares Report protocol only.
 
-    private static async void ReadProtocol(GattLocalCharacteristic sender, GattReadRequestedEventArgs args) =>
-        await RespondReadAsync(args, [1]); // Descriptor declares Report protocol only.
-
-    private static async Task RespondReadAsync(GattReadRequestedEventArgs args, byte[] value)
+    private async Task RespondReadAsync(GattReadRequestedEventArgs args, Func<byte[]> getValue)
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(4));
         var deferral = args.GetDeferral();
@@ -551,8 +554,12 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         {
             GattReadRequest? request = await args.GetRequestAsync().AsTask(deadline.Token);
             if (request is null) return;
-            if (request.Offset > value.Length) request.RespondWithProtocolError(0x07); // Invalid Offset.
-            else request.RespondWithValue(Buffer(value[(int)request.Offset..]));
+            lock (stateLock)
+            {
+                byte[] value = getValue();
+                if (request.Offset > value.Length) request.RespondWithProtocolError(0x07); // Invalid Offset.
+                else request.RespondWithValue(Buffer(value[(int)request.Offset..]));
+            }
         }
         catch (Exception e) { Program.Diagnostic("HID read request: " + e.Message); }
         finally { deferral.Complete(); }
@@ -561,8 +568,12 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
     private async void WriteKeyboardOutput(GattLocalCharacteristic sender, GattWriteRequestedEventArgs args) =>
         await RespondWriteAsync(args, value =>
         {
-            lock (stateLock) keyboardLeds[0] = value;
-            return true;
+            lock (stateLock)
+            {
+                if (!IsSelectedSessionLocked(args.Session)) return false;
+                keyboardLeds[0] = value;
+                return true;
+            }
         });
 
     private static async void WriteProtocol(GattLocalCharacteristic sender, GattWriteRequestedEventArgs args) =>
@@ -574,6 +585,7 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
             if (value > 1) return false;
             lock (stateLock)
             {
+                if (!IsSelectedSessionLocked(args.Session)) return false;
                 gate.SetHostSuspended(value == 0);
                 // HOGP Suspend signals the host's power mode. It does not remove
                 // its CCCDs or change the identity of this ready input session.

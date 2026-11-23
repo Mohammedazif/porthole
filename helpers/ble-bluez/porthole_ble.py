@@ -49,14 +49,11 @@ GATT_CHRC_IFACE = "org.bluez.GattCharacteristic1"
 GATT_DESC_IFACE = "org.bluez.GattDescriptor1"
 LE_ADV_MANAGER_IFACE = "org.bluez.LEAdvertisingManager1"
 LE_ADV_IFACE = "org.bluez.LEAdvertisement1"
-AGENT_IFACE = "org.bluez.Agent1"
-AGENT_MANAGER_IFACE = "org.bluez.AgentManager1"
 DBUS_OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 DBUS_PROP_IFACE = "org.freedesktop.DBus.Properties"
 
 APP_PATH = "/org/porthole/hid"
 ADV_PATH = "/org/porthole/adv0"
-AGENT_PATH = "/org/porthole/agent"
 
 FRAME_KEYBOARD, FRAME_MOUSE, FRAME_CONSUMER = 1, 2, 3
 FRAME_ABS_MOUSE = 4  # experimental: [buttons][x lo][x hi][y lo][y hi][wheel], x/y 0..32767
@@ -299,46 +296,6 @@ class Advertisement(dbus.service.Object):
         pass
 
 
-class Agent(dbus.service.Object):
-    """Accepts pairing requests without a code ("Just Works")."""
-
-    @dbus.service.method(AGENT_IFACE)
-    def Release(self):
-        pass
-
-    @dbus.service.method(AGENT_IFACE, in_signature="os")
-    def AuthorizeService(self, device, uuid):
-        pass
-
-    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="s")
-    def RequestPinCode(self, device):
-        return "0000"
-
-    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="u")
-    def RequestPasskey(self, device):
-        return dbus.UInt32(0)
-
-    @dbus.service.method(AGENT_IFACE, in_signature="ouq")
-    def DisplayPasskey(self, device, passkey, entered):
-        pass
-
-    @dbus.service.method(AGENT_IFACE, in_signature="os")
-    def DisplayPinCode(self, device, pincode):
-        pass
-
-    @dbus.service.method(AGENT_IFACE, in_signature="ou")
-    def RequestConfirmation(self, device, passkey):
-        log(f"pairing with {device}: accepted")
-
-    @dbus.service.method(AGENT_IFACE, in_signature="o")
-    def RequestAuthorization(self, device):
-        log(f"pairing request from {device}: accepted")
-
-    @dbus.service.method(AGENT_IFACE)
-    def Cancel(self):
-        pass
-
-
 def build_hid(bus, app, descriptor, ids, absolute=None):
     enc_r = ["encrypt-read"]
     hid = Service(bus, app, "1812")
@@ -518,10 +475,13 @@ def main():
         return 1
     adapter = bus.get_object(BLUEZ, adapter_path)
     props = dbus.Interface(adapter, DBUS_PROP_IFACE)
-    old_alias = props.Get(ADAPTER_IFACE, "Alias")
-    props.Set(ADAPTER_IFACE, "Powered", dbus.Boolean(True))
-    props.Set(ADAPTER_IFACE, "Pairable", dbus.Boolean(True))
-    props.Set(ADAPTER_IFACE, "Alias", dbus.String(name))
+    try:
+        if not props.Get(ADAPTER_IFACE, "Powered"):
+            emit("error Turn on Bluetooth in this computer’s settings, then retry.")
+            return 1
+    except dbus.exceptions.DBusException as e:
+        emit(f"error reading the Bluetooth adapter state: {e}")
+        return 1
 
     loop = GLib.MainLoop()
     stopping = threading.Event()
@@ -543,12 +503,8 @@ def main():
     app = Application(bus)
     reports = build_hid(bus, app, descriptor, ids, absolute)
     adv = Advertisement(bus, name)
-    agent = Agent(bus, AGENT_PATH)
     gatt_mgr = dbus.Interface(adapter, GATT_MANAGER_IFACE)
     adv_mgr = dbus.Interface(adapter, LE_ADV_MANAGER_IFACE)
-    agent_mgr = dbus.Interface(bus.get_object(BLUEZ, "/org/bluez"), AGENT_MANAGER_IFACE)
-    agent_mgr.RegisterAgent(AGENT_PATH, "NoInputNoOutput")
-    agent_mgr.RequestDefaultAgent(AGENT_PATH)
 
     advertising_started = [False]
     service_registered = [False]
@@ -725,7 +681,6 @@ def main():
             connection_observed[path] = time.time()
         elif "Connected" in changed and not changed["Connected"]:
             connection_observed.pop(path, None)
-        dev = dbus.Interface(bus.get_object(BLUEZ, path), DBUS_PROP_IFACE)
         eligible = path in hid_devices or phone_device(properties)
         if properties.get("Connected") and eligible and connected_path[0] is None:
             connection_generation[0] += 1
@@ -753,17 +708,11 @@ def main():
             connection_generation[0] += 1
             connected_path[0] = None
             emit("disconnected")
-        if properties.get("Paired") and path == connected_path[0]:
-            try:
-                if not properties.get("Trusted"):
-                    dev.Set(DEVICE_IFACE, "Trusted", dbus.Boolean(True))
-                    properties["Trusted"] = True
-                if changed.get("Paired") and not paired_before:
-                    # Pairing completion gets its own full discovery grace.
-                    connection_generation[0] += 1
-                    arm_subscription_check()
-            except dbus.exceptions.DBusException as e:
-                log(f"trusting the paired phone failed: {e}")
+        if changed.get("Paired") and not paired_before and path == connected_path[0]:
+            # The system pairing agent owns approval and trust. Give newly
+            # paired devices a full discovery grace without changing their trust.
+            connection_generation[0] += 1
+            arm_subscription_check()
 
     def on_gatt_device(path):
         if not selected_adapter(path):
@@ -826,10 +775,15 @@ def main():
     finally:
         stopping.set()
         release_reports(reports)
+        if (connected_path[0] and connected_path[0] == subscription_peer[0]
+                and bonded_and_trusted(connected_path[0])):
+            try:
+                device = dbus.Interface(bus.get_object(BLUEZ, connected_path[0]), DEVICE_IFACE)
+                device.Disconnect(timeout=1.0)
+            except dbus.exceptions.DBusException:
+                pass
         for call in (lambda: adv_mgr.UnregisterAdvertisement(ADV_PATH),
-                     lambda: gatt_mgr.UnregisterApplication(APP_PATH),
-                     lambda: agent_mgr.UnregisterAgent(AGENT_PATH),
-                     lambda: props.Set(ADAPTER_IFACE, "Alias", old_alias)):
+                     lambda: gatt_mgr.UnregisterApplication(APP_PATH)):
             try:
                 call()
             except dbus.exceptions.DBusException:

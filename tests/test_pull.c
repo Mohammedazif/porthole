@@ -97,7 +97,7 @@ static void test_inbox_hello(void)
     CHECK(ph_inbox_parse_hello("PSHR 1 500") == 500);
     CHECK(ph_inbox_parse_hello("PSHR 1 501") == -1);
     CHECK(ph_inbox_parse_hello("PSHR 1 0") == -1);
-    CHECK(ph_inbox_parse_hello("PSHR 2 3") == -1);
+    CHECK(ph_inbox_parse_hello("PSHR 2 3") == 3);
     CHECK(ph_inbox_parse_hello("PSHR 1 3 x") == -1);
     CHECK(ph_inbox_parse_hello("PULL 1 3") == -1);
     CHECK(ph_inbox_parse_hello(NULL) == -1);

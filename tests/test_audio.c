@@ -239,6 +239,8 @@ static void sync_queue(ph_audio *audio)
 
     ph_audio_set_muted(audio, true);
     queued = ph_audio_queued_ms(audio);
+    CHECK(queued == 0);
+    CHECK(ph_audio_settings(audio, &settings) && settings.queued_ms == 0);
     produced = ph_audio_push_timed(audio, 4, packet->data, (size_t)packet->size, video);
     CHECK(produced > 0);
     CHECK(ph_audio_queued_ms(audio) == queued);

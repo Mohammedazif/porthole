@@ -5,6 +5,7 @@
 
 #include "core/config.h"
 #include "core/log.h"
+#include "core/upath.h"
 #include "core/version.h"
 #include "files/places.h"
 
@@ -87,11 +88,7 @@ int main(int argc, char **argv)
     bool pointer_chosen = false;
     int audio_delay_ms = 0;
     const char *precise_touch = NULL;
-#ifdef PORTHOLE_BLE_HELPER
-    const char *ble_helper = PORTHOLE_BLE_HELPER;
-#else
     const char *ble_helper = NULL;
-#endif
     int i;
 
     /* Explorer's Send to, or a terminal: hand files to the Porthole already running. */
@@ -179,7 +176,6 @@ int main(int argc, char **argv)
         }
     }
 
-#ifndef _WIN32
     if (!pointer_chosen) {
         char mode[32];
         if (ph_config_read_line("pointer-mode", mode, sizeof mode)) {
@@ -189,30 +185,37 @@ int main(int argc, char **argv)
                 absolute_pointer = true;
         }
     }
-#else
-    (void)pointer_chosen;
-#endif
 
     PH_LOGI("%s %s, receiver name \"%s\"", PORTHOLE_NAME, PORTHOLE_VERSION, name);
 #ifdef PORTHOLE_HAVE_AIRPLAY
     {
-#ifdef _WIN32
-        char *windows_helper = NULL;
+        char *bundled_helper = NULL;
+#if defined(_WIN32) || defined(PORTHOLE_INSTALLED_BLE_HELPER)
         if (!ble_helper) {
             char *base = SDL_GetBasePath();
             if (base) {
+#ifdef _WIN32
                 static const char suffix[] = "ble-winrt/porthole-ble-winrt.exe";
+#else
+                static const char suffix[] = PORTHOLE_INSTALLED_BLE_HELPER;
+#endif
                 size_t length = strlen(base) + sizeof suffix;
-                windows_helper = malloc(length);
-                if (windows_helper)
-                    snprintf(windows_helper, length, "%s%s", base, suffix);
+                bundled_helper = malloc(length);
+                if (bundled_helper) {
+                    snprintf(bundled_helper, length, "%s%s", base, suffix);
+                    if (ph_file_size(bundled_helper) >= 0)
+                        ble_helper = bundled_helper;
+                }
                 SDL_free(base);
             }
-            ble_helper = windows_helper;
-            if (bluetooth && !ble_helper)
-                PH_LOGW("couldn't locate the Windows Bluetooth helper beside this executable");
         }
 #endif
+#ifdef PORTHOLE_BLE_HELPER
+        if (!ble_helper)
+            ble_helper = PORTHOLE_BLE_HELPER;
+#endif
+        if (bluetooth && !ble_helper)
+            PH_LOGW("couldn't locate the Bluetooth helper");
         ph_app_options opt = {.name = name,
                               .fixed_ports = fixed_ports,
                               .debug = debug,
@@ -231,9 +234,7 @@ int main(int argc, char **argv)
                               .usb = usb,
                               .absolute_pointer = absolute_pointer};
         int result = ph_app_run(&opt);
-#ifdef _WIN32
-        free(windows_helper);
-#endif
+        free(bundled_helper);
         return result;
     }
 #else

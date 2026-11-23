@@ -54,8 +54,7 @@ int wmain(int argc, wchar_t **argv)
         }
         return 0;
     }
-    if (argc != 6 || wcscmp(argv[1], L"--name") || wcscmp(argv[2], L"Porthole Windows") ||
-        wcscmp(argv[3], L"--setup") || wcscmp(argv[4], L"--diagnostics") || wcscmp(argv[5], L"--verbose")) return 30;
+    if (argc != 3 || wcscmp(argv[1], L"--name") || wcscmp(argv[2], L"Porthole Windows")) return 30;
     wchar_t current[CAP], cache[CAP], marker[CAP], trace[CAP];
     GetCurrentDirectoryW(CAP, current);
     if (!GetEnvironmentVariableW(L"PORTHOLE_PORTABLE_DEST", dest, CAP) || wcscmp(current, dest)) return 31;

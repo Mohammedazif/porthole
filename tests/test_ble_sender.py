@@ -234,7 +234,7 @@ class ConnectionTests(unittest.TestCase):
     """Drive the real helper setup and recovery callbacks without a radio."""
 
     def run_helper(self, scenario, initial_devices=None, auto_register=True):
-        h = SimpleNamespace(bus=Mock(), gatt=Mock(), adv=Mock(), agent=Mock(),
+        h = SimpleNamespace(bus=Mock(), gatt=Mock(), adv=Mock(),
                             properties=Mock(), device=Mock(), manager=Mock(), loop=Mock(),
                             emit=Mock(), log=Mock(), clock=Mock(return_value=10.0), bonded=True,
                             timers=[], states={}, reports={kind: Mock(subscribed_at=0.0)
@@ -252,7 +252,7 @@ class ConnectionTests(unittest.TestCase):
             and callable(h.application.on_device))
         h.bus.get_object.side_effect = lambda service, path: path
         h.manager.GetManagedObjects.side_effect = lambda: h.objects
-        h.properties.Get.return_value = 'Porthole'
+        h.properties.Get.return_value = True
 
         def properties_for(path):
             return h.objects.setdefault(str(path), {}).setdefault(ble.DEVICE_IFACE, {})
@@ -265,9 +265,6 @@ class ConnectionTests(unittest.TestCase):
                 return bool(properties.get('Bonded', h.bonded))
             return properties.get(property_name, False)
 
-        def set_property(path, property_name, value):
-            properties_for(path)[property_name] = bool(value)
-
         def device_for(path):
             path = str(path)
             if path not in h.devices:
@@ -279,12 +276,11 @@ class ConnectionTests(unittest.TestCase):
             if name == ble.DBUS_PROP_IFACE:
                 if obj == '/adapter':
                     return h.properties
-                return SimpleNamespace(Get=lambda iface, prop: get_property(obj, prop),
-                                       Set=lambda iface, prop, value: set_property(obj, prop, value))
+                return SimpleNamespace(Get=lambda iface, prop: get_property(obj, prop))
             if name == ble.DEVICE_IFACE:
                 return device_for(obj)
             return {ble.GATT_MANAGER_IFACE: h.gatt, ble.LE_ADV_MANAGER_IFACE: h.adv,
-                    ble.AGENT_MANAGER_IFACE: h.agent, ble.DBUS_OM_IFACE: h.manager,
+                    ble.DBUS_OM_IFACE: h.manager,
                     ble.DEVICE_IFACE: h.device}[name]
 
         def timer(ms, callback, *args):
@@ -338,7 +334,6 @@ class ConnectionTests(unittest.TestCase):
                     (ble, 'load_report_descriptor', Mock(return_value=(b'HID', {}))),
                     (ble, 'Application', Mock(return_value=h.application)),
                     (ble, 'Advertisement', Mock(return_value=Mock(get_path=lambda: ble.ADV_PATH))),
-                    (ble, 'Agent', Mock()),
                     (ble, 'build_hid', Mock(return_value=h.reports)),
                     (ble.threading, 'Thread', h.threads),
                     (ble.GLib, 'MainLoop', Mock(return_value=h.loop)),
@@ -840,8 +835,7 @@ class ConnectionTests(unittest.TestCase):
             h.reports[kind].notify.assert_called_once_with(bytes(size))
         h.adv.UnregisterAdvertisement.assert_called_once()
         h.gatt.UnregisterApplication.assert_called_once()
-        h.agent.UnregisterAgent.assert_called_once()
-        self.assertEqual(h.properties.Set.call_args.args[:2], (ble.ADAPTER_IFACE, 'Alias'))
+        h.properties.Set.assert_not_called()
 
 
 if __name__ == "__main__":

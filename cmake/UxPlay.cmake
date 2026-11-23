@@ -56,6 +56,8 @@ else()
     target_include_directories(airplay PRIVATE ${UXPLAY_DIR}/lib)
 endif()
 
+include(UxPlayVerifiedIdentity)
+
 if(UNIX AND NOT APPLE)
     # playfair calls sin(); UxPlay's own app only gets libm indirectly through GStreamer.
     target_link_libraries(playfair PUBLIC m)

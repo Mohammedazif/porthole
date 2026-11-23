@@ -32,7 +32,11 @@ int ph_usb_capture_poll(ph_usb_capture *cap, ph_usb_sample *out, uint8_t *copy_b
 void ph_usb_capture_close(ph_usb_capture *cap);
 
 #ifdef PH_USB_HAVE_LIBUSB
-ph_usb_capture *ph_usb_libusb_open(void);
+#include <stdatomic.h>
+
+/* Cancel between device probes and bounded USB operations. The stop flag
+ * must outlive the capture so reads and writes can observe shutdown too. */
+ph_usb_capture *ph_usb_libusb_open(const atomic_bool *stop);
 
 /* WinUSB INF for the capture interface of a connected Apple device.
  * Does not claim the interface. Returns 0 when the file is written. */

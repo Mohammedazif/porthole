@@ -11,6 +11,7 @@
 #include "ui/generated/font_face.h"
 
 typedef struct raster_font {
+    unsigned first;
     int pixels;
     int style;
     SDL_Texture *atlas;
@@ -51,9 +52,31 @@ static int font_style(int scale)
     return style >= 0 && style < PH_FONT_STYLES ? style : PH_FONT_REGULAR;
 }
 
-static unsigned int char_index(unsigned char c)
+/* Decode one scalar. Invalid or truncated sequences consume one byte. */
+static unsigned next_character(const char **cursor)
 {
-    return (c >= 32 && c <= 126 ? c : (unsigned char)'?') - 32u;
+    const unsigned char *p = (const unsigned char *)*cursor;
+    unsigned c = *p++;
+    *cursor = (const char *)p;
+    if (c < 128)
+        return c;
+    int count = c >= 0xF0 && c <= 0xF4  ? 3
+                : c >= 0xE0 && c < 0xF0 ? 2
+                : c >= 0xC2 && c < 0xE0 ? 1
+                                        : 0;
+    if (!count)
+        return '?';
+    unsigned value = c & (0x7Fu >> (count + 1));
+    for (int i = 0; i < count; i++) {
+        if ((p[i] & 0xC0) != 0x80)
+            return '?';
+        value = (value << 6) | (p[i] & 0x3F);
+    }
+    if ((count == 2 && value < 0x800) || (count == 3 && value < 0x10000) ||
+        (value >= 0xD800 && value <= 0xDFFF) || value > 0x10FFFF)
+        return '?';
+    *cursor = (const char *)p + count;
+    return value;
 }
 
 static void unload_faces(void)
@@ -108,11 +131,22 @@ static bool load_faces(void)
     return true;
 }
 
-static float advance(unsigned char c, int size, int style)
+static unsigned supported(unsigned c, int style)
 {
-    return (load_faces() ? advances[style][char_index(c)] : .6f) * (float)size;
+    return c >= 32 && (c < 127 || FT_Get_Char_Index(faces[style], c)) ? c : '?';
 }
-
+static float advance(unsigned c, int size, int style)
+{
+    if (!load_faces())
+        return .6f * (float)size;
+    c = supported(c, style);
+    if (c < 127)
+        return advances[style][c - 32] * (float)size;
+    if (FT_Load_Char(faces[style], c, FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING))
+        return .6f * (float)size;
+    return (float)faces[style]->glyph->metrics.horiAdvance * (float)size /
+           (float)faces[style]->units_per_EM;
+}
 bool ph_text_attach(SDL_Renderer *renderer)
 {
     for (font_context *f = fonts; f; f = f->next)
@@ -124,13 +158,14 @@ bool ph_text_attach(SDL_Renderer *renderer)
     return true;
 }
 
-static raster_font *rasterize(font_context *context, int pixels, int style)
+static raster_font *rasterize(font_context *context, int pixels, int style, unsigned first)
 {
     for (raster_font *r = context->sizes; r; r = r->next)
-        if (r->pixels == pixels && r->style == style) return r;
+        if (r->pixels == pixels && r->style == style && r->first == first)
+            return r;
     raster_font *r = calloc(1, sizeof *r);
     FT_Face face = faces[style];
-    int cell = pixels + 8, row = pixels * 2 + 4;
+    int cell = (first == 32 ? pixels : 2 * pixels) + 8, row = pixels * 2 + 4;
     int width = cell * 16, height = row * 6;
     SDL_Surface *surface = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32, SDL_PIXELFORMAT_RGBA32);
     if (!r || !surface || FT_Set_Pixel_Sizes(face, 0, (FT_UInt)pixels)) {
@@ -138,15 +173,17 @@ static raster_font *rasterize(font_context *context, int pixels, int style)
     }
     SDL_FillRect(surface, NULL, 0);
     for (unsigned int i = 0; i < 95; i++) {
-        if (FT_Load_Char(face, i + 32, FT_LOAD_RENDER | FT_LOAD_TARGET_LIGHT)) continue;
+        if (FT_Load_Char(face, i + first, FT_LOAD_RENDER | FT_LOAD_TARGET_LIGHT))
+            continue;
         FT_GlyphSlot g = face->glyph;
         int x = (int)(i % 16u) * cell, y = (int)(i / 16u) * row;
-        r->glyph[i] = (SDL_Rect){x, y, (int)g->bitmap.width, (int)g->bitmap.rows};
+        r->glyph[i] = (SDL_Rect){x, y, SDL_min(cell, (int)g->bitmap.width),
+                                 SDL_min(row, (int)g->bitmap.rows)};
         r->bearing_x[i] = g->bitmap_left; r->bearing_y[i] = g->bitmap_top;
-        for (unsigned int gy = 0; gy < g->bitmap.rows; gy++) {
+        for (unsigned int gy = 0; gy < (unsigned)r->glyph[i].h; gy++) {
             unsigned char *dst = (unsigned char *)surface->pixels + (y + (int)gy) * surface->pitch + x * 4;
             const unsigned char *src = g->bitmap.buffer + (int)gy * g->bitmap.pitch;
-            for (unsigned int gx = 0; gx < g->bitmap.width; gx++) {
+            for (unsigned int gx = 0; gx < (unsigned)r->glyph[i].w; gx++) {
                 dst[gx * 4] = dst[gx * 4 + 1] = dst[gx * 4 + 2] = 255;
                 dst[gx * 4 + 3] = src[gx];
             }
@@ -157,7 +194,11 @@ static raster_font *rasterize(font_context *context, int pixels, int style)
     if (!r->atlas) { free(r); return NULL; }
     SDL_SetTextureBlendMode(r->atlas, SDL_BLENDMODE_BLEND);
     SDL_SetTextureScaleMode(r->atlas, SDL_ScaleModeNearest);
-    r->pixels = pixels; r->style = style; r->next = context->sizes; context->sizes = r;
+    r->first = first;
+    r->pixels = pixels;
+    r->style = style;
+    r->next = context->sizes;
+    context->sizes = r;
     return r;
 }
 
@@ -191,15 +232,19 @@ int ph_text_width(const char *text, int scale)
     int size = font_size(scale), style = font_style(scale);
     if (!text) return 0;
     while (*text) {
-        if (*text == '\n') { if (x > widest) widest = x; x = 0; }
-        else x += advance((unsigned char)*text, size, style);
-        text++;
+        unsigned c = next_character(&text);
+        if (c == '\n') {
+            if (x > widest)
+                widest = x;
+            x = 0;
+        } else
+            x += advance(c, size, style);
     }
     return (int)((x > widest ? x : widest) + 0.99f);
 }
 
-static int layout(raster_font *raster, SDL_Renderer *renderer, const char *text,
-                   int start_x, int start_y, int width, int scale)
+static int layout(font_context *context, SDL_Color color, SDL_Renderer *renderer, const char *text,
+                  int start_x, int start_y, int width, int scale)
 {
     int size = font_size(scale), style = font_style(scale), line = ph_text_line_height(scale), y = start_y;
     float x = 0, sx = 1, sy = 1;
@@ -207,16 +252,28 @@ static int layout(raster_font *raster, SDL_Renderer *renderer, const char *text,
     if (sx <= 0) sx = 1;
     if (sy <= 0) sy = 1;
     if (!text || width < 1) return start_y;
+    int pixels = SDL_clamp((int)lroundf(size * sy), 1, 256);
+    raster_font *raster = NULL;
     while (*text) {
         if (*text == '\n') { x = 0; y += line; text++; continue; }
         if (*text == ' ') { if (x > 0) x += advance(' ', size, style); text++; continue; }
         size_t word = strcspn(text, " \n");
         float word_width = 0;
-        for (size_t i = 0; i < word; i++) word_width += advance((unsigned char)text[i], size, style);
+        for (const char *p = text; p < text + word;)
+            word_width += advance(next_character(&p), size, style);
         if (x > 0 && x + word_width > (float)width) { x = 0; y += line; }
-        for (size_t i = 0; i < word; i++) {
-            unsigned int index = char_index((unsigned char)text[i]);
-            float step = advance((unsigned char)text[i], size, style);
+        for (const char *p = text; p < text + word;) {
+            unsigned c = next_character(&p);
+            float step = advance(c, size, style);
+            c = faces_ready ? supported(c, style) : '?';
+            unsigned first = 32 + ((c - 32) / 95) * 95, index = c - first;
+            if (context && (!raster || raster->first != first)) {
+                raster = rasterize(context, pixels, style, first);
+                if (raster) {
+                    SDL_SetTextureColorMod(raster->atlas, color.r, color.g, color.b);
+                    SDL_SetTextureAlphaMod(raster->atlas, color.a);
+                }
+            }
             if (x > 0 && x + step > (float)width) { x = 0; y += line; }
             if (raster && raster->glyph[index].w && raster->glyph[index].h) {
                 SDL_Rect src = raster->glyph[index];
@@ -237,7 +294,7 @@ static int layout(raster_font *raster, SDL_Renderer *renderer, const char *text,
 
 int ph_text_height(const char *text, int width, int scale)
 {
-    return layout(NULL, NULL, text, 0, 0, width, scale);
+    return layout(NULL, (SDL_Color){0}, NULL, text, 0, 0, width, scale);
 }
 
 int ph_text_draw(SDL_Renderer *renderer, const char *text, int x, int y, int width, int scale,
@@ -247,16 +304,7 @@ int ph_text_draw(SDL_Renderer *renderer, const char *text, int x, int y, int wid
     for (f = fonts; f; f = f->next)
         if (f->renderer == renderer) break;
     if (!f) return y;
-    float sx, sy;
-    SDL_RenderGetScale(renderer, &sx, &sy);
-    int pixels = (int)lroundf((float)font_size(scale) * (sy > 0 ? sy : 1));
-    if (pixels < 1) pixels = 1;
-    if (pixels > 256) pixels = 256;
-    raster_font *r = rasterize(f, pixels, font_style(scale));
-    if (!r) return y;
-    SDL_SetTextureColorMod(r->atlas, color.r, color.g, color.b);
-    SDL_SetTextureAlphaMod(r->atlas, color.a);
-    return layout(r, renderer, text, x, y, width, scale);
+    return layout(f, color, renderer, text, x, y, width, scale);
 }
 
 int ph_ui_text_height(const char *text, int width, int scale)

@@ -281,7 +281,7 @@ static BOOL launch(portable *p, wchar_t *environment)
     size_t capacity = wcslen(exe) + 128;
     wchar_t *command = calloc(capacity, sizeof(*command));
     if (!command) ok = FALSE;
-    if (ok) swprintf(command, capacity, L"\"%ls\" --name \"Porthole Windows\" --setup --diagnostics --verbose", exe);
+    if (ok) swprintf(command, capacity, L"\"%ls\" --name \"Porthole Windows\"", exe);
     STARTUPINFOEXW si = {0}; si.StartupInfo.cb = sizeof(si);
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     si.StartupInfo.hStdInput = input; si.StartupInfo.hStdOutput = log; si.StartupInfo.hStdError = log;
@@ -404,6 +404,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command, int s
     portable p = {.instance = instance};
     WNDCLASSW cls = {0}; cls.hInstance = instance; cls.lpfnWndProc = window_proc;
     cls.lpszClassName = L"PortholePortableBootstrap"; cls.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    cls.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1));
     cls.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     if (!RegisterClassW(&cls)) return 1;
     p.window = CreateWindowExW(0, cls.lpszClassName, L"Porthole portable", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,

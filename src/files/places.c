@@ -6,16 +6,66 @@
 #include "core/upath.h"
 
 #include <errno.h>
+#include <openssl/rand.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #ifndef _WIN32
 #include <unistd.h>
+#include <sys/wait.h>
 #endif
 
 /* The local port the running Porthole takes "SEND <path>" on (files/origin.c). */
 #define PH_PLACE_SEND_PORT 47734
+
+bool ph_place_copy_unique(const char *source, const char *folder, const char *name, char *out,
+                          size_t capacity)
+{
+    if (!source || !folder || !name || !*name || !out || !capacity ||
+        strcmp(name, ph_path_base(name)) || !strcmp(name, ".") || !strcmp(name, ".."))
+        return false;
+    out[0] = 0;
+    unsigned char nonce[8];
+    if (RAND_bytes(nonce, sizeof nonce) != 1)
+        return false;
+    char temporary[1100];
+    int len = snprintf(temporary, sizeof temporary,
+                       "%s/.porthole-%02x%02x%02x%02x%02x%02x%02x%02x.download", folder,
+                       nonce[0], nonce[1], nonce[2], nonce[3], nonce[4], nonce[5], nonce[6], nonce[7]);
+    if (len < 0 || (size_t)len >= sizeof temporary)
+        return false;
+    FILE *in = ph_fopen(source, "rb");
+    if (!in)
+        return false;
+    FILE *file = ph_fopen(temporary, "wbx");
+    if (!file) {
+        fclose(in);
+        return false;
+    }
+    char buffer[65536];
+    size_t count;
+    bool ok = true;
+    while (ok && (count = fread(buffer, 1, sizeof buffer, in)))
+        ok = fwrite(buffer, 1, count, file) == count;
+    ok = ok && !ferror(in) && ph_flush_file(file);
+    fclose(in);
+    if (fclose(file) != 0)
+        ok = false;
+    for (unsigned suffix = 1; ok && suffix < 1000; suffix++) {
+        len = suffix == 1 ? snprintf(out, capacity, "%s/%s", folder, name)
+                          : snprintf(out, capacity, "%s/%u-%s", folder, suffix, name);
+        if (len < 0 || (size_t)len >= capacity)
+            break;
+        if (ph_publish_new(temporary, out))
+            return true;
+        if (!ph_path_exists(out))
+            break;
+    }
+    ph_remove(temporary);
+    out[0] = 0;
+    return false;
+}
 
 #ifdef _WIN32
 
@@ -213,7 +263,9 @@ bool ph_place_save_dir(char *out, size_t cap)
     if (read_save(line, sizeof line)) {
         if (!strcmp(line, "desktop"))
             return ph_place_dir(PH_PLACE_DESKTOP, out, cap);
-        if (strcmp(line, "downloads") != 0 && is_dir(line) && strlen(line) < cap) {
+        if (strcmp(line, "downloads") != 0) {
+            if (!is_dir(line) || strlen(line) >= cap)
+                return false;
             snprintf(out, cap, "%s", line);
             return true;
         }
@@ -266,7 +318,7 @@ bool ph_place_set_save_dir(const char *dir)
     return write_save(clean);
 }
 
-bool ph_place_pick_folder(char *out, size_t cap)
+static bool pick_path(char *out, size_t cap, bool folder)
 {
     if (!out || cap < 4)
         return false;
@@ -282,13 +334,14 @@ bool ph_place_pick_folder(char *out, size_t cap)
         if (SUCCEEDED(CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
                                        &IID_IFileOpenDialog, (void **)&dialog))) {
             IFileOpenDialog_GetOptions(dialog, &options);
-            IFileOpenDialog_SetOptions(dialog, options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM
-                                                    | FOS_PATHMUSTEXIST);
-            IFileOpenDialog_SetTitle(dialog, L"Save files from the iPhone");
-            if (SUCCEEDED(IFileOpenDialog_Show(dialog, NULL))
-                && SUCCEEDED(IFileOpenDialog_GetResult(dialog, &item))
-                && SUCCEEDED(IShellItem_GetDisplayName(item, SIGDN_FILESYSPATH, &wide)) && wide
-                && ph_narrow(wide, out, cap) && is_dir(out))
+            IFileOpenDialog_SetOptions(dialog, options |
+                                                   (folder ? FOS_PICKFOLDERS : FOS_FILEMUSTEXIST) |
+                                                   FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+            IFileOpenDialog_SetTitle(dialog, folder ? L"Receive folder" : L"Select file");
+            if (SUCCEEDED(IFileOpenDialog_Show(dialog, NULL)) &&
+                SUCCEEDED(IFileOpenDialog_GetResult(dialog, &item)) &&
+                SUCCEEDED(IShellItem_GetDisplayName(item, SIGDN_FILESYSPATH, &wide)) && wide &&
+                ph_narrow(wide, out, cap) && (folder ? is_dir(out) : ph_file_size(out) >= 0))
                 ok = true;
         }
         CoTaskMemFree(wide);
@@ -296,7 +349,7 @@ bool ph_place_pick_folder(char *out, size_t cap)
             IShellItem_Release(item);
         if (dialog)
             IFileOpenDialog_Release(dialog);
-        if (init == S_OK)
+        if (SUCCEEDED(init))
             CoUninitialize();
         return ok;
     }
@@ -307,9 +360,13 @@ bool ph_place_pick_folder(char *out, size_t cap)
         char buf[1024];
 
         if (access("/usr/bin/zenity", X_OK) == 0)
-            cmd = "zenity --file-selection --directory --title=\"Save files from the iPhone\" 2>/dev/null";
+            cmd = !folder ? "zenity --file-selection"
+                          : "zenity --file-selection --directory --title=\"Save files from the "
+                            "iPhone\" 2>/dev/null";
         else if (access("/usr/bin/kdialog", X_OK) == 0)
-            cmd = "kdialog --getexistingdirectory \"$HOME\" --title \"Save files from the iPhone\" 2>/dev/null";
+            cmd = !folder ? "kdialog --getopenfilename"
+                          : "kdialog --getexistingdirectory \"$HOME\" --title \"Save files from "
+                            "the iPhone\" 2>/dev/null";
         if (!cmd)
             return false;
         pipe = popen(cmd, "r");
@@ -321,7 +378,7 @@ bool ph_place_pick_folder(char *out, size_t cap)
         }
         pclose(pipe);
         buf[strcspn(buf, "\r\n")] = 0;
-        if (!buf[0] || strlen(buf) >= cap || !is_dir(buf))
+        if (!buf[0] || strlen(buf) >= cap || (folder ? !is_dir(buf) : ph_file_size(buf) < 0))
             return false;
         snprintf(out, cap, "%s", buf);
         return true;
@@ -398,4 +455,151 @@ int ph_place_send_command(int count, char **paths)
         return 1;
     }
     return 0;
+}
+
+bool ph_place_pick_folder(char *out, size_t cap)
+{
+    return pick_path(out, cap, true);
+}
+bool ph_place_pick_file(char *out, size_t cap)
+{
+    return pick_path(out, cap, false);
+}
+
+bool ph_place_reveal(const char *path, bool select_file)
+{
+    if (!path || !ph_path_absolute(path) || !ph_path_exists(path))
+        return false;
+#ifdef _WIN32
+    wchar_t *wide = ph_wide(path);
+    if (!wide)
+        return false;
+    bool ok = false;
+    if (select_file) {
+        PIDLIST_ABSOLUTE pidl = ILCreateFromPathW(wide);
+        if (pidl) {
+            ok = SUCCEEDED(SHOpenFolderAndSelectItems(pidl, 0, NULL, 0));
+            ILFree(pidl);
+        }
+    } else
+        ok = (INT_PTR)ShellExecuteW(NULL, L"open", wide, NULL, NULL, SW_SHOWNORMAL) > 32;
+    free(wide);
+    return ok;
+#else
+    char directory[1100];
+    if (snprintf(directory, sizeof directory, "%s", path) >= (int)sizeof directory)
+        return false;
+    if (select_file) {
+        char *slash = strrchr(directory, '/');
+        if (!slash)
+            return false;
+        if (slash == directory)
+            slash[1] = 0;
+        else
+            *slash = 0;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        pid_t opener = fork();
+        if (opener < 0)
+            _exit(1);
+        if (opener == 0) {
+            if (select_file) {
+                char uri[3400] = "array:string:file://";
+                size_t used = strlen(uri);
+                for (const unsigned char *c = (const unsigned char *)path; *c; c++) {
+                    if ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+                        (*c >= '0' && *c <= '9') || strchr("/-._~", *c))
+                        uri[used++] = (char)*c;
+                    else {
+                        snprintf(uri + used, 4, "%%%02X", *c);
+                        used += 3;
+                    }
+                }
+                uri[used] = 0;
+                pid_t show = fork();
+                if (show == 0) {
+                    execlp("dbus-send", "dbus-send", "--session", "--print-reply",
+                           "--dest=org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
+                           "org.freedesktop.FileManager1.ShowItems", uri, "string:", (char *)NULL);
+                    _exit(1);
+                }
+                int result;
+                if (show > 0 && waitpid(show, &result, 0) == show && WIFEXITED(result) &&
+                    WEXITSTATUS(result) == 0)
+                    _exit(0);
+            }
+            execlp("xdg-open", "xdg-open", directory, (char *)NULL);
+            _exit(1);
+        }
+        _exit(0);
+    }
+    int result;
+    return pid > 0 && waitpid(pid, &result, 0) == pid && WIFEXITED(result) &&
+           WEXITSTATUS(result) == 0;
+#endif
+}
+
+int ph_place_pick_files(bool (*accept)(void *, const char *), void *user)
+{
+    if (!accept)
+        return 0;
+    int sent = 0;
+#ifdef _WIN32
+    HRESULT init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    IFileOpenDialog *dialog = NULL;
+    if (SUCCEEDED(CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
+                                   &IID_IFileOpenDialog, (void **)&dialog))) {
+        DWORD options = 0, count = 0;
+        IShellItemArray *items = NULL;
+        IFileOpenDialog_GetOptions(dialog, &options);
+        IFileOpenDialog_SetOptions(dialog, options | FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST |
+                                               FOS_FORCEFILESYSTEM);
+        if (SUCCEEDED(IFileOpenDialog_Show(dialog, NULL)) &&
+            SUCCEEDED(IFileOpenDialog_GetResults(dialog, &items))) {
+            IShellItemArray_GetCount(items, &count);
+            for (DWORD i = 0; i < count; i++) {
+                IShellItem *item = NULL;
+                PWSTR wide = NULL;
+                char path[1024];
+                bool ok = false;
+                if (SUCCEEDED(IShellItemArray_GetItemAt(items, i, &item))) {
+                    if (SUCCEEDED(IShellItem_GetDisplayName(item, SIGDN_FILESYSPATH, &wide)) &&
+                        wide && ph_narrow(wide, path, sizeof path))
+                        ok = accept(user, path);
+                    IShellItem_Release(item);
+                    CoTaskMemFree(wide);
+                }
+                if (!ok)
+                    break;
+                sent++;
+            }
+            IShellItemArray_Release(items);
+        }
+        IFileOpenDialog_Release(dialog);
+    }
+    if (SUCCEEDED(init))
+        CoUninitialize();
+#else
+    const char *command = access("/usr/bin/zenity", X_OK) == 0
+                              ? "zenity --file-selection --multiple --separator='\n'"
+                          : access("/usr/bin/kdialog", X_OK) == 0
+                              ? "kdialog --getopenfilename --multiple --separate-output"
+                              : NULL;
+    FILE *pipe = command ? popen(command, "r") : NULL;
+    if (pipe) {
+        char path[1100];
+        while (fgets(path, sizeof path, pipe)) {
+            size_t end = strcspn(path, "\r\n");
+            if (!path[end])
+                break;
+            path[end] = 0;
+            if (!accept(user, path))
+                break;
+            sent++;
+        }
+        pclose(pipe);
+    }
+#endif
+    return sent;
 }

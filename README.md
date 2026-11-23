@@ -16,11 +16,26 @@ shares in the user's Downloads folder, and shows a notification-area menu. Run t
 `windows-firewall.ps1` once if Windows blocks TCP 47731-47733 on a Private network.
 `porthole --send FILE...` hands files to the running window from a terminal.
 
-**Version 0.1.0.** The app keeps the original Porthole identity and uses a refreshed native
-interface: a single 32-point title bar without version text, flat screen-sharing instructions,
-visible PC address/code and a Copy details action. Set up controls opens the Bluetooth guide;
-Help and Stats remain available. Help and setup scroll with the wheel or Page Up/Down; Esc
-closes help. The layout adapts to compact portrait and wide windows. The embedded Geist and
+**Desktop workspace.** Open Porthole on the iPhone and scan the PC’s QR code. Manual
+pairing uses the address, connection code and SHA-256 certificate fingerprint.
+The matching companion uses TLS 1.3 for pairing, clipboard, file transfers and screen sharing.
+Unused codes expire after ten minutes. After pairing, the iPhone reconnects with a separate
+saved credential. **New code** replaces the selected pairing. Use **Add iPhone** to save
+another pairing, then choose **Use for files** to switch the active companion. Each
+pairing keeps its own transfer and clipboard history.
+
+Drop files onto the connected device or select **Send files**. Incoming transfers show the
+filename and progress. **History** shows transfers across days. Select a record to reveal
+its local file, locate a moved file or retry an interrupted send. With the updated companion,
+Retry continues from the receiver’s saved offset while the staged source is available.
+A changed PC source requires an explicit restart. **Clipboard** keeps up to 100 recent text
+and image items within a 32 MiB limit on this PC. Each item supports Copy, Send and Delete.
+
+**Settings** includes Light, Dark and System appearance, mouse and keyboard controls,
+audio output, captures, saved devices, notifications and **Help and shortcuts**. Open
+Settings during sharing to change preferences alongside the picture. **F8** saves a PNG
+screenshot and **F9** starts or stops an H.264 recording. Open the Captures folder from
+**Screen and audio**. The embedded Geist and
 Geist Mono variable typefaces are rasterized by FreeType at the actual display pixel size and
 weight; Windows requests per-monitor DPI awareness to avoid OS bitmap scaling. The typeface
 license (SIL OFL 1.1) is in `src/ui/fonts/LICENSE`. Re-embed them with
@@ -60,6 +75,27 @@ enter its displayed address and code in the iPhone app, and tap **Connect**. The
 **Share screen**, choose Porthole in the iOS dialog, and confirm **Start Broadcast**.
 Bluetooth controls are optional and have a separate **Set up controls** guide.
 
+After pairing Bluetooth in iOS Settings, open **Mouse and keyboard** in Porthole and select
+**Verify Bluetooth**. Keep that screen open until the PC’s keyboard link is verified.
+Porthole enables companion controls during screen sharing by default. Turn off **Only
+during screen sharing** to use verified controls without a broadcast. These settings
+require matching phone and PC builds.
+
+## Install Porthole
+
+Open a successful CI run in [GitHub Actions](https://github.com/Mohammedazif/porthole/actions)
+and choose the artifact for your OS. Extract the artifact download to get the installer.
+
+| OS | Artifact | Install |
+|---|---|---|
+| Windows x64 | `porthole-windows-x64-setup` | Open the Setup EXE. Find Porthole in Start or remove it through Installed apps. |
+| Ubuntu 24.04 and Linux Mint 22, amd64 | `porthole-ubuntu-24.04-mint-22-amd64` | Open the `.deb` in your package manager or run `sudo apt install ./porthole_0.1.0_amd64.deb`. |
+| Debian 13, amd64 | `porthole-debian-13-amd64` | Install the Debian build of the `.deb`. |
+
+On Linux, the package adds Porthole to the application menu and installs the Bluetooth
+helper with its dependencies. Build on the target distribution when you need a package for
+a different Linux release.
+
 ## Building
 
 Clone with submodules:
@@ -84,7 +120,8 @@ Run the prototype with `./build/debug/src/porthole --verbose` and follow the scr
 steps above. The legacy AirPlay path is still listed as **Porthole** in Screen Mirroring.
 Bluetooth control requires a Bluetooth adapter available to
 Linux (pass it through to the guest when using VMware), pairing with Porthole, AssistiveTouch
-on, and Dwell Control off. Use `--no-bluetooth` for mirroring only.
+on, and Dwell Control off. Turn on Bluetooth in the PC's settings and approve the iPhone
+using the system Bluetooth pairing prompt. Use `--no-bluetooth` for mirroring only.
 If Bluetooth control is unavailable, the app retries every five seconds while mirroring
 continues. Input is discarded until control is ready.
 
@@ -105,9 +142,7 @@ edge swipes and P sends ⌘⇧3, so no AssistiveTouch button assignment is neede
 buttons 3–6 must be assigned to App Switcher, Control Center, Notification Center and Screenshot
 in AssistiveTouch's device settings; check them again after re-pairing. PC Ctrl acts as Command
 on the iPhone; click a text field before using editing shortcuts such as Ctrl+A. Use Alt+H to
-return Home. **F1** opens local controls and setup help; input is paused while help
-is open. The waiting screen shows mirroring and Bluetooth setup steps, and a status banner
-identifies when the mirror is available without controls.
+return Home. **F1** opens Settings at Help and shortcuts. Local panels pause forwarded input while you interact with the PC.
 
 **F2** opens guided setup: confirm AssistiveTouch/Dwell settings on the iPhone, wait for
 Bluetooth and mirroring readiness, then check three pointer targets. The check sends no
@@ -164,8 +199,7 @@ nothing can tell, choose the item in the phone app with Choose original. A faile
 match saves nothing. Ctrl+drag takes one item. To take several, select them in Photos, tap Share and
 choose Porthole: the phone app (2.9 or later) sends those files themselves, and the PC
 saves them straight into Downloads.
-F1 shows the address and
-code the phone app uses. The relative pointer still pauses, and the window says
+The connection workspace shows the address and code during pairing. The relative pointer still pauses, and the window says
 "Return to phone view", because it has to see the AssistiveTouch dot. Returning
 to a matching phone view restores it without re-pairing. This shape check cannot
 detect separate content with the same aspect ratio, or establish the phone shape
@@ -267,9 +301,9 @@ Close Porthole before running the hardware probe in PowerShell:
 The probe creates the real HID service and characteristics without advertising. On
 success, launch Porthole, enable AssistiveTouch and disable Dwell Control on iPhone,
 then pair **the PC's Windows Bluetooth name** in iPhone Bluetooth settings. Accept any
-Windows pairing prompt. This name can differ from the Screen Mirroring name. F2 guides
-pairing, video readiness and calibration; all three report subscriptions are required
-before controls activate. A probe pass still requires a live iPhone input check.
+Windows pairing prompt. This name can differ from the Screen Mirroring name. Open
+**Set up controls** for pairing and pointer calibration. Then verify Bluetooth in the
+iPhone app. A probe pass still requires a live iPhone input check.
 
 See [the Windows helper guide](helpers/ble-winrt/README.md) for its protocol, diagnostics
 and adapter requirements. The helper uses the same keyboard/mouse/consumer report map
@@ -277,9 +311,10 @@ and paced lanes as Linux, with notifications targeted to a single subscribed pho
 
 Create a portable bundle from a clean committed build with
 `bash scripts/package-windows.sh`. It gathers runtime DLLs, licenses, exact dependency
-metadata and matching source archives. The CI full Windows job builds/tests this preset
-and uploads the portable bundle and sources. The no-AirPlay presets remain available as
-minimal build checks.
+metadata and matching source archives. The Windows CI job builds this preset, verifies
+the portable payload, and compiles and tests the Setup EXE with Inno Setup. The job
+uploads the installer, portable bundle, and sources. The no-AirPlay presets are minimal
+build checks.
 
 For a one-file preview, [build the portable launcher](scripts/portable-windows/README.md)
 from that bundle. Users run one executable, which prepares its complete files under
@@ -290,7 +325,6 @@ live input accuracy, responsiveness and failure recovery still need validation.
 
 If the Windows firewall blocks discovery or mirroring, the bundle includes a reviewed
 `windows-firewall.ps1` helper for the mirror executable and fixed ports on Private networks.
-Installer/uninstaller work remains with the separate polish workstream.
 
 ### Build presets
 

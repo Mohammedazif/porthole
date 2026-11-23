@@ -1,6 +1,7 @@
 #include "app.h"
 
 #include <errno.h>
+#include <openssl/rand.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <math.h>
@@ -71,17 +72,33 @@ static void request_stop(int sig)
     stop_requested = 1;
 }
 
-enum { EV_FRAME, EV_CONNECTED, EV_DISCONNECTED, EV_BLE, EV_INBOX, EV_INBOX_NOTE, EV_COUNT };
+enum {
+    EV_FRAME,
+    EV_CONNECTED,
+    EV_DISCONNECTED,
+    EV_BLE,
+    EV_INBOX_NOTE,
+    EV_INBOX_SAVED,
+    EV_INBOX_ITEM,
+    EV_COUNT
+};
 
 typedef struct app {
     const ph_app_options *opt;
     ph_window *win;
+    ph_history *history;
+    unsigned history_generation;
+    char history_profile[65];
+    bool companion_connected;
+    char request_id[129];
+    Uint64 session_poll;
     ph_decoder *dec;
     ph_receiver *rx;
     ph_audio *audio;
     ph_polish *polish;
     ph_hid_link *link;
     bool link_stopping;
+    bool link_policy_stopped;
     Uint32 ev_base;
     atomic_bool frame_pending; /* coalesces "new frame" events */
     double portrait_aspect;    /* phone screen width/height when upright; 0 until seen */
@@ -106,6 +123,10 @@ typedef struct app {
     bool controls_paused;
     uint8_t mouse_abs_down; /* phone buttons pressed by the PC mouse, not by shortcuts */
     bool gesture_keys[256];
+    bool remote_clipboard_pending;
+    char control_proof[17];
+    unsigned proof_step;
+    Uint64 proof_next_at, proof_grace_until;
     bool paste_when_ready; /* Ctrl+V is waiting for the iPhone copy, then types it */
     Uint64 paste_armed_at;
     Uint64 feed_wheel_at;
@@ -155,9 +176,11 @@ typedef struct app {
     uint64_t input_at;
     Uint64 metrics_at, metrics_log_at;
     ph_src_switch src;
+    bool airplay_selected; /* protected by src_lock */
     pthread_mutex_t src_lock;
     pthread_t usb_thread;
     atomic_bool usb_stop;
+    atomic_bool usb_pause_requested;
     bool usb_started;
     ph_pull pull;
     ph_drag_ghost *ghost;
@@ -166,7 +189,7 @@ typedef struct app {
     int place_x, place_y;
     Uint64 place_at;
     ph_origin *origin;
-    Uint64 clip_poll_at;
+    Uint64 clip_poll_at, address_poll_at;
     char pull_dir[640];
     /* Original file for this drag; empty while the phone is looking. */
     char pull_path[1 << 16];
@@ -178,7 +201,12 @@ typedef struct app {
     int hold_gx, hold_gy; /* where a file drag was let go before the file came */
 } app;
 
+static bool controls_wanted(app *a);
+static bool may_forward_controls(app *a);
+
 /* ------------------------------------------------------------ cross-thread notifications */
+
+static _Thread_local unsigned channel_epoch;
 
 static bool push_event(app *a, int which, void *data)
 {
@@ -186,6 +214,7 @@ static bool push_event(app *a, int which, void *data)
     SDL_zero(e);
     e.type = a->ev_base + (Uint32)which;
     e.user.data1 = data;
+    e.user.code = (Sint32)channel_epoch;
     if (SDL_PushEvent(&e) != 1) {
         free(data);
         return false;
@@ -213,24 +242,17 @@ static void on_frame(void *user)
 static void on_video(void *user, const uint8_t *data, size_t len, uint64_t timestamp_ns)
 {
     app *a = user;
-    bool show;
 
     pthread_mutex_lock(&a->src_lock);
-    show = ph_src_switch_wifi_frame(&a->src, ph_usb_annexb_keyframe(data, len),
-                                    ph_metrics_now_ms()) == PH_SRC_WIFI;
-    pthread_mutex_unlock(&a->src_lock);
-    if (!show) {
-        /* While the broadcast is the picture, leave AirPlay undecoded. A second
-         * 1920x1080 stream is what makes the PC lag. It resumes at the next keyframe. */
-        return;
+    ph_src active = ph_src_switch_wifi_frame(&a->src, ph_usb_annexb_keyframe(data, len),
+                                             ph_metrics_now_ms());
+    if (active == PH_SRC_WIFI && (!a->polish || ph_polish_accepts_video(a->polish))) {
+        if (a->audio)
+            ph_audio_note_video_pts(a->audio, timestamp_ns);
+        ph_polish_on_video(a->polish, PH_SRC_WIFI, data, len, timestamp_ns);
+        ph_decoder_push(a->dec, data, len);
     }
-    if (a->audio)
-        ph_audio_note_video_pts(a->audio, timestamp_ns);
-    if (a->polish && !ph_polish_accepts_video(a->polish))
-        return;
-    if (a->polish)
-        ph_polish_on_video(a->polish, data, len, timestamp_ns);
-    ph_decoder_push(a->dec, data, len);
+    pthread_mutex_unlock(&a->src_lock);
 }
 
 static bool on_admit(void *user, const char *device_id, const char *name, const char *model)
@@ -280,8 +302,12 @@ static void on_disconnected(void *user)
     app *a = user;
     on_audio_flush(user);
     atomic_store(&a->airplay_on, false);
-    if (!atomic_load(&a->screen_on)) /* the broadcast keeps the phone connected */
-        push_event(user, EV_DISCONNECTED, NULL);
+    pthread_mutex_lock(&a->src_lock);
+    a->airplay_selected = false;
+    ph_src_switch_wifi_lost(&a->src, ph_metrics_now_ms());
+    pthread_mutex_unlock(&a->src_lock);
+    ph_polish_disconnected(a->polish);
+    push_event(user, EV_DISCONNECTED, NULL);
 }
 
 static bool screen_allow(void *user, const char *address)
@@ -291,6 +317,16 @@ static bool screen_allow(void *user, const char *address)
     return ph_origin_peer(a->origin, phone, sizeof phone) && strcmp(phone, address) == 0;
 }
 
+static bool authorize_channel(void *user, const char *ticket)
+{
+    app *a = user;
+    unsigned epoch = ph_origin_generation(a->origin, ticket);
+    if (!epoch)
+        return false;
+    channel_epoch = epoch;
+    return true;
+}
+
 static void inbox_progress(void *user, int done, int total)
 {
     char line[96];
@@ -298,69 +334,79 @@ static void inbox_progress(void *user, int done, int total)
     snprintf(line, sizeof line, done < total ? "Receiving %d of %d from the iPhone"
                                              : "Received %d of %d from the iPhone",
              done, total);
+    if (done < 0)
+        snprintf(line, sizeof line, "Transfer interrupted. Retry from your iPhone.");
     push_event(user, EV_INBOX_NOTE, strdup(line));
 }
 
-static void inbox_received(void *user, const char *paths, int count)
+static void inbox_item(void *user, const ph_inbox_item *item)
 {
-    (void)count;
-    push_event(user, EV_INBOX, strdup(paths));
+    ph_inbox_item *copy = malloc(sizeof *copy);
+    if (copy) {
+        *copy = *item;
+        push_event(user, EV_INBOX_ITEM, copy);
+    }
+}
+
+static void inbox_saved(void *user, const char *path)
+{
+    push_event(user, EV_INBOX_SAVED, strdup(path));
+}
+
+static bool inbox_profile(void *user, const char *ticket, char out[65])
+{
+    app *a = user;
+    return ph_origin_receive_profile(a->origin, ticket, out);
 }
 
 static void screen_connected(void *user, const char *address)
 {
     app *a = user;
     (void)address;
-    /* Made on the first broadcast, on this same thread that then feeds it; screen_on
-     * is set after, so the main thread only reads it once it exists. */
+    pthread_mutex_lock(&a->src_lock);
     if (!a->screen_dec) {
         a->screen_dec = ph_decoder_start(on_frame, a);
         /* Same longer side as AirPlay's portrait mirror. The broadcast arrives
          * near 888x1920, and drawing that on this machine falls behind. */
         ph_decoder_limit_edge(a->screen_dec, 1080);
     }
-    if (!a->screen_dec)
-        return;
-    ph_decoder_reset(a->dec);
-    atomic_store(&a->screen_on, true);
-    pthread_mutex_lock(&a->src_lock);
-    a->src.usb_unplugged = false; /* the broadcast takes the cable's place */
+    bool started = a->screen_dec != NULL;
+    if (started)
+        atomic_store(&a->screen_on, true);
+    bool announce = started && a->src.current != PH_SRC_USB && !atomic_load(&a->airplay_on);
     pthread_mutex_unlock(&a->src_lock);
-    if (!atomic_load(&a->airplay_on) && !a->phone_name[0])
+    if (announce)
         push_event(user, EV_CONNECTED, strdup("Connected"));
 }
 
 static void screen_video(void *user, const uint8_t *annexb, size_t len, bool keyframe)
 {
     app *a = user;
-    ph_src before, after;
-
     pthread_mutex_lock(&a->src_lock);
-    before = a->src.current;
-    after = ph_src_switch_usb_frame(&a->src, keyframe, ph_metrics_now_ms());
+    ph_src before = a->src.current;
+    if (a->screen_dec && !a->airplay_selected &&
+        ph_src_switch_broadcast_frame(&a->src, keyframe, ph_metrics_now_ms())) {
+        if (before != PH_SRC_BROADCAST) {
+            ph_decoder_reset(a->dec);
+            PH_LOGI("showing the broadcast screen");
+        }
+        ph_polish_on_video(a->polish, PH_SRC_BROADCAST, annexb, len, 0);
+        ph_decoder_push(a->screen_dec, annexb, len);
+    }
     pthread_mutex_unlock(&a->src_lock);
-    if (before != PH_SRC_USB && after == PH_SRC_USB)
-        PH_LOGI("showing the broadcast screen");
-    if (after != PH_SRC_USB || !a->screen_dec)
-        return;
-    if (a->polish)
-        ph_polish_on_video(a->polish, annexb, len, 0);
-    ph_decoder_push(a->screen_dec, annexb, len);
 }
 
 static void screen_disconnected(void *user)
 {
     app *a = user;
 
-    atomic_store(&a->screen_on, false);
     pthread_mutex_lock(&a->src_lock);
-    ph_src_switch_usb_unplugged(&a->src, ph_metrics_now_ms());
-    pthread_mutex_unlock(&a->src_lock);
+    atomic_store(&a->screen_on, false);
+    ph_src next = ph_src_switch_broadcast_lost(&a->src, ph_metrics_now_ms());
     if (a->screen_dec)
         ph_decoder_reset(a->screen_dec); /* the next broadcast starts clean */
-    if (a->dec)
-        ph_decoder_reset(a->dec); /* AirPlay was not decoded during the broadcast */
-    if (!atomic_load(&a->airplay_on))
+    pthread_mutex_unlock(&a->src_lock);
+    if (next == PH_SRC_NONE && !atomic_load(&a->airplay_on))
         push_event(user, EV_DISCONNECTED, NULL);
 }
 
@@ -371,14 +417,30 @@ static void on_ble_status(void *user, const char *line)
 
 /* ------------------------------------------------------------ main thread */
 
+static bool setup_controls_ready(const app *a)
+{
+    return a->setup.step == PH_SETUP_BLUETOOTH
+               ? a->link && !a->link_stopping && !strcmp(a->ble_status, "on")
+               : a->input.enabled;
+}
+
 static void update_title(app *a)
 {
     char title[320];
     const char *control = a->opt->bluetooth && a->opt->ble_helper ? a->ble_status : "off";
+    bool bluetooth_ready = !strcmp(control, "on");
+    ph_control_policy policy = ph_origin_control_policy(a->origin);
+    if (bluetooth_ready && policy.managed && !ph_origin_controls_verified(a->origin))
+        control = "Verify Bluetooth on iPhone";
+    else if (bluetooth_ready && !a->input.enabled)
+        control = "Waiting for screen sharing";
 
     /* The relative pointer has to see the AssistiveTouch dot, so a photo or
      * video that is not the phone screen pauses it. The absolute pointer does
      * not: a click is that spot on the phone. */
+    if (!strcmp(control, "on") && ph_origin_control_policy(a->origin).managed &&
+        !ph_origin_controls_verified(a->origin))
+        control = "Verify keyboard on iPhone";
     bool layout_pauses_pointer = a->presentation_mode && !a->absolute;
     if (a->phone_name[0])
         snprintf(title, sizeof title, "%s - %s  [Bluetooth control: %s]%s", PORTHOLE_NAME,
@@ -395,9 +457,9 @@ static void update_title(app *a)
     }
     ph_window_set_title(a->win, title);
     ph_window_set_status(a->win, a->phone_name[0] != 0,
-                         !layout_pauses_pointer && !strcmp(control, "on"),
+                         !layout_pauses_pointer && a->input.enabled,
                          layout_pauses_pointer ? "Return to phone view" : control);
-    ph_setup_update(&a->setup, a->input.enabled,
+    ph_setup_update(&a->setup, setup_controls_ready(a),
                      a->phone_name[0] && a->view_frame && a->view_frame->data[0]);
     ph_window_set_setup(a->win, &a->setup);
 }
@@ -458,7 +520,7 @@ static void handle_ble_status(app *a, const char *line)
     else if (!strcmp(line, "disconnected"))
         state = "waiting for iPhone";
     else if (!strcmp(line, "exited"))
-        state = "unavailable; retrying";
+        state = a->link_policy_stopped ? "controls inactive" : "unavailable; retrying";
     else if (!strncmp(line, "error", 5))
         state = "error (see log)";
 
@@ -474,7 +536,7 @@ static void handle_ble_status(app *a, const char *line)
         PH_LOGD("Bluetooth: %s", line);
         return; /* internal bookkeeping */
     }
-    if (!strncmp(line, "error", 5) || !strcmp(line, "exited"))
+    if (!strncmp(line, "error", 5) || (!strcmp(line, "exited") && !a->link_policy_stopped))
         PH_LOGW("Bluetooth helper: %s", line);
     else
         PH_LOGI("Bluetooth: %s", line);
@@ -491,8 +553,11 @@ static void handle_ble_status(app *a, const char *line)
     /* "connected" is followed by "subscribed" once reports flow; keep "on" if already on. */
     if (state && !(!strcmp(line, "connected") && !strcmp(a->ble_status, "on")))
         snprintf(a->ble_status, sizeof a->ble_status, "%s", state);
-    ph_input_set_enabled(&a->input, !a->controls_paused && !a->link_stopping
-                         && !strcmp(a->ble_status, "on"));
+    if (was_on && strcmp(a->ble_status, "on")) {
+        ph_origin_reset_control_verification(a->origin);
+        a->proof_grace_until = 0;
+    }
+    ph_input_set_enabled(&a->input, may_forward_controls(a));
     if (!strcmp(line, "subscribed") && !was_on && a->input.enabled)
         PH_LOGI("Bluetooth keyboard ready. Alt+K shows or hides the iPhone keyboard");
     ph_pointer_set_enabled(&a->pointer, a->input.enabled && a->phone_name[0]
@@ -510,7 +575,8 @@ static void handle_ble_status(app *a, const char *line)
         a->link_stopping = false;
         ph_pointer_transport_reset(&a->pointer, SDL_GetTicks64());
         ph_scroll_transport_reset(&a->wheel);
-        a->ble_retry_at = SDL_GetTicks64() + BLE_RETRY_MS;
+        a->ble_retry_at = a->link_policy_stopped ? 0 : SDL_GetTicks64() + BLE_RETRY_MS;
+        a->link_policy_stopped = false;
     }
     update_title(a);
 }
@@ -939,57 +1005,12 @@ static void snap_pull(app *a)
     PH_LOGD("photo pull: Ctrl+drag takes this picture");
 }
 
-static bool copy_file(const char *src, const char *dest)
-{
-    FILE *in = ph_fopen(src, "rb");
-    FILE *out;
-    char buf[65536];
-    size_t n;
-
-    if (!in)
-        return false;
-    out = ph_fopen(dest, "wb");
-    if (!out) {
-        fclose(in);
-        return false;
-    }
-    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
-        if (fwrite(buf, 1, n, out) != n) {
-            fclose(in);
-            fclose(out);
-            ph_remove(dest);
-            return false;
-        }
-    }
-    fclose(in);
-    if (fclose(out) != 0) {
-        ph_remove(dest);
-        return false;
-    }
-    return true;
-}
-
 static bool desktop_copy(const char *src, char *dest, size_t cap)
 {
-    const char *base = ph_path_base(src);
     char desktop[1024];
 
-    if (!dest || cap < 2)
-        return false;
-    dest[0] = 0;
-    if (!base[0] || !ph_place_dir(PH_PLACE_DESKTOP, desktop, sizeof desktop))
-        return false;
-    if (snprintf(dest, cap, "%s/%s", desktop, base) >= (int)cap) {
-        dest[0] = 0;
-        return false;
-    }
-    if (!strcmp(src, dest))
-        return true;
-    if (!copy_file(src, dest)) {
-        dest[0] = 0;
-        return false;
-    }
-    return true;
+    return ph_place_dir(PH_PLACE_DESKTOP, desktop, sizeof desktop) &&
+           ph_place_copy_unique(src, desktop, ph_path_base(src), dest, cap);
 }
 
 /* Copies each file, one per line, to the Desktop. Returns how many arrived there.
@@ -1023,62 +1044,62 @@ static int desktop_copy_all(char *paths, char *first, size_t first_cap)
  * taken gets 2-, 3-, ... in front. Returns how many arrived.
  * first receives the path of the first one that landed. names receives each
  * saved file's own name, one per line, when it fits. */
-static int downloads_move_all(char *paths, char *first, size_t first_cap, char *names, size_t names_cap)
+/* Each pairing has its own local history, independent of device names or network addresses. */
+static void sync_pairing_history(app *a)
 {
-    char dir[1024];
-    int moved = 0;
-
-    if (first && first_cap)
-        first[0] = 0;
-    if (names && names_cap)
-        names[0] = 0;
-    if (!ph_place_save_dir(dir, sizeof dir))
-        return 0;
-
-    for (char *line = paths, *next; line && *line; line = next) {
-        const char *base;
-        char dest[1024];
-        bool ok = false;
-
-        next = strchr(line, '\n');
-        if (next)
-            *next++ = 0;
-        base = ph_path_base(line);
-        if (!base[0])
-            continue;
-        for (int n = 1; n < 1000 && !ok; n++) {
-            int len = n == 1 ? snprintf(dest, sizeof dest, "%s/%s", dir, base)
-                             : snprintf(dest, sizeof dest, "%s/%d-%s", dir, n, base);
-
-            if (len >= (int)sizeof dest)
-                break;
-            if (ph_path_exists(dest))
-                continue;
-            ok = ph_rename(line, dest) == 0 || (copy_file(line, dest) && ph_remove(line) == 0);
-            break;
-        }
-        if (ok) {
-            moved++;
-            if (first && first_cap && !first[0])
-                snprintf(first, first_cap, "%s", dest);
-            if (names && names_cap) {
-                size_t used = strlen(names);
-                const char *saved_name = ph_path_base(dest);
-                size_t namelen = strlen(saved_name);
-                if (saved_name[0] && used < names_cap && namelen + 2 <= names_cap - used) {
-                    memcpy(names + used, saved_name, namelen);
-                    names[used + namelen] = '\n';
-                    names[used + namelen + 1] = '\0';
-                }
+    char profile[65] = "", name[80], path[1100];
+    unsigned generation = ph_origin_generation(a->origin, NULL);
+    bool selected = ph_origin_selected_id(a->origin, profile);
+    if (a->history && a->history_generation == generation &&
+        !strcmp(a->history_profile, profile))
+        return;
+    bool persistent = false;
+    if (selected) {
+        snprintf(name, sizeof name, "history-%.32s.bin", profile);
+        persistent = ph_config_path(name, path, sizeof path);
+        char bound[2];
+        if (persistent &&
+            !ph_config_read_line("history-profile-bound", bound, sizeof bound)) {
+            char old_id[40], old_path[1100];
+            if (ph_config_read_line("history-profile", old_id, sizeof old_id) &&
+                strlen(old_id) == 32 && strspn(old_id, "0123456789abcdef") == 32) {
+                snprintf(name, sizeof name, "history-%s.bin", old_id);
+                if (ph_config_path(name, old_path, sizeof old_path) && ph_path_exists(old_path) &&
+                    !ph_path_exists(path) && strcmp(old_path, path))
+                    ph_publish_new(old_path, path);
             }
-            PH_LOGI("share: saved %s", dest);
-        } else {
-            PH_LOGW("share: stayed at %s", line);
+            ph_config_write_line("history-profile-bound", "1");
         }
     }
-    return moved;
+    ph_hostclip_cancel_pending();
+    a->remote_clipboard_pending = false;
+    ph_window_set_incoming(a->win, "", 0, 0);
+    ph_window_set_receiving(a->win, 0, 0);
+    ph_window_set_active_transfer(a->win, "");
+    ph_history *history = ph_history_open(persistent ? path : NULL);
+    ph_window_set_history_profile(a->win, selected ? profile : NULL);
+    ph_workspace_set_history(ph_window_workspace(a->win), history);
+    ph_history_close(a->history);
+    a->history = history;
+    a->history_generation = generation;
+    snprintf(a->history_profile, sizeof a->history_profile, "%s", profile);
 }
 
+static void record_transfer(app *a, const char *path, bool incoming, ph_transfer_state state)
+{
+    long long bytes = ph_file_size(path);
+    ph_file_entry file = {
+        .incoming = incoming, .state = state, .bytes = bytes > 0 ? (uint64_t)bytes : 0};
+    if (state == PH_TRANSFER_COMPLETE)
+        file.confirmed = file.bytes;
+    ph_origin_phone_name(a->origin, file.device, sizeof file.device);
+    size_t path_length = strlen(path);
+    if (path_length < sizeof file.path)
+        memcpy(file.path, path, path_length + 1);
+    snprintf(file.name, sizeof file.name, "%.*s", (int)sizeof file.name - 1, ph_path_base(path));
+    if (a->history && !ph_history_add_file(a->history, &file))
+        PH_LOGW("Unable to save transfer history");
+}
 /* A Windows notification for files that arrived; false where there is no tray icon,
  * and the card shows instead. where is "Downloads" or "the Desktop". */
 static bool tray_notice(app *a, const char *path, int count, const char *where)
@@ -1087,7 +1108,7 @@ static bool tray_notice(app *a, const char *path, int count, const char *where)
     const char *name = path ? ph_path_base(path) : "";
     size_t i = 0;
 
-    if (!a->tray || !path || !path[0])
+    if (!a->tray || !ph_workspace_notifications(ph_window_workspace(a->win)) || !path || !path[0])
         return false;
     for (; name[i] && i + 1 < sizeof shown; i++)
         shown[i] = name[i];
@@ -1097,9 +1118,9 @@ static bool tray_notice(app *a, const char *path, int count, const char *where)
         snprintf(text, sizeof text, "%s and %d more, in %.40s", shown, count - 1, where ? where : "");
     } else {
         snprintf(title, sizeof title, "%s received from iPhone", shown);
-        snprintf(text, sizeof text, "Saved in %.40s. Click to show it.", where ? where : "");
+        snprintf(text, sizeof text, "Saved in %.40s. Open Received files.", where ? where : "Downloads");
     }
-    return ph_wintray_notify(a->tray, title, text, path);
+    return ph_wintray_notify(a->tray, title, text);
 }
 
 static void end_pull(app *a)
@@ -1129,6 +1150,8 @@ static void end_pull(app *a)
     a->pull_path[0] = 0;
     update_title(a);
     if (offer) {
+        if (!strchr(offer, '\n'))
+            record_transfer(a, offer, true, PH_TRANSFER_COMPLETE);
         if (landed)
             tray_notice(a, offer, 1, "the Desktop");
         if (a->card) {
@@ -1137,8 +1160,9 @@ static void end_pull(app *a)
         }
     }
     if (note == 3)
-        ph_window_set_detail(a->win, placed ? "Pulled the original photo"
-                                            : "Original photo saved on the Desktop");
+        ph_window_set_detail(a->win, placed ? "Original file offered to the drop destination."
+                                            : landed ? "Original file saved to Desktop."
+                                                     : "Original available in File history. Could not save to Desktop.");
     else if (note == 4)
         ph_window_set_detail(a->win, "Not a photo or video from this iPhone's library");
     else if (note == 1)
@@ -1254,10 +1278,7 @@ static bool ask_rect(app *a, ph_rect picture, bool with_screen)
     return true;
 }
 
-/* Asks the phone about the picture under a Ctrl press at once, before any drag, so
- * the card only appears for something the phone has: the home screen or an app page
- * never shows one. One item per drag; several go through the iPhone's Share sheet to
- * Porthole, which saves them in Downloads. Nothing here reaches the phone's screen. */
+/* Request one original after the deliberate drag crosses the gesture threshold. */
 static void ask_pull(app *a)
 {
     ph_yuv_planes planes;
@@ -1309,7 +1330,7 @@ static void begin_pull(app *a)
     ph_abs_release_all(&a->abs, SDL_GetTicks64());
     ph_pointer_cancel(&a->pointer, SDL_GetTicks64());
     SDL_CaptureMouse(SDL_TRUE);
-    note_origin(a);
+    ask_pull(a);
     if (a->pull_note != 2 && a->pull_note != 3)
         return;
     carry_ghost(a, a->pull_picture);
@@ -1331,6 +1352,7 @@ static void follow_pull(app *a)
 
     if (a->pull_hold && SDL_GetTicks64() - a->pull_hold_at > 300000) {
         PH_LOGW("photo pull: iPhone did not answer");
+        ph_origin_cancel_pull(a->origin);
         end_pull(a);
     }
     if (a->pull.armed) {
@@ -1423,7 +1445,6 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
                     ph_abs_release_all(&a->abs, SDL_GetTicks64());
                 mark_input(a, event->timestamp);
                 SDL_CaptureMouse(SDL_TRUE);
-                ask_pull(a);
                 return;
             }
         } else if (file_pull_ready(a, event->x, event->y)) {
@@ -1434,8 +1455,7 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
             finish_pull(a);
             return;
         } else if (a->pull.armed) {
-            /* A Ctrl click without a drag: nothing reaches the phone. A late answer is
-             * dropped by the next ask. */
+            /* A Ctrl click without a drag never requests an original. */
             ph_pull_release(&a->pull);
             drop_pull_snapshot(a);
             SDL_CaptureMouse(SDL_FALSE);
@@ -1666,7 +1686,7 @@ static void setup_action(app *a, ph_setup_action action)
 
 static void tick_setup(app *a)
 {
-    ph_setup_update(&a->setup, a->input.enabled,
+    ph_setup_update(&a->setup, setup_controls_ready(a),
                      a->phone_name[0] && a->view_frame && a->view_frame->data[0]);
     if (a->setup.calibrating) {
         double x, y;
@@ -1830,6 +1850,7 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         || (a->absolute && (a->abs.held || a->abs.buttons || a->abs.pending)))) {
         cancel_control_intent(a, SDL_GetTicks64());
         ph_xdnd_cancel();
+        ph_origin_cancel_pull(a->origin);
         ph_pull_release(&a->pull);
         drop_pull_snapshot(a);
         hide_ghost(a);
@@ -2012,7 +2033,9 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         ph_input_key(&a->input, (uint8_t)sc, e->type == SDL_KEYDOWN, e->repeat != 0,
                      pc_modifiers(a, (SDL_Keymod)e->keysym.mod));
         if (down && !e->repeat && sc == SDL_SCANCODE_C && (e->keysym.mod & KMOD_CTRL)
-            && !(e->keysym.mod & (KMOD_ALT | KMOD_GUI)) && a->origin) {
+            && !(e->keysym.mod & (KMOD_ALT | KMOD_GUI)) && a->origin &&
+            ph_workspace_clip_receive(ph_window_workspace(a->win)) &&
+            (ph_origin_clip_flags(a->origin) & PH_ORIGIN_CLIP_READY)) {
             ph_origin_ask_clip(a->origin);
             ph_window_set_detail(a->win, "Copying from the iPhone");
         }
@@ -2024,7 +2047,7 @@ static void release_everything(app *a)
     if (a->absolute)
         ph_abs_release_all(&a->abs, SDL_GetTicks64());
     ph_gesture_cancel(&a->gesture, SDL_GetTicks64());
-    a->feed_mode = a->feed_have_wheel = false;
+    a->feed_have_wheel = false;
     memset(a->gesture_keys, 0, sizeof a->gesture_keys);
     a->paste_when_ready = false;
     reset_mouse_input(a);
@@ -2371,14 +2394,14 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
     case EV_FRAME:
         atomic_store(&a->frame_pending, false);
         {
-            bool broadcast;
             pthread_mutex_lock(&a->src_lock);
-            broadcast = atomic_load(&a->screen_on) && a->src.current == PH_SRC_USB;
+            bool broadcast = a->src.current == PH_SRC_BROADCAST;
+            bool received = broadcast
+                ? ph_decoder_latest_timed(a->screen_dec, frame, &a->screen_seq, &a->frame_timing)
+                : a->src.current != PH_SRC_NONE &&
+                  ph_decoder_latest_timed(a->dec, frame, seq, &a->frame_timing);
             pthread_mutex_unlock(&a->src_lock);
-            /* Each decoder counts its own pictures. */
-            if (broadcast ? ph_decoder_latest_timed(a->screen_dec, frame, &a->screen_seq,
-                                                    &a->frame_timing)
-                          : ph_decoder_latest_timed(a->dec, frame, seq, &a->frame_timing)) {
+            if (received) {
                 show_frame(a, frame);
                 av_frame_unref(frame);
             }
@@ -2397,84 +2420,115 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
         update_title(a);
         free(e->user.data1);
         break;
-    case EV_DISCONNECTED:
+    case EV_DISCONNECTED: {
+        pthread_mutex_lock(&a->src_lock);
+        bool showing_other = a->src.current == PH_SRC_USB || atomic_load(&a->screen_on)
+                             || atomic_load(&a->airplay_on);
+        pthread_mutex_unlock(&a->src_lock);
+        if (showing_other)
+            break;
+        ph_polish_stop_recording(a->polish);
         release_everything(a);
         clear_view(a);
         ph_decoder_reset(a->dec);
         ph_pointer_set_enabled(&a->pointer, false, SDL_GetTicks64());
         a->phone_name[0] = '\0';
-        pthread_mutex_lock(&a->src_lock);
-        ph_src_switch_wifi_lost(&a->src, ph_metrics_now_ms());
-        pthread_mutex_unlock(&a->src_lock);
-        if (a->polish)
-            ph_polish_disconnected(a->polish);
         ph_window_clear(a->win);
         update_title(a);
         break;
+    }
     case EV_BLE:
         handle_ble_status(a, (const char *)e->user.data1);
         free(e->user.data1);
         break;
     case EV_INBOX_NOTE: {
+        if ((unsigned)e->user.code != ph_origin_generation(a->origin, NULL)) {
+            free(e->user.data1);
+            break;
+        }
         int done = 0, total = 0;
         const char *text = e->user.data1;
 
-        if (text && sscanf(text, "Receiving %d of %d", &done, &total) == 2 && total > 0 && a->card
-            && !a->tray && done < total)
+        if (text && sscanf(text, "Receiving %d of %d", &done, &total) == 2)
+            ph_window_set_receiving(a->win, done, total);
+        else
+            ph_window_set_receiving(a->win, 0, 0);
+        if (total > 0 && a->card && !a->tray && done < total)
             ph_transfer_card_show(a->card, NULL, done, total, false, SDL_GetTicks64());
         ph_window_set_detail(a->win, text);
         free(e->user.data1);
         break;
     }
-    case EV_INBOX: {
-        char line[128];
-        char dest[1024];
-        char names[512];
-        int count = 0, saved;
-
-        if (!e->user.data1)
+    case EV_INBOX_ITEM: {
+        ph_inbox_item *item = e->user.data1;
+        if (!item)
             break;
-        for (const char *c = e->user.data1; *c; c++)
-            count += *c == '\n';
-        count++;
-        /* Shared from the iPhone's Share sheet, into the folder from Settings. */
-        saved = downloads_move_all(e->user.data1, dest, sizeof dest, names, sizeof names);
-        free(e->user.data1);
-        {
-            char where[64];
-            if (!ph_place_save_label(where, sizeof where))
-                snprintf(where, sizeof where, "Downloads");
-            if (saved > 0 && dest[0]) {
-                tray_notice(a, dest, saved, where);
-                if (a->card) {
-                    ph_transfer_card_place(a->card, where);
-                    ph_transfer_card_show(a->card, dest, saved, saved, true, SDL_GetTicks64());
+        if ((unsigned)e->user.code == ph_origin_generation(a->origin, NULL)) {
+            sync_pairing_history(a);
+            bool active = item->state == PH_INBOX_RECEIVING;
+            ph_window_set_incoming(a->win, active ? item->name : "", item->bytes, item->total);
+            ph_transfer_state state = active                           ? PH_TRANSFER_ACTIVE
+                                      : item->state == PH_INBOX_STORED ? PH_TRANSFER_COMPLETE
+                                                                       : PH_TRANSFER_PAUSED;
+            const ph_file_entry *existing = NULL;
+            for (size_t i = 0; i < ph_history_file_count(a->history); i++) {
+                const ph_file_entry *entry = ph_history_file(a->history, i);
+                if (entry->incoming && !strcmp(entry->transfer_id, item->id)) {
+                    existing = entry;
+                    break;
                 }
-            } else if (a->card) {
-                ph_transfer_card_dismiss(a->card, SDL_GetTicks64());
             }
-            snprintf(line, sizeof line, "Saved %d item%s from the iPhone in %s", saved,
-                     saved == 1 ? "" : "s", where);
-            ph_window_set_detail(a->win, line);
-            PH_LOGI("share: saved %d of %d item(s) in %s", saved, count, where);
+            if (existing) {
+                if (existing->state != state || !active ||
+                    (item->digest[0] && strcmp(existing->digest, item->digest))) {
+                    ph_file_entry updated = *existing;
+                    updated.state = state;
+                    updated.confirmed = item->bytes;
+                    if (item->path[0])
+                        snprintf(updated.path, sizeof updated.path, "%s", item->path);
+                    if (item->digest[0])
+                        memcpy(updated.digest, item->digest, sizeof updated.digest);
+                    ph_history_replace_file(a->history, existing->id, &updated);
+                }
+            } else {
+                ph_file_entry entry = {.incoming = true,
+                                       .bytes = item->total,
+                                       .confirmed = item->bytes,
+                                       .state = state};
+                snprintf(entry.name, sizeof entry.name, "%s", item->name);
+                snprintf(entry.path, sizeof entry.path, "%s", item->path);
+                memcpy(entry.transfer_id, item->id, sizeof entry.transfer_id);
+                memcpy(entry.digest, item->digest, sizeof entry.digest);
+                ph_origin_phone_name(a->origin, entry.device, sizeof entry.device);
+                ph_history_add_file(a->history, &entry);
+            }
+            if (item->state == PH_INBOX_INTERRUPTED)
+                ph_window_set_receiving(a->win, 0, 0);
+            if (item->message[0])
+                ph_window_set_detail(a->win, item->message);
         }
-        if (saved > 0) {
-            char note[96];
-            bool named = false;
-            for (char *file = names, *next; file && *file; file = next) {
-                next = strchr(file, '\n');
-                if (next)
-                    *next++ = 0;
-                if (!file[0])
-                    continue;
-                snprintf(note, sizeof note, "Received %.80s", file);
-                ph_window_note_transfer(a->win, note);
-                named = true;
+        free(item);
+        break;
+    }
+    case EV_INBOX_SAVED: {
+        char *path = e->user.data1;
+        if (path) {
+            if ((unsigned)e->user.code != ph_origin_generation(a->origin, NULL)) {
+                free(path);
+                break;
             }
-            if (!named) {
-                snprintf(note, sizeof note, "Received %d item%s", saved, saved == 1 ? "" : "s");
-                ph_window_note_transfer(a->win, note);
+            char label[128] = "", note[128];
+            ph_place_save_label(label, sizeof label);
+            ph_window_note_received(a->win, 1);
+            bool notified = tray_notice(a, path, 1, label);
+            if (!notified && a->card && ph_workspace_notifications(ph_window_workspace(a->win))) {
+                ph_transfer_card_place(a->card, label[0] ? label : NULL);
+                ph_transfer_card_show(a->card, path, 1, 1, true, SDL_GetTicks64());
             }
+            snprintf(note, sizeof note, "Received %.100s", ph_path_base(path));
+            ph_window_note_transfer(a->win, note);
+            ph_window_set_detail(a->win, note);
+            free(path);
         }
         break;
     }
@@ -2491,9 +2545,10 @@ static void start_bluetooth(app *a)
     char *argv[] = {"python3", "-u", (char *)a->opt->ble_helper, NULL};
 #endif
 
-    if (!a->opt->bluetooth || !a->opt->ble_helper)
+    if (!a->opt->bluetooth || !a->opt->ble_helper || a->link)
         return;
     a->ble_retry_at = 0;
+    a->link_policy_stopped = false;
 #ifndef _WIN32
     setenv("PORTHOLE_BLE_NAME", a->opt->name, 1);
     if (a->opt->absolute_pointer)
@@ -2512,11 +2567,125 @@ static void start_bluetooth(app *a)
     }
 }
 
+static bool controls_wanted(app *a)
+{
+    ph_control_policy policy = ph_origin_control_policy(a->origin);
+    pthread_mutex_lock(&a->src_lock);
+    ph_src selected = a->src.current;
+    pthread_mutex_unlock(&a->src_lock);
+    bool airplay = atomic_load(&a->airplay_on);
+    bool broadcast = atomic_load(&a->screen_on);
+    /* The companion authorizes its own broadcast. The cable or AirPlay could
+     * belong to a different phone, so don't forward its companion controls. */
+    if (policy.managed && (selected == PH_SRC_USB || selected == PH_SRC_WIFI ||
+                           (selected == PH_SRC_NONE && airplay && !broadcast)))
+        return false;
+    bool sharing = policy.managed ? broadcast : broadcast || airplay || selected == PH_SRC_USB;
+    bool pairing = (a->setup.visible && a->setup.controls && a->setup.step >= PH_SETUP_BLUETOOTH) ||
+                   ph_origin_verifying_controls(a->origin) ||
+                   (ph_origin_controls_verified(a->origin) && SDL_GetTicks64() < a->proof_grace_until);
+    return ph_control_connection_wanted(policy, sharing, pairing, a->controls_paused);
+}
+
+static bool may_forward_controls(app *a)
+{
+    if (!a->link || a->link_stopping || strcmp(a->ble_status, "on") || !controls_wanted(a))
+        return false;
+    ph_control_policy policy = ph_origin_control_policy(a->origin);
+    return !policy.managed ||
+           (ph_origin_controls_verified(a->origin) &&
+            (!policy.screen_only || atomic_load(&a->screen_on)));
+}
+
+/* The number crosses the Bluetooth keyboard link only. Verification is tied to
+ * both its current dispatch generation and the authenticated companion session. */
+static void tick_control_proof(app *a)
+{
+    bool waiting = ph_origin_verifying_controls(a->origin);
+    if (!waiting || !a->link || a->link_stopping || strcmp(a->ble_status, "on") ||
+        (a->control_proof[0] && !ph_origin_control_proof_current(a->origin, a->control_proof))) {
+        if (a->control_proof[0] && a->link && !a->link_stopping)
+            ph_hid_link_keyboard(a->link, &(ph_hid_keyboard){0});
+        memset(a->control_proof, 0, sizeof a->control_proof);
+        return;
+    }
+    Uint64 now = SDL_GetTicks64();
+    if (!a->control_proof[0]) {
+        uint64_t random;
+        if (RAND_bytes((unsigned char *)&random, sizeof random) != 1)
+            return;
+        snprintf(a->control_proof, sizeof a->control_proof, "%016llu",
+                 (unsigned long long)(random % UINT64_C(10000000000000000)));
+        if (!ph_origin_issue_control_proof(a->origin, a->control_proof)) {
+            memset(a->control_proof, 0, sizeof a->control_proof);
+            return;
+        }
+        a->proof_step = 0;
+        a->proof_next_at = now;
+        a->proof_grace_until = now + 42000;
+    }
+    if (a->proof_step >= 32 || now < a->proof_next_at)
+        return;
+    ph_hid_keyboard report = {0};
+    if ((a->proof_step & 1) == 0) {
+        unsigned digit = (unsigned)(a->control_proof[a->proof_step / 2] - '0');
+        report.keys[0] = (uint8_t)(digit ? 0x58 + digit : 0x62); /* keypad digits */
+    }
+    if (!ph_hid_link_keyboard(a->link, &report)) {
+        ph_origin_reset_control_verification(a->origin);
+        memset(a->control_proof, 0, sizeof a->control_proof);
+        return;
+    }
+    a->proof_step++;
+    a->proof_next_at = now + 24;
+}
+
+static void tick_control_connection(app *a)
+{
+    if (!controls_wanted(a)) {
+        a->ble_retry_at = 0;
+        if (a->link && !a->link_stopping) {
+            release_everything(a);
+            ph_input_set_enabled(&a->input, false);
+            ph_pointer_set_enabled(&a->pointer, false, SDL_GetTicks64());
+            a->link_stopping = true;
+            a->link_policy_stopped = true;
+            ph_origin_reset_control_verification(a->origin);
+            a->proof_grace_until = 0;
+            memset(a->control_proof, 0, sizeof a->control_proof);
+            ph_hid_link_request_stop(a->link);
+            snprintf(a->ble_status, sizeof a->ble_status, "controls inactive");
+            update_title(a);
+        } else if (!a->link && a->opt->bluetooth && a->opt->ble_helper &&
+                   strcmp(a->ble_status, "controls inactive")) {
+            snprintf(a->ble_status, sizeof a->ble_status, "controls inactive");
+            update_title(a);
+        }
+        return;
+    }
+    if (!a->link && (!a->ble_retry_at || SDL_GetTicks64() >= a->ble_retry_at)) {
+        start_bluetooth(a);
+        update_title(a);
+    }
+    tick_control_proof(a);
+    bool permitted = may_forward_controls(a);
+    if (permitted != a->input.enabled) {
+        if (!permitted)
+            release_everything(a);
+        ph_input_set_enabled(&a->input, permitted);
+        ph_pointer_set_enabled(&a->pointer, permitted && a->phone_name[0] &&
+                                !a->presentation_mode, SDL_GetTicks64());
+        update_title(a);
+    }
+}
+
 /* Returns false when the app should quit. */
 static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *seq)
 {
     unsigned int win_id = ph_window_id(a->win);
 
+    if (e->type == SDL_WINDOWEVENT && e->window.event == SDL_WINDOWEVENT_FOCUS_GAINED)
+        ph_workspace_refresh_files(ph_window_workspace(a->win));
     if (a->card && ph_transfer_card_event(a->card, e, SDL_GetTicks64()))
         return true;
 
@@ -2533,7 +2702,8 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
         if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
             ph_window_keep_aspect(a->win);
         if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
-            e->window.event == SDL_WINDOWEVENT_EXPOSED)
+            e->window.event == SDL_WINDOWEVENT_EXPOSED ||
+            e->window.event == SDL_WINDOWEVENT_FOCUS_GAINED)
             ph_window_redraw(a->win);
         else if (e->window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
             /* A file drag already let go of the phone; a press that is only armed
@@ -2570,6 +2740,10 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
             cancel_control_intent(a, SDL_GetTicks64());
             SDL_CaptureMouse(SDL_FALSE);
         }
+        break;
+    case SDL_TEXTINPUT:
+        if (e->text.windowID == win_id)
+            ph_window_chrome_event(a->win, e);
         break;
     case SDL_DROPFILE:
         if (e->drop.file) {
@@ -2652,22 +2826,25 @@ static void take_usb_sample(app *a, const ph_usb_sample *sample, uint8_t *annexb
         return;
     }
     pthread_mutex_lock(&a->src_lock);
+    if (a->airplay_selected) {
+        pthread_mutex_unlock(&a->src_lock);
+        return;
+    }
     before = a->src.current;
     after = ph_src_switch_usb_frame(&a->src, ph_usb_annexb_keyframe(annexb, n), ph_metrics_now_ms());
-    pthread_mutex_unlock(&a->src_lock);
     if (before != PH_SRC_USB && after == PH_SRC_USB) {
         if (a->polish)
             ph_polish_usb_present(a->polish, true);
+        if (a->screen_dec)
+            ph_decoder_reset(a->screen_dec);
         ph_decoder_reset(a->dec);
         PH_LOGI("showing the USB picture");
     }
-    if (after != PH_SRC_USB)
-        return;
-    if (a->polish && !ph_polish_accepts_usb(a->polish))
-        return;
-    if (a->polish)
-        ph_polish_on_video(a->polish, annexb, n, 0);
-    ph_decoder_push(a->dec, annexb, n);
+    if (after == PH_SRC_USB && (!a->polish || ph_polish_accepts_usb(a->polish))) {
+        ph_polish_on_video(a->polish, PH_SRC_USB, annexb, n, 0);
+        ph_decoder_push(a->dec, annexb, n);
+    }
+    pthread_mutex_unlock(&a->src_lock);
 }
 
 static void usb_unplugged(app *a)
@@ -2675,12 +2852,16 @@ static void usb_unplugged(app *a)
     ph_src after;
 
     pthread_mutex_lock(&a->src_lock);
+    bool was_usb = a->src.current == PH_SRC_USB;
     after = ph_src_switch_usb_unplugged(&a->src, ph_metrics_now_ms());
-    pthread_mutex_unlock(&a->src_lock);
     if (a->polish)
         ph_polish_usb_present(a->polish, false);
-    if (a->dec)
+    if (was_usb && a->dec)
         ph_decoder_reset(a->dec);
+    pthread_mutex_unlock(&a->src_lock);
+    if (was_usb && after == PH_SRC_NONE && !atomic_load(&a->screen_on) &&
+        !atomic_load(&a->airplay_on))
+        push_event(a, EV_DISCONNECTED, NULL);
     if (after == PH_SRC_WIFI)
         PH_LOGI("USB unplugged; showing Wi-Fi");
     else
@@ -2710,8 +2891,14 @@ static void *usb_thread_main(void *user)
         return NULL;
     }
     while (!atomic_load(&a->usb_stop)) {
-        ph_usb_capture *cap = ph_usb_libusb_open();
+        if (atomic_load(&a->usb_pause_requested)) {
+            usb_pause(a, 100);
+            continue;
+        }
+        ph_usb_capture *cap = ph_usb_libusb_open(&a->usb_pause_requested);
         if (!cap) {
+            if (atomic_load(&a->usb_stop))
+                break;
             char path[1100];
             if (!announced) {
                 PH_LOGI("waiting for an iPhone on USB");
@@ -2729,19 +2916,17 @@ static void *usb_thread_main(void *user)
         a->src.usb_unplugged = false;
         pthread_mutex_unlock(&a->src_lock);
         PH_LOGI("USB screen interface open");
-        while (!atomic_load(&a->usb_stop)) {
+        while (!atomic_load(&a->usb_pause_requested)) {
             ph_usb_sample sample;
             int rc = ph_usb_capture_poll(cap, &sample, copy_buf, PH_USB_FRAME_MAX);
-            if (atomic_load(&a->usb_stop))
+            if (rc < 0 || atomic_load(&a->usb_pause_requested))
                 break;
-            if (rc < 0) {
-                usb_unplugged(a);
-                break;
-            }
             if (rc > 0)
                 take_usb_sample(a, &sample, annexb, PH_USB_FRAME_MAX);
         }
         ph_usb_capture_close(cap);
+        if (!atomic_load(&a->usb_stop))
+            usb_unplugged(a);
     }
     free(copy_buf);
     free(annexb);
@@ -2757,7 +2942,6 @@ static void sync_clipboard(app *a)
     size_t len = 0;
     Uint64 now;
 
-    ph_hostclip_pump();
     if (a->origin && a->win) {
         char named[64];
         ph_window_set_code_open(a->win, ph_origin_code_open(a->origin));
@@ -2765,10 +2949,35 @@ static void sync_clipboard(app *a)
         if (named[0])
             ph_window_set_phone_name(a->win, named);
     }
+    ph_workspace *workspace = ph_window_workspace(a->win);
+    bool allow_receive = ph_workspace_clip_receive(workspace);
     flags = ph_origin_clip_flags(a->origin);
+    if (a->remote_clipboard_pending && (!allow_receive || !(flags & PH_ORIGIN_CLIP_READY)))
+        ph_hostclip_cancel_pending();
+    int clipboard_result = ph_hostclip_pump();
+    if (clipboard_result > 0)
+        ph_window_set_detail(a->win, a->remote_clipboard_pending
+                                        ? "iPhone image copied to the PC clipboard."
+                                        : "Image copied to the PC clipboard.");
+    else if (clipboard_result < 0)
+        ph_window_set_detail(a->win, "Unable to copy the image to the PC clipboard.");
+    if (!ph_hostclip_pending())
+        a->remote_clipboard_pending = false;
+    ph_window_set_clipboard_available(a->win, (flags & PH_ORIGIN_CLIP_READY) != 0);
+    bool applied = false;
     if (ph_origin_take_clip(a->origin, &kind, &data, &len)) {
-        ph_hostclip_apply(kind, data, len);
-        if (a->paste_when_ready && !ph_origin_clip_waiting(a->origin)) {
+        if (allow_receive) {
+            applied = ph_hostclip_apply(kind, data, len);
+            a->remote_clipboard_pending = applied && ph_hostclip_pending();
+            uint64_t saved = ph_history_add_clip(a->history, kind, data, len, true);
+            if (!applied || !saved)
+                ph_window_set_detail(a->win, !applied && saved
+                    ? "Item saved to history. The PC clipboard is unavailable."
+                    : "Unable to save the clipboard item in history.");
+            if (a->win)
+                ph_window_redraw(a->win);
+        }
+        if (applied && a->paste_when_ready && !ph_origin_clip_waiting(a->origin)) {
             a->paste_when_ready = false;
             if (kind == 'T' && a->polish && ph_polish_type_clipboard(a->polish))
                 ph_window_set_detail(a->win, "Pasted into the iPhone");
@@ -2785,7 +2994,7 @@ static void sync_clipboard(app *a)
     }
     if (flags & PH_ORIGIN_CLIP_SENT)
         ph_window_set_detail(a->win, "On the iPhone, paste with Ctrl+V");
-    if (flags & PH_ORIGIN_CLIP_GOT)
+    if (applied && !a->remote_clipboard_pending && (flags & PH_ORIGIN_CLIP_GOT))
         ph_window_set_detail(a->win, "iPhone clipboard is on this PC");
     now = SDL_GetTicks64();
     if (now - a->clip_poll_at < 400)
@@ -2793,19 +3002,13 @@ static void sync_clipboard(app *a)
     a->clip_poll_at = now;
     if (!ph_hostclip_changed(&kind, &data, &len))
         return;
-    ph_origin_put_clip(a->origin, kind, data, len);
+    if (a->companion_connected && ph_workspace_clip_send(workspace) &&
+        ph_origin_put_clip(a->origin, kind, data, len)) {
+        ph_history_add_clip(a->history, kind, data, len, false);
+        if (a->win)
+            ph_window_redraw(a->win);
+    }
     free(data);
-}
-
-static bool regular_file(const char *path)
-{
-#ifdef _WIN32
-    struct _stat st;
-    return path && path[0] && _stat(path, &st) == 0 && (st.st_mode & _S_IFMT) == _S_IFREG;
-#else
-    struct stat st;
-    return path && path[0] && stat(path, &st) == 0 && S_ISREG(st.st_mode);
-#endif
 }
 
 static void percent_decode(const char *in, char *out, size_t cap)
@@ -2862,7 +3065,7 @@ static bool clipboard_file(char *out, size_t cap)
         } else if (start[0] == '/') {
             path = start;
         }
-        if (path && regular_file(path) && strlen(path) < cap) {
+        if (path && ph_file_size(path) >= 0 && strlen(path) < cap) {
             snprintf(out, cap, "%s", path);
             ok = true;
         }
@@ -2871,43 +3074,104 @@ static bool clipboard_file(char *out, size_t cap)
     return ok;
 }
 
+static void track_push(app *a);
+
 static bool queue_pc_file(app *a, const char *path)
 {
     if (!a->origin || !ph_origin_put_file(a->origin, path)) {
         ph_window_set_detail(a->win, "That file cannot be sent right now");
         return false;
     }
+    track_push(a); /* Persist a queued row as soon as the user submits it. */
     return true;
+}
+
+static bool queue_selected_file(void *user, const char *path)
+{
+    return queue_pc_file(user, path);
 }
 
 static void track_push(app *a)
 {
     char name[96], line[120];
-    int note;
 
     if (!a->origin)
         return;
-    note = ph_origin_take_push(a->origin, name, sizeof name);
-    if (note) {
-        if (!name[0])
-            snprintf(name, sizeof name, "file");
-        if (note == 1)
+    for (unsigned i = 0; i < 48; i++) {
+        ph_origin_send send;
+        ph_origin_send_state state = ph_origin_take_send(a->origin, &send);
+        if (state == PH_SEND_NONE)
+            break;
+        ph_file_entry entry = {
+            .bytes = send.bytes,
+            .confirmed = send.confirmed,
+            .state = state == PH_SEND_STORED   ? PH_TRANSFER_COMPLETE
+                     : state == PH_SEND_QUEUED ? PH_TRANSFER_QUEUED
+                     : state == PH_SEND_ACTIVE ? PH_TRANSFER_ACTIVE
+                     : state == PH_SEND_CHANGED ? PH_TRANSFER_CHANGED
+                     : state == PH_SEND_CANCELED ? PH_TRANSFER_CANCELED
+                                                 : PH_TRANSFER_FAILED
+        };
+        snprintf(entry.name, sizeof entry.name, "%s", send.name);
+        memcpy(entry.path, send.path, sizeof entry.path);
+        memcpy(entry.transfer_id, send.id, sizeof entry.transfer_id);
+        memcpy(entry.digest, send.digest, sizeof entry.digest);
+        memcpy(entry.resume_key, send.resume_key, sizeof entry.resume_key);
+        ph_origin_phone_name(a->origin, entry.device, sizeof entry.device);
+        uint64_t history_id = 0;
+        for (size_t j = 0; j < ph_history_file_count(a->history); j++) {
+            const ph_file_entry *previous = ph_history_file(a->history, j);
+            if (!previous->incoming &&
+                (previous->id == send.history_id || !strcmp(previous->transfer_id, send.id))) {
+                history_id = previous->id;
+                if (!entry.device[0])
+                    memcpy(entry.device, previous->device, sizeof entry.device);
+                break;
+            }
+        }
+        bool saved = history_id ? ph_history_replace_file(a->history, history_id, &entry)
+                                : ph_history_add_file(a->history, &entry) != 0;
+        if (!saved)
+            PH_LOGW("Unable to save transfer history");
+        if (state == PH_SEND_QUEUED || state == PH_SEND_ACTIVE)
+            continue;
+        snprintf(name, sizeof name, "%s", send.name);
+        if (state == PH_SEND_STORED)
             snprintf(line, sizeof line, "Sent %s", name);
-        else if (note == 3)
+        else if (state == PH_SEND_CANCELED)
             snprintf(line, sizeof line, "Cancelled %s", name);
+        else if (state == PH_SEND_CHANGED)
+            snprintf(line, sizeof line, "Source changed: %.96s", name);
         else
             snprintf(line, sizeof line, "Could not send %s", name);
         ph_window_note_transfer(a->win, line);
         ph_window_set_detail(a->win, line);
-        return;
     }
     if (!ph_origin_push_busy(a->origin, name, sizeof name))
         return;
     snprintf(line, sizeof line, "Sending %s", name[0] ? name : "file");
-    ph_window_show_transfers(a->win);
     ph_window_set_transfer_percent(a->win, ph_origin_push_percent(a->origin));
-    if (ph_window_set_active_transfer(a->win, line))
+    if (ph_window_set_active_transfer(a->win, line)) {
+        ph_window_show_transfers(a->win);
         ph_window_set_detail(a->win, line);
+    }
+}
+
+static bool retry_history_file(app *a, const ph_file_entry *entry, bool restart)
+{
+    if (entry->incoming)
+        return false;
+    ph_origin_send send = {.history_id = entry->id, .bytes = entry->bytes,
+                           .confirmed = entry->confirmed};
+    memcpy(send.path, entry->path, sizeof send.path);
+    snprintf(send.name, sizeof send.name, "%.95s", entry->name);
+    memcpy(send.id, entry->transfer_id, sizeof send.id);
+    memcpy(send.digest, entry->digest, sizeof send.digest);
+    memcpy(send.resume_key, entry->resume_key, sizeof send.resume_key);
+    if (!ph_origin_retry_file(a->origin, &send, restart))
+        return false;
+    track_push(a);
+    return true;
 }
 
 static void save_window_prefs(app *a)
@@ -2919,9 +3183,7 @@ static void save_window_prefs(app *a)
         && ph_config_write_line("pointer-mode",
                                 ph_window_next_relative(a->win) ? "relative" : "absolute")
         && ph_config_write_line("media-keys", ph_window_media_keys(a->win) ? "1" : "0");
-    ph_window_set_detail(a->win, ok
-        ? "Saved. Pointer direction applies the next time Porthole opens."
-        : "Could not save these settings");
+    ph_window_set_detail(a->win, ok ? "Settings saved." : "Could not save these settings");
 }
 
 static void do_window_action(app *a, ph_window_action action, bool *running)
@@ -2942,14 +3204,15 @@ static void do_window_action(app *a, ph_window_action action, bool *running)
         break;
     case PH_WINDOW_ACTION_PAUSE:
         a->controls_paused = !a->controls_paused;
+        ph_config_write_line("controls-paused", a->controls_paused ? "1" : "0");
         if (a->controls_paused) {
             ph_input_release_all(&a->input);
             if (a->absolute)
                 ph_abs_release_all(&a->abs, SDL_GetTicks64());
             cancel_control_intent(a, SDL_GetTicks64());
         }
-        ph_input_set_enabled(&a->input, !a->controls_paused && !a->link_stopping
-                             && !strcmp(a->ble_status, "on"));
+        ph_input_set_enabled(&a->input, controls_wanted(a) && !a->link_stopping &&
+                                            !strcmp(a->ble_status, "on"));
         ph_pointer_set_enabled(&a->pointer, a->input.enabled && a->phone_name[0]
                                && !a->presentation_mode, SDL_GetTicks64());
         ph_window_set_detail(a->win, a->controls_paused ? "Controls paused" : "Controls on");
@@ -2984,7 +3247,7 @@ static void do_window_action(app *a, ph_window_action action, bool *running)
             ph_inbox_set_save_label(a->inbox, label);
         snprintf(dir, sizeof dir, "Files from the iPhone save in %s", label);
         ph_window_set_detail(a->win, dir);
-        ph_window_redraw(a->win);
+        ph_window_refresh_folder(a->win);
         break;
     }
     case PH_WINDOW_ACTION_SAVE_DOWNLOADS:
@@ -3000,6 +3263,194 @@ static void do_window_action(app *a, ph_window_action action, bool *running)
 static void apply_window_action(app *a, bool *running)
 {
     do_window_action(a, ph_window_take_action(a->win), running);
+    uint64_t id = 0;
+    ph_workspace_action action = ph_window_take_workspace_action(a->win, &id);
+    if (action == PH_WORKSPACE_NONE)
+        return;
+    char path[1024];
+    SDL_Window *native = SDL_GetWindowFromID(ph_window_id(a->win));
+    ph_workspace *ui = ph_window_workspace(a->win);
+    const char *device = ph_workspace_device(ui), *value = ph_workspace_value(ui);
+    const char *phone_id = strncmp(device, "phone:", 6) == 0 ? device + 6 : NULL;
+    if (action == PH_WORKSPACE_ADD_PHONE) {
+        if (ph_origin_add_phone(a->origin, path, sizeof path)) {
+            ph_inbox_disconnect(a->inbox);
+            ph_screen_disconnect(a->screen);
+            sync_pairing_history(a);
+            ph_window_set_phone_name(a->win, "");
+            ph_window_set_pull_hint(a->win, path);
+            ph_window_set_code_open(a->win, true);
+            ph_window_open_pairing(a->win);
+        } else {
+            ph_window_set_detail(a->win, "Could not add an iPhone. Check available device slots and local storage.");
+        }
+    } else if (action == PH_WORKSPACE_DEVICE_SELECT) {
+        release_everything(a);
+        if (phone_id) {
+            if (ph_origin_choose_phone(a->origin, phone_id)) {
+                sync_pairing_history(a);
+                ph_window_set_code_open(a->win, false);
+                ph_origin_phone_name(a->origin, path, sizeof path);
+                ph_window_set_phone_name(a->win, path);
+                ph_window_set_detail(a->win, "Open Porthole on the selected iPhone to connect.");
+            } else {
+                ph_window_set_detail(a->win, "Could not select this iPhone.");
+            }
+        } else {
+            bool usb = !strcmp(device, "usb");
+            bool selected = ph_polish_select(a->polish, device);
+            if (usb)
+                atomic_store(&a->usb_pause_requested, false);
+            if (usb || selected) {
+                pthread_mutex_lock(&a->src_lock);
+                a->airplay_selected = !usb && atomic_load(&a->airplay_on);
+                if (a->airplay_selected && a->src.current != PH_SRC_WIFI) {
+                    a->src.current = PH_SRC_NONE;
+                    ph_decoder_reset(a->dec);
+                }
+                pthread_mutex_unlock(&a->src_lock);
+            }
+        }
+    } else if (action == PH_WORKSPACE_DEVICE_RENAME) {
+        if (phone_id) {
+            if (!ph_origin_rename_phone(a->origin, phone_id, value))
+                ph_window_set_detail(a->win, "Could not save this device name.");
+        } else if (*device) {
+            if (!ph_polish_rename(a->polish, device, value))
+                ph_window_set_detail(a->win, "Could not save this device name.");
+        }
+    } else if (action == PH_WORKSPACE_PIN_REQUIRED) {
+        ph_session_state state;
+        ph_polish_sessions(a->polish, &state);
+        if (!ph_polish_require_pin(a->polish, !state.pin_required)) {
+            ph_window_set_detail(a->win, "Could not save the Screen Mirroring access setting.");
+        } else if (!state.pin_required) {
+            ph_receiver_disconnect(a->rx);
+        }
+    } else if (action == PH_WORKSPACE_PIN_APPROVE || action == PH_WORKSPACE_PIN_REJECT) {
+        bool ok = ph_polish_resolve_request(a->polish, device,
+                                            action == PH_WORKSPACE_PIN_APPROVE ? value : NULL);
+        ph_window_set_detail(a->win, !ok ? "PIN verification failed."
+                                     : action == PH_WORKSPACE_PIN_APPROVE
+                                         ? "Device approved. Start Screen Mirroring again."
+                                         : "Access request rejected.");
+    } else if (action == PH_WORKSPACE_DEVICE_DISCONNECT || action == PH_WORKSPACE_DEVICE_FORGET) {
+        bool forget = action == PH_WORKSPACE_DEVICE_FORGET;
+        if (phone_id || !*device) {
+            char selected[65] = "";
+            ph_origin_selected_id(a->origin, selected);
+            if (phone_id && strcmp(phone_id, selected)) {
+                if (!forget || !ph_origin_remove_saved_phone(a->origin, phone_id))
+                    ph_window_set_detail(a->win, "Could not remove this device.");
+            } else if (forget && ph_origin_renew(a->origin, path, sizeof path)) {
+                ph_inbox_disconnect(a->inbox);
+                ph_screen_disconnect(a->screen);
+                sync_pairing_history(a);
+                ph_window_set_phone_name(a->win, "");
+                ph_window_set_pull_hint(a->win, path);
+                ph_window_set_code_open(a->win, true);
+                ph_window_open_pairing(a->win);
+            } else if (!forget) {
+                ph_inbox_disconnect(a->inbox);
+                ph_screen_disconnect(a->screen);
+                ph_origin_forget(a->origin);
+            } else {
+                ph_window_set_detail(a->win, "Could not revoke this pairing. Check local storage.");
+            }
+        } else if (!strcmp(device, "usb")) {
+            atomic_store(&a->usb_pause_requested, true);
+        } else {
+            ph_session_state state;
+            ph_polish_sessions(a->polish, &state);
+            for (int i = 0; i < state.count; i++)
+                if (!strcmp(state.devices[i].id, device) && state.devices[i].connected &&
+                    !state.devices[i].usb)
+                    ph_receiver_disconnect(a->rx);
+            if (forget && !ph_polish_forget(a->polish, device))
+                ph_window_set_detail(a->win, "Could not remove this device. Check local storage.");
+        }
+    } else if (action == PH_WORKSPACE_CLEAR_ALL_CLIPBOARD) {
+        bool ok = ph_history_clear_saved_clips(a->history);
+        ph_window_set_detail(a->win, ok ? "Clipboard history cleared for all pairings."
+                                       : "Some clipboard history could not be cleared.");
+        if (!ok)
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Clipboard history",
+                                     "Some clipboard history could not be cleared. Check that the configuration folder is available.", native);
+    } else if (action == PH_WORKSPACE_SEND_FILES) {
+        ph_place_pick_files(queue_selected_file, a);
+    } else if (action == PH_WORKSPACE_HIDE) {
+        if (a->tray && ph_workspace_tray(ph_window_workspace(a->win)))
+            SDL_HideWindow(native);
+        else
+            *running = false;
+    } else if (action == PH_WORKSPACE_VOLUME_UP || action == PH_WORKSPACE_VOLUME_DOWN) {
+        if (a->audio)
+            ph_audio_adjust_volume_db(a->audio, action == PH_WORKSPACE_VOLUME_UP ? 3.0f : -3.0f);
+    } else if (action == PH_WORKSPACE_DISCONNECT) {
+        ph_origin_forget(a->origin);
+    } else if (action == PH_WORKSPACE_CAPTURES) {
+        if (!ph_polish_capture_folder(path, sizeof path) || !ph_place_reveal(path, false))
+            ph_window_set_detail(a->win, "Unable to open the Captures folder.");
+    } else if (action == PH_WORKSPACE_RECORD || action == PH_WORKSPACE_CAPTURE ||
+               action == PH_WORKSPACE_FULLSCREEN) {
+        SDL_KeyboardEvent e = {.type = SDL_KEYDOWN};
+        e.keysym.scancode = action == PH_WORKSPACE_RECORD    ? SDL_SCANCODE_F9
+                            : action == PH_WORKSPACE_CAPTURE ? SDL_SCANCODE_F8
+                                                             : SDL_SCANCODE_RETURN;
+        e.keysym.mod = action == PH_WORKSPACE_FULLSCREEN ? KMOD_LALT : KMOD_NONE;
+        ph_polish_key(a->polish, &e, &a->input, native, a->picture_w, a->picture_h, a->view_frame,
+                      true);
+    } else if (action == PH_WORKSPACE_CLIP_COPY || action == PH_WORKSPACE_CLIP_SEND) {
+        for (size_t i = 0; i < ph_history_clip_count(a->history); i++) {
+            const ph_clip_entry *c = ph_history_clip(a->history, i);
+            if (c->id != id)
+                continue;
+            if (action == PH_WORKSPACE_CLIP_COPY) {
+                bool copying = ph_hostclip_apply(c->kind, c->data, c->size);
+                a->remote_clipboard_pending = false;
+                ph_window_set_detail(a->win, !copying ? "Unable to write to the PC clipboard."
+                                  : ph_hostclip_pending() ? "Preparing image for the PC clipboard…"
+                                                          : "Copied to clipboard.");
+            } else if (!a->companion_connected ||
+                     !ph_workspace_clip_send(ph_window_workspace(a->win)) ||
+                     !ph_origin_put_clip(a->origin, c->kind, c->data, c->size))
+                ph_window_set_detail(
+                    a->win,
+                    "Unable to send. Check the connection and clipboard settings on both devices.");
+            break;
+        }
+    } else if (action == PH_WORKSPACE_REVEAL && !id) {
+        if (!ph_place_save_dir(path, sizeof path) || !ph_place_reveal(path, false))
+            ph_window_set_detail(a->win,
+                                 "Receive folder unavailable. Choose a folder in Settings.");
+    } else if (action == PH_WORKSPACE_REVEAL || action == PH_WORKSPACE_LOCATE ||
+               action == PH_WORKSPACE_RETRY || action == PH_WORKSPACE_RESTART) {
+        for (size_t i = 0; i < ph_history_file_count(a->history); i++) {
+            const ph_file_entry *f = ph_history_file(a->history, i);
+            if (f->id != id)
+                continue;
+            if (action == PH_WORKSPACE_RESTART || action == PH_WORKSPACE_RETRY) {
+                if (!retry_history_file(a, f, action == PH_WORKSPACE_RESTART))
+                    ph_window_set_detail(
+                        a->win,
+                        "Unable to resume the transfer. Check the connection and source file.");
+            } else if (action == PH_WORKSPACE_REVEAL) {
+                if (!ph_place_reveal(f->path, true))
+                    ph_window_set_detail(a->win, "Unable to show this file in its folder.");
+            } else if (ph_place_pick_file(path, sizeof path)) {
+                if (ph_history_match_file(f, path)) {
+                    if (!ph_history_update_file(a->history, id, f->state, f->confirmed, path))
+                        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Locate file",
+                                                 "The new file location could not be saved.", native);
+                    ph_workspace_refresh_files(ui);
+                } else
+                    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Locate file",
+                                             "The selected file does not match this transfer.", native);
+            }
+            break;
+        }
+    }
+    ph_window_redraw(a->win);
 }
 
 /* The notification-area menu on Windows: same actions as the window's Settings. */
@@ -3031,6 +3482,13 @@ static void follow_tray(app *a, bool *running)
         break;
     case PH_WINTRAY_COPY:
         ph_window_copy_pairing(a->win);
+        break;
+    case PH_WINTRAY_RECEIVED:
+        SDL_ShowWindow(native);
+        SDL_RestoreWindow(native);
+        SDL_RaiseWindow(native);
+        release_everything(a);
+        ph_window_open_received_history(a->win);
         break;
     case PH_WINTRAY_SETTINGS:
         SDL_ShowWindow(native);
@@ -3124,6 +3582,8 @@ int ph_app_run(const ph_app_options *opt)
         bool ctrl = true, blur = true, next_relative = false;
         if (ph_config_read_line("ctrl-command", line, sizeof line) && line[0])
             ctrl = strcmp(line, "0") != 0;
+        if (ph_config_read_line("controls-paused", line, sizeof line))
+            a.controls_paused = !strcmp(line, "1");
         if (ph_config_read_line("release-on-blur", line, sizeof line) && line[0])
             blur = strcmp(line, "0") != 0;
         if (ph_config_read_line("pointer-mode", line, sizeof line))
@@ -3162,6 +3622,7 @@ int ph_app_run(const ph_app_options *opt)
         char hint[96];
         char pc[64];
         a.origin = ph_origin_start(hint, sizeof hint);
+        sync_pairing_history(&a);
         if (a.origin && hint[0])
             ph_window_set_pull_hint(a.win, hint);
         ph_origin_pc_name(pc, sizeof pc);
@@ -3170,6 +3631,7 @@ int ph_app_run(const ph_app_options *opt)
     {
         ph_screen_callbacks screen_cb = {
             .user = &a,
+            .authorize = authorize_channel,
             .allow = screen_allow,
             .connected = screen_connected,
             .video = screen_video,
@@ -3183,9 +3645,12 @@ int ph_app_run(const ph_app_options *opt)
     if (ensure_pull_dir(&a)) {
         ph_inbox_callbacks inbox_cb = {
             .user = &a,
+            .authorize = authorize_channel,
             .allow = screen_allow, /* only the phone whose photo link gave the code */
             .progress = inbox_progress,
-            .received = inbox_received,
+            .profile = inbox_profile,
+            .item = inbox_item,
+            .saved = inbox_saved,
         };
         {
             char label[64];
@@ -3205,7 +3670,7 @@ int ph_app_run(const ph_app_options *opt)
     if (!a.rx)
         goto done;
     PH_LOGI("waiting for the iPhone: connect in Porthole, then tap Share screen");
-    start_bluetooth(&a);
+    tick_control_connection(&a);
     update_title(&a);
     ph_window_show(a.win);
     if (opt->usb && pthread_create(&a.usb_thread, NULL, usb_thread_main, &a) == 0)
@@ -3215,6 +3680,7 @@ int ph_app_run(const ph_app_options *opt)
 
     while (running && !stop_requested) {
         SDL_Event e;
+        tick_control_connection(&a);
         /* Button holds and video confirmation are timed in this loop: run it more
          * often while input is on its way to the phone. */
         bool busy = a.pointer.phase != PH_POINTER_IDLE || a.pointer.count
@@ -3224,17 +3690,53 @@ int ph_app_run(const ph_app_options *opt)
                                        || (a.abs.want_valid && (a.abs.x != a.abs.want_x
                                                                 || a.abs.y != a.abs.want_y))))
                     || ph_transfer_card_animating(a.card);
-        if (SDL_WaitEventTimeout(&e, busy ? 4 : 16)) {
+        bool was_modal = ph_window_help_visible(a.win);
+        bool have_event = SDL_WaitEventTimeout(&e, busy ? 4 : 16) != 0;
+        if (!was_modal && ph_window_help_visible(a.win))
+            release_everything(&a);
+        if (have_event) {
             do {
+                bool modal = ph_window_help_visible(a.win);
                 running = handle_event(&a, &e, frame, &seq) && running;
+                apply_window_action(&a, &running);
+                if (!modal && ph_window_help_visible(a.win))
+                    release_everything(&a);
             } while (SDL_PollEvent(&e));
         }
-        ph_window_tick(a.win);
-        if (ph_window_take_new_code(a.win) && a.origin) {
-            char hint[96];
-            if (ph_origin_renew(a.origin, hint, sizeof hint) && hint[0])
-                ph_window_set_pull_hint(a.win, hint);
+        if (SDL_GetTicks64() - a.session_poll >= 250) {
+            ph_session_state state;
+            ph_polish_sessions(a.polish, &state);
+            ph_origin_sessions(a.origin, &state);
+            if (ph_workspace_set_sessions(ph_window_workspace(a.win), &state)) {
+                if (state.request_id[0] && strcmp(state.request_id, a.request_id)) {
+                    release_everything(&a);
+                    ph_workspace_open_section(ph_window_workspace(a.win), 8);
+                    ph_window_open_settings(a.win);
+                }
+                snprintf(a.request_id, sizeof a.request_id, "%s", state.request_id);
+                ph_window_redraw(a.win);
+            }
+            a.session_poll = SDL_GetTicks64();
         }
+        ph_window_tick(a.win);
+        if (SDL_GetTicks64() - a.address_poll_at >= 5000) {
+            char hint[96];
+            if (ph_origin_refresh_address(a.origin, hint, sizeof hint))
+                ph_window_set_pull_hint(a.win, hint);
+            a.address_poll_at = SDL_GetTicks64();
+        }
+        bool replace_pairing = ph_window_take_new_code(a.win);
+        if ((replace_pairing || ph_origin_code_expired(a.origin)) && a.origin) {
+            char hint[96];
+            if (ph_origin_renew(a.origin, hint, sizeof hint) && hint[0]) {
+                ph_inbox_disconnect(a.inbox);
+                ph_screen_disconnect(a.screen);
+                sync_pairing_history(&a);
+                ph_window_set_phone_name(a.win, "");
+                ph_window_set_pull_hint(a.win, hint);
+            }
+        }
+        sync_pairing_history(&a);
         apply_window_action(&a, &running);
         follow_tray(&a, &running);
 #ifdef _WIN32
@@ -3257,12 +3759,18 @@ int ph_app_run(const ph_app_options *opt)
         }
 #endif
         {
-            struct ph_audio_settings sound;
+            struct ph_audio_settings sound = {0};
             bool sound_on = !a.audio || !ph_audio_settings(a.audio, &sound) || !sound.muted;
+            a.companion_connected = ph_origin_control_policy(a.origin).connected;
+            ph_window_set_companion(a.win, a.companion_connected, ph_polish_recording(a.polish),
+                                    (int)lroundf(100 * powf(10, sound.volume_db / 20)));
             ph_window_set_live_state(a.win, a.feed_mode, a.controls_paused, sound_on);
         }
         if (ph_window_take_cancel(a.win) && a.origin)
             ph_origin_cancel_push(a.origin);
+        const char *capture_notice = ph_polish_capture_notice(a.polish);
+        if (capture_notice)
+            ph_window_set_detail(a.win, capture_notice);
         track_push(&a);
         sync_clipboard(&a);
         follow_pull(&a);
@@ -3304,10 +3812,7 @@ int ph_app_run(const ph_app_options *opt)
             update_title(&a);
         }
         ph_receiver_poll(a.rx);
-        if (a.ble_retry_at && SDL_GetTicks64() >= a.ble_retry_at) {
-            start_bluetooth(&a);
-            update_title(&a);
-        }
+        tick_control_connection(&a);
     }
     rc = 0;
 
@@ -3325,8 +3830,10 @@ done:
     ph_hostclip_shutdown();
     if (a.usb_started) {
         atomic_store(&a.usb_stop, true);
+        atomic_store(&a.usb_pause_requested, true);
         pthread_join(a.usb_thread, NULL);
     }
+    ph_receiver_stop(a.rx); /* join AirPlay callbacks before destroying their source lock */
     pthread_mutex_destroy(&a.src_lock);
     if (a.calibration_saved)
         finish_calibration(&a, false);
@@ -3340,7 +3847,6 @@ done:
     }
     release_everything(&a);
     ph_hid_link_stop(a.link);
-    ph_receiver_stop(a.rx); /* stop the network first so no more video arrives */
     if (a.polish && a.win)
         ph_polish_save_window(a.polish, SDL_GetWindowFromID(ph_window_id(a.win)));
     ph_polish_destroy(a.polish);
@@ -3350,6 +3856,7 @@ done:
         ph_decoder_stop(a.screen_dec);
     discard_pending_events(&a); /* all event producers have stopped */
     ph_window_destroy(a.win);
+    ph_history_close(a.history);
     av_frame_free(&frame);
     av_frame_free(&a.view_frame);
     av_frame_free(&a.pointer_baseline);

@@ -133,10 +133,13 @@ int main(void)
     CHECK(ph_gate_decide(gate, NULL, "n", "m") == PH_GATE_REJECT);
     CHECK(ph_gate_decide(gate, "dev-1", "Ada Lovelace", "iPhone") == PH_GATE_ADMIT);
     CHECK(ph_gate_pending_pin(gate) == NULL);
+    CHECK(ph_gate_count(gate) == 0);
+    ph_gate_set_open(gate, false);
+    CHECK(ph_gate_decide(gate, "dev-1", "Ada Lovelace", "iPhone") == PH_GATE_PIN);
+    copy_pin(pin, sizeof pin, ph_gate_pending_pin(gate));
+    CHECK(ph_gate_submit_pin(gate, "dev-1", pin));
     CHECK(ph_gate_save(gate, path));
     expect_line(path, "dev-1\tAda Lovelace\n");
-    ph_gate_set_open(gate, false);
-    CHECK(ph_gate_decide(gate, "dev-1", "other", "m") == PH_GATE_ADMIT);
 
     loaded = ph_gate_create();
     CHECK(loaded != NULL);

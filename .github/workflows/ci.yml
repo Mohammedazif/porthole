@@ -34,6 +34,56 @@ jobs:
       - name: Test
         run: ctest --preset release
 
+      - name: Build and check the Ubuntu and Linux Mint installer
+        run: |
+          cpack --config build/release/CPackConfig.cmake -B out/linux
+          sudo apt-get install -y ./out/linux/*.deb
+          /usr/bin/porthole --version
+          test -x /usr/libexec/porthole/porthole_ble.py
+          test -f /usr/share/applications/porthole.desktop
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porthole-ubuntu-24.04-mint-22-amd64
+          path: out/linux/*.deb
+          if-no-files-found: error
+
+  debian:
+    name: Linux installer (Debian 13)
+    runs-on: ubuntu-24.04
+    container: debian:13
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install checkout tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: bash scripts/install-deps-linux.sh
+
+      - name: Build and check the Debian installer
+        run: |
+          cmake --preset release -DPORTHOLE_WARNINGS_AS_ERRORS=ON -DPORTHOLE_BUILD_TESTS=OFF
+          cmake --build --preset release
+          cpack --config build/release/CPackConfig.cmake -B out/linux
+          apt-get install -y ./out/linux/*.deb
+          /usr/bin/porthole --version
+          test -x /usr/libexec/porthole/porthole_ble.py
+          test -f /usr/share/applications/porthole.desktop
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porthole-debian-13-amd64
+          path: out/linux/*.deb
+          if-no-files-found: error
+
   windows:
     name: Windows Wi-Fi mirror and Bluetooth (MSYS2 UCRT64)
     runs-on: windows-2022
@@ -67,8 +117,10 @@ jobs:
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-openssl
             mingw-w64-ucrt-x86_64-libplist
+            mingw-w64-ucrt-x86_64-libusb
             mingw-w64-ucrt-x86_64-SDL2
             mingw-w64-ucrt-x86_64-ffmpeg
 
@@ -104,6 +156,11 @@ jobs:
       - name: Package portable mirror and matching source archives
         run: bash scripts/package-windows.sh
 
+      - name: Verify the packaged Windows runtime
+        run: >-
+          python scripts/portable-windows/verify_payload.py out/porthole-windows-x64
+          --report out/porthole-windows-x64-verification.json
+
       - uses: actions/upload-artifact@v4
         with:
           name: porthole-windows-x64
@@ -114,6 +171,46 @@ jobs:
         with:
           name: porthole-windows-x64-sources
           path: out/porthole-windows-x64-sources/
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Compile the Windows setup installer
+        shell: pwsh
+        run: |
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $payload = (Resolve-Path 'out\porthole-windows-x64').Path
+          $version = (Get-Item (Join-Path $payload 'porthole.exe')).VersionInfo.ProductVersion
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid Porthole version: $version" }
+          $destination = (New-Item -ItemType Directory -Force 'out\windows-installer').FullName
+          & $compiler "/DBuildDir=$payload" "/DPortholeVersion=$version" "/O$destination" 'packaging\windows\porthole.iss'
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed: $LASTEXITCODE" }
+
+      - name: Check installation and removal
+        shell: pwsh
+        run: |
+          $installer = Get-Item 'out\windows-installer\*-Setup.exe'
+          $destination = Join-Path $env:RUNNER_TEMP 'Porthole installer test'
+          $installed = Start-Process -FilePath $installer.FullName -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/DIR="{0}"' -f $destination)
+          ) -Wait -PassThru
+          if ($installed.ExitCode -ne 0) { throw "Installation failed: $($installed.ExitCode)" }
+          $payload = Get-Content 'out\porthole-windows-x64-verification.json' -Raw | ConvertFrom-Json
+          foreach ($file in $payload.files | Where-Object { $_.path -match '\.(exe|dll)$' }) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path $destination $file.path)).Hash
+            if ($hash -ne $file.sha256) { throw "Installed file differs: $($file.path)" }
+          }
+          & (Join-Path $destination 'porthole.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw "Installed Porthole failed: $LASTEXITCODE" }
+          $uninstaller = Get-Item (Join-Path $destination 'unins*.exe')
+          $removed = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+          if ($removed.ExitCode -ne 0 -or (Test-Path (Join-Path $destination 'porthole.exe'))) {
+            throw "Uninstallation failed: $($removed.ExitCode)"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porthole-windows-x64-setup
+          path: out/windows-installer/*-Setup.exe
           compression-level: 0
           if-no-files-found: error
 
@@ -135,6 +232,7 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-openssl
       - run: cmake --preset release-no-airplay -DPORTHOLE_WARNINGS_AS_ERRORS=ON
       - run: cmake --build --preset release-no-airplay
       - run: ctest --preset release-no-airplay

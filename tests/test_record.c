@@ -115,6 +115,11 @@ static int emit_packets(AVCodecContext *ctx, AVFrame *frame, ph_record *rec, int
 
 static int record_frames(AVCodecContext *ctx, const char *path, int stepped)
 {
+    /* 32×32 baseline SPS. The generated stream above is 16×16. */
+    static const uint8_t resized_sps[] = {
+        0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xc0, 0x0a, 0xdc, 0x96, 0x84, 0x00,
+        0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0xf2, 0x3c, 0x48, 0x9e,
+    };
     AVFrame *frame = av_frame_alloc();
     ph_record *rec = NULL;
     int packets = 0, keys = 0, n, y;
@@ -147,6 +152,8 @@ static int record_frames(AVCodecContext *ctx, const char *path, int stepped)
         goto done;
     if (packets < 1 || keys < 1)
         goto done;
+    CHECK(ph_record_video(rec, resized_sps, sizeof resized_sps, 0, false) ==
+          PH_RECORD_FORMAT_CHANGED);
     rc = ph_record_close(rec);
     rec = NULL;
     if (rc != 0)

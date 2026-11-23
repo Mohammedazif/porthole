@@ -2,7 +2,8 @@
 
 The portable launcher embeds a complete ZIP as RCDATA resource 101. It prepares a
 unique directory under the current user's Windows TEMP, extracts with the system's
-PowerShell archive module, then runs Porthole with Bluetooth and guided setup enabled.
+PowerShell archive module, then opens the Porthole workspace with Bluetooth available.
+Open Set up controls from the workspace when you need pairing or pointer calibration.
 The progress window remains responsive during extraction. The child receives its own
 runtime-cache path and log handles; no system settings, services or drivers are installed.
 

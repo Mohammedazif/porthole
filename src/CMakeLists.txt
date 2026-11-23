@@ -2,11 +2,13 @@ configure_file(core/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/core/vers
 
 # Platform-independent code shared by the app and the tests.
 add_library(porthole_core STATIC
+    core/secure_link.c
     core/config.c
     core/metrics.c
     core/bonjour.c
     control/keyboard.c
     control/input.c
+    control/connection_policy.c
     control/mouse_input.c
     control/gesture.c
     control/abs_pointer.c
@@ -29,6 +31,9 @@ add_library(porthole_core STATIC
     files/picture_hash.c
     files/pull.c
     files/clip.c
+    files/digest.c
+    files/paired_phones.c
+    files/history.c
     broadcast/screen.c
     files/inbox.c
     files/places.c
@@ -53,6 +58,8 @@ if(WIN32)
     target_compile_definitions(porthole_core PUBLIC _WIN32_WINNT=0x0A00)
     target_link_libraries(porthole_core PUBLIC Threads::Threads ws2_32 iphlpapi dnsapi shell32 ole32 uuid)
 endif()
+find_package(OpenSSL 1.1.1 REQUIRED)
+target_link_libraries(porthole_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 porthole_set_warnings(porthole_core)
 
 find_package(PkgConfig QUIET)
@@ -78,7 +85,6 @@ if(PORTHOLE_WITH_AIRPLAY)
     pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
     pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
     pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale libswresample libavformat)
-    find_package(OpenSSL REQUIRED)
     find_package(Threads REQUIRED)
 
     add_library(porthole_app STATIC
@@ -87,6 +93,8 @@ if(PORTHOLE_WITH_AIRPLAY)
         audio/player.c
         hid/link.c
         ui/window.c
+        ui/control_icons.c
+        ui/workspace.c
         ui/text.c
         ui/drag_ghost.c
         ui/transfer_card.c
@@ -114,7 +122,8 @@ if(PORTHOLE_WITH_AIRPLAY)
         Threads::Threads
     )
     if(WIN32)
-        target_link_libraries(porthole_app PUBLIC ws2_32 shell32)
+        target_sources(porthole_app PRIVATE ui/accessibility.c)
+        target_link_libraries(porthole_app PUBLIC ws2_32 shell32 advapi32 oleacc oleaut32 comctl32)
     endif()
     if(UNIX AND NOT APPLE)
         find_package(X11)
@@ -145,8 +154,14 @@ if(PORTHOLE_WITH_AIRPLAY)
         include(WinRtHelper)
     else()
         target_compile_definitions(porthole PRIVATE
-        # Development default; an installed build will look next to the executable.
-        PORTHOLE_BLE_HELPER="${PROJECT_SOURCE_DIR}/helpers/ble-bluez/porthole_ble.py")
+            PORTHOLE_BLE_HELPER="${PROJECT_SOURCE_DIR}/helpers/ble-bluez/porthole_ble.py")
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            include(GNUInstallDirs)
+            file(RELATIVE_PATH _installed_helper "${CMAKE_INSTALL_FULL_BINDIR}"
+                "${CMAKE_INSTALL_FULL_LIBEXECDIR}/porthole/porthole_ble.py")
+            target_compile_definitions(porthole PRIVATE
+                PORTHOLE_INSTALLED_BLE_HELPER="${_installed_helper}")
+        endif()
     endif()
 endif()
 

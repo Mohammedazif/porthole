@@ -85,6 +85,9 @@ static unsigned int probe_stage, confirmation_count;
 static Uint64 confirmation_ack_at, probe_fresh_at, confirmation_waits[64];
 static unsigned int filtered_events;
 static unsigned int fault_stage, link_starts, stop_requests, delivered_after_cancel;
+static bool connection_lifecycle, lifecycle_bad, lifecycle_exit;
+static unsigned int lifecycle_stage;
+static Uint64 lifecycle_at;
 static unsigned int frame_delay_ms;
 static const char *fault_name;
 static ph_receiver_callbacks receiver_cb;
@@ -279,6 +282,59 @@ static void publish_frame(void)
 }
 
 void ph_window_show(ph_window *w) { (void)w; }
+void ph_window_open_pairing(ph_window *w) { (void)w; }
+void ph_window_open_received_history(ph_window *w) { (void)w; }
+void ph_window_set_history_profile(ph_window *w, const char *profile)
+{
+    (void)w;
+    (void)profile;
+}
+void ph_window_set_clipboard_available(ph_window *w, bool available)
+{
+    (void)w;
+    (void)available;
+}
+void ph_window_note_received(ph_window *w, unsigned files)
+{
+    (void)w;
+    (void)files;
+}
+
+void ph_window_refresh_folder(ph_window *w)
+{
+    (void)w;
+}
+ph_workspace *ph_window_workspace(ph_window *w)
+{
+    (void)w;
+    return NULL;
+}
+void ph_window_set_companion(ph_window *w, bool connected, bool recording, int volume)
+{
+    (void)w;
+    (void)connected;
+    (void)recording;
+    (void)volume;
+}
+void ph_window_set_incoming(ph_window *w, const char *name, uint64_t bytes, uint64_t total)
+{
+    (void)w;
+    (void)name;
+    (void)bytes;
+    (void)total;
+}
+void ph_window_set_receiving(ph_window *w, int done, int total)
+{
+    (void)w;
+    (void)done;
+    (void)total;
+}
+ph_workspace_action ph_window_take_workspace_action(ph_window *w, uint64_t *id)
+{
+    (void)w;
+    *id = 0;
+    return PH_WORKSPACE_NONE;
+}
 
 ph_window *ph_window_create(const char *title)
 {
@@ -749,6 +805,40 @@ static void tick_controls(void)
 
 void ph_window_tick(ph_window *w)
 {
+    if (connection_lifecycle) {
+        (void)w;
+        Uint64 now = SDL_GetTicks64();
+        if (!first_tick)
+            first_tick = lifecycle_at = now;
+        if (now - first_tick > 4000) {
+            lifecycle_bad = true;
+            quit();
+            return;
+        }
+        if (lifecycle_stage == 0) {
+            lifecycle_bad |= link_starts != 0;
+            if (now - lifecycle_at >= 200) {
+                receiver_cb.connected(receiver_cb.user, "Lifecycle phone", "test");
+                lifecycle_stage = 1;
+                lifecycle_at = now;
+            }
+        } else if (lifecycle_stage == 1 && now - lifecycle_at >= 200) {
+            lifecycle_bad |= link_starts != 1 || !control_ready;
+            receiver_cb.disconnected(receiver_cb.user);
+            lifecycle_stage = 2;
+            lifecycle_at = now;
+        } else if (lifecycle_stage == 2 && now - lifecycle_at >= 200) {
+            lifecycle_bad |= stop_requests != 1 || link_starts != 1 || control_ready;
+            receiver_cb.connected(receiver_cb.user, "Lifecycle phone", "test");
+            lifecycle_stage = 3;
+            lifecycle_at = now;
+        } else if (lifecycle_stage == 3 && now - lifecycle_at >= 200) {
+            lifecycle_bad |= link_starts != 2 || !control_ready;
+            lifecycle_stage = 4;
+            quit();
+        }
+        return;
+    }
     (void)w;
     if (!first_tick)
         first_tick = SDL_GetTicks64();
@@ -1026,14 +1116,22 @@ ph_receiver *ph_receiver_start(const ph_receiver_options *opt, const ph_receiver
 {
     (void)opt;
     receiver_cb = *cb;
+    if (connection_lifecycle)
+        return &receiver;
     if (filtered_mode) SDL_SetEventFilter(filter_app_events, NULL);
     if (filter_one_frame) SDL_SetEventFilter(filter_first_frame, NULL);
     cb->connected(cb->user, "Idle-frame phone", "test");
+    const uint8_t idr[] = {0, 0, 0, 1, 0x65, 0x80};
+    cb->video(cb->user, idr, sizeof idr, 0);
     publish_frame();
     /* A frame before this connect is cleared, and the next one cancels the pointer. */
     if (stream_mode && !stream_thread)
         stream_thread = SDL_CreateThread(stream_frames, "test-video-60fps", NULL);
     return &receiver;
+}
+void ph_receiver_disconnect(ph_receiver *r)
+{
+    (void)r;
 }
 void ph_receiver_poll(ph_receiver *r) { (void)r; }
 void ph_receiver_stop(ph_receiver *r) { (void)r; }
@@ -1045,6 +1143,7 @@ ph_hid_link *ph_hid_link_start(char *const argv[], ph_hid_link_status_fn on_stat
     link_status = on_status;
     link_user = user;
     fake_link.stopping = false;
+    lifecycle_exit = false;
     on_status(user, "subscribed");
     return &fake_link;
 }
@@ -1064,6 +1163,10 @@ void ph_hid_link_request_stop(ph_hid_link *l)
 bool ph_hid_link_poll(ph_hid_link *l)
 {
     pump_delivery();
+    if (connection_lifecycle && l && l->stopping && !lifecycle_exit) {
+        lifecycle_exit = true;
+        link_status(link_user, "exited");
+    }
     return !l || l->stopping;
 }
 bool ph_hid_link_keyboard(ph_hid_link *l, const ph_hid_keyboard *k)
@@ -1297,6 +1400,7 @@ static void pump_delivery(void)
 
 int main(int argc, char **argv)
 {
+    connection_lifecycle = argc == 2 && !strcmp(argv[1], "--connection-lifecycle");
     if (argc > 2)
         return 1;
     if (argc == 2) {
@@ -1355,8 +1459,10 @@ int main(int argc, char **argv)
     render_stall_mode = argc == 2 && !strcmp(argv[1], "--render-stall");
     calibration_mode = argc == 2 && (!strcmp(argv[1], "--calibration-focus")
         || !strcmp(argv[1], "--calibration-escape"));
-    if (argc == 2 && !drag_mode && !modal_mode && !paced_mode && !filtered_mode
-        && !confirmation_mode && !changing_mode && !stale_mode && !stream_mode && !controls_mode && !photo_mode) return 1;
+    if (argc == 2 && !drag_mode && !modal_mode && !paced_mode && !filtered_mode &&
+        !confirmation_mode && !changing_mode && !stale_mode && !stream_mode && !controls_mode &&
+        !photo_mode && !connection_lifecycle)
+        return 1;
     freeze_mode = argc == 2 && !strcmp(argv[1], "--freeze-drag");
     cancel_mode = argc == 2 && (!strcmp(argv[1], "--disconnect-drag")
         || !strcmp(argv[1], "--focus-drag") || !strcmp(argv[1], "--close-drag")
@@ -1393,12 +1499,21 @@ int main(int argc, char **argv)
     snprintf(app_config, sizeof app_config, "%s/porthole", config);
     rmdir(app_config);
     rmdir(config);
+    if (connection_lifecycle) {
+        bool passed = !result && !lifecycle_bad && lifecycle_stage == 4 && link_starts == 2 &&
+                      stop_requests == 1;
+        fprintf(passed ? stdout : stderr,
+                "control lifecycle: pass=%d stage=%u starts=%u stops=%u\n", passed, lifecycle_stage,
+                link_starts, stop_requests);
+        return passed ? 0 : 1;
+    }
     if (photo_mode) {
         /* Without Ctrl the phone gets every press, even one dragged out of the
          * window, and no file is asked for. With Ctrl the phone gets nothing. */
         bool is_gesture = !photo_ctrl();
-        /* A Ctrl press asks the phone at once, before any drag. */
-        bool is_file = photo_ctrl();
+        /* The original is requested once a Ctrl drag crosses the threshold.
+         * A stationary press, Escape, or loss of focus may cancel before it. */
+        bool is_file = photo_mode == PHOTO_CTRL || photo_mode == PHOTO_JITTER;
         bool passed = !result && !timed_out && !frame_failure && injected && photo_stage == 4
             && !photo_phone_buttons && photo_presses == (is_gesture ? 1U : 0U)
             && photo_releases == photo_presses && (photo_requests > 0) == is_file;
@@ -1492,13 +1607,14 @@ int main(int argc, char **argv)
     }
     if (paced_mode) {
         bool faults = cancel_mode || freeze_mode;
+        unsigned expected_stops = cancel_mode && !strcmp(fault_name, "disconnect") ? 1U : 0U;
         double start_error = hypot(pressed_x - (TARGET_X + .5), pressed_y - (TARGET_Y + .5));
         double end_error = hypot(released_x - (drag_mode ? DRAG_END_X + .5 : TARGET_X + .5),
                                  released_y - (drag_mode ? DRAG_END_Y + .5 : TARGET_Y + .5));
         bool released = releases == 1 && !held_buttons && !keyboard_held && !delivery_count;
-        bool passed = !result && !timed_out && !frame_failure && !queue_overflow
-            && link_starts == 1 && !stop_requests && presses == 1 && released && release_synced
-            && start_error <= 5;
+        bool passed = !result && !timed_out && !frame_failure && !queue_overflow &&
+                      link_starts == 1 && stop_requests == expected_stops && presses == 1 &&
+                      released && release_synced && start_error <= 5;
         if (!faults) passed &= end_error <= 5 && (!drag_mode || dragged_reports);
         if (render_stall_mode) passed &= render_stalled;
         if (faults) passed &= fault_stage == 2 && (freeze_mode || fault_queued)

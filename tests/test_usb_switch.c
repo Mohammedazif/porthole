@@ -120,6 +120,28 @@ static void test_exact_zero_timestamp(void)
     CHECK(ph_src_switch_usb_unplugged(&sw, 500) == PH_SRC_WIFI);
 }
 
+static void test_usb_and_broadcast_are_independent(void)
+{
+    ph_src_switch sw;
+    ph_src_switch_init(&sw);
+    CHECK(ph_src_switch_wifi_frame(&sw, false, 50) == PH_SRC_WIFI);
+    CHECK(!ph_src_switch_broadcast_frame(&sw, false, 51));
+    CHECK(ph_src_switch_broadcast_frame(&sw, true, 52));
+    CHECK(ph_src_switch_wifi_frame(&sw, true, 53) == PH_SRC_BROADCAST);
+    CHECK(ph_src_switch_usb_frame(&sw, true, 100) == PH_SRC_USB);
+    CHECK(!ph_src_switch_broadcast_frame(&sw, true, 102));
+    CHECK(ph_src_switch_usb_unplugged(&sw, 104) == PH_SRC_BROADCAST);
+    CHECK(!ph_src_switch_broadcast_frame(&sw, false, 105));
+    CHECK(ph_src_switch_broadcast_frame(&sw, true, 106));
+    CHECK(ph_src_switch_broadcast_lost(&sw, 107) == PH_SRC_WIFI);
+
+    ph_src_switch_init(&sw);
+    CHECK(ph_src_switch_usb_frame(&sw, true, 100) == PH_SRC_USB);
+    CHECK(!ph_src_switch_broadcast_frame(&sw, true, 101));
+    CHECK(ph_src_switch_broadcast_lost(&sw, 102) == PH_SRC_USB);
+    CHECK(ph_src_switch_usb_frame(&sw, false, 103) == PH_SRC_USB);
+}
+
 int main(void)
 {
     test_wifi_until_usb_key();
@@ -129,6 +151,7 @@ int main(void)
     test_unplug_while_not_usb();
     test_wifi_lost();
     test_exact_zero_timestamp();
+    test_usb_and_broadcast_are_independent();
     if (g_failures) {
         fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

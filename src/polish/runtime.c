@@ -13,6 +13,7 @@
 #include "audio/player.h"
 #include "control/paste.h"
 #include "core/config.h"
+#include "core/upath.h"
 #include "core/log.h"
 #include "media/record.h"
 #include "media/shot.h"
@@ -35,6 +36,11 @@ struct ph_polish {
     ph_placement place;
     ph_audio *audio;
     ph_record *record;
+    char recording_path[640];
+    const char *capture_notice;
+    const char *record_failure;
+    ph_src stream_source, record_source;
+    ph_codec stream_codec;
     ph_wda *wda;
     ph_wda_tcp *tcp;
     char allow_path[512];
@@ -44,7 +50,6 @@ struct ph_polish {
     int layout_w, layout_h;
     bool precise;
     bool pin_required;
-    bool logged_hevc_record;
     double press_x, press_y;
     bool pressed;
     ph_paste_event paste[PASTE_MAX];
@@ -165,9 +170,18 @@ ph_polish *ph_polish_create(const ph_polish_options *opt)
         return NULL;
     }
     polish->pin_required = opt && opt->pin_required;
+    if (!polish->pin_required && ph_config_read_line("require-pin", line, sizeof line))
+        polish->pin_required = !strcmp(line, "1");
     ph_gate_set_open(polish->gate, !polish->pin_required);
-    if (ph_config_path("allow-list", polish->allow_path, sizeof polish->allow_path))
+    if (ph_config_path("airplay-approved-keys", polish->allow_path, sizeof polish->allow_path))
         ph_gate_load(polish->gate, polish->allow_path);
+    for (size_t i = 0; i < ph_gate_count(polish->gate); i++) {
+        const char *id, *name;
+        if (ph_gate_at(polish->gate, i, &id, &name)) {
+            ph_devices_upsert(polish->devices, id, name, "", PH_TRANSPORT_WIFI);
+            ph_devices_disconnect(polish->devices, id);
+        }
+    }
     if (ph_config_read_line("window-placement", line, sizeof line))
         ph_placement_parse(line, &polish->place);
     if (opt && opt->autostart)
@@ -197,8 +211,7 @@ void ph_polish_destroy(ph_polish *polish)
 {
     if (!polish)
         return;
-    if (polish->record)
-        ph_record_close(polish->record);
+    ph_polish_stop_recording(polish);
     if (polish->allow_path[0])
         ph_gate_save(polish->gate, polish->allow_path);
     ph_wda_tcp_close(polish->tcp);
@@ -325,24 +338,27 @@ bool ph_polish_admit(ph_polish *polish, const char *device_id, const char *name,
 
     if (!polish)
         return true;
-    if (!device_id || !device_id[0])
-        return !polish->pin_required;
     pthread_mutex_lock(&polish->lock);
+    if (!device_id || !device_id[0] ||
+        (polish->pin_required && strncmp(device_id, "key:", 4))) {
+        bool allowed = !polish->pin_required;
+        pthread_mutex_unlock(&polish->lock);
+        return allowed;
+    }
     decision = ph_gate_decide(polish->gate, device_id, name, model);
     if (decision == PH_GATE_ADMIT) {
+        if (polish->current_id[0] && strcmp(polish->current_id, device_id))
+            ph_devices_disconnect(polish->devices, polish->current_id);
         snprintf(polish->current_id, sizeof polish->current_id, "%s", device_id ? device_id : "");
         ph_devices_upsert(polish->devices, device_id, name, model, PH_TRANSPORT_WIFI);
         polish->pin[0] = '\0';
         polish->typed[0] = '\0';
-        if (polish->allow_path[0])
-            ph_gate_save(polish->gate, polish->allow_path);
         admit = true;
     } else if (decision == PH_GATE_PIN) {
         const char *pin = ph_gate_pending_pin(polish->gate);
         snprintf(polish->pin, sizeof polish->pin, "%s", pin ? pin : "");
         polish->typed[0] = '\0';
-        PH_LOGI("allow %s with PIN %s (type the four digits in the mirror window)",
-                name && name[0] ? name : device_id, polish->pin);
+        PH_LOGI("Screen Mirroring device awaiting local approval");
     } else {
         polish->pin[0] = '\0';
         PH_LOGW("rejected connection from %s", device_id ? device_id : "?");
@@ -405,6 +421,114 @@ bool ph_polish_accepts_usb(ph_polish *polish)
     return ok;
 }
 
+void ph_polish_sessions(ph_polish *p, ph_session_state *out)
+{
+    memset(out, 0, sizeof *out);
+    if (!p)
+        return;
+    pthread_mutex_lock(&p->lock);
+    out->pin_required = p->pin_required;
+    out->count = ph_devices_count(p->devices);
+    for (int i = 0; i < out->count; i++) {
+        ph_device_view v;
+        if (!ph_devices_at(p->devices, i, &v))
+            continue;
+        ph_session_device *d = &out->devices[i];
+        snprintf(d->id, sizeof d->id, "%s", v.id);
+        snprintf(d->name, sizeof d->name, "%s", v.name);
+        for (size_t j = 0; j < ph_gate_count(p->gate); j++) {
+            const char *id, *name;
+            if (ph_gate_at(p->gate, j, &id, &name) && !strcmp(id, v.id) && *name) {
+                snprintf(d->name, sizeof d->name, "%s", name);
+                break;
+            }
+        }
+        d->active = v.active;
+        d->connected = v.connected;
+        d->usb = v.transport == PH_TRANSPORT_USB;
+    }
+    const char *id = ph_gate_pending_id(p->gate), *name = ph_gate_pending_name(p->gate);
+    if (id && *p->pin) {
+        snprintf(out->request_id, sizeof out->request_id, "%s", id);
+        snprintf(out->request_name, sizeof out->request_name, "%s", name && *name ? name : id);
+        snprintf(out->pin, sizeof out->pin, "%s", p->pin);
+    }
+    pthread_mutex_unlock(&p->lock);
+}
+bool ph_polish_select(ph_polish *p, const char *id)
+{
+    if (!p)
+        return false;
+    pthread_mutex_lock(&p->lock);
+    bool ok = ph_devices_select(p->devices, id);
+    pthread_mutex_unlock(&p->lock);
+    return ok;
+}
+bool ph_polish_rename(ph_polish *p, const char *id, const char *name)
+{
+    if (!p || !name || !*name || strlen(name) > 128 || strpbrk(name, "\r\n\t"))
+        return false;
+    pthread_mutex_lock(&p->lock);
+    bool ok;
+    if (ph_gate_rename(p->gate, id, name)) {
+        ok = ph_gate_save(p->gate, p->allow_path);
+        if (!ok)
+            ph_gate_load(p->gate, p->allow_path);
+    } else {
+        ok = ph_devices_rename(p->devices, id, name);
+    }
+    pthread_mutex_unlock(&p->lock);
+    return ok;
+}
+bool ph_polish_forget(ph_polish *p, const char *id)
+{
+    if (!p)
+        return false;
+    pthread_mutex_lock(&p->lock);
+    size_t previous = ph_gate_count(p->gate);
+    ph_gate_forget(p->gate, id);
+    bool ok = ph_gate_count(p->gate) == previous || ph_gate_save(p->gate, p->allow_path);
+    if (ok)
+        ph_devices_remove(p->devices, id);
+    else
+        ph_gate_load(p->gate, p->allow_path);
+    pthread_mutex_unlock(&p->lock);
+    return ok;
+}
+bool ph_polish_require_pin(ph_polish *p, bool required)
+{
+    if (!p || !ph_config_write_line("require-pin", required ? "1" : "0"))
+        return false;
+    pthread_mutex_lock(&p->lock);
+    p->pin_required = required;
+    p->pin[0] = p->typed[0] = '\0';
+    ph_gate_set_open(p->gate, !required);
+    pthread_mutex_unlock(&p->lock);
+    return true;
+}
+bool ph_polish_resolve_request(ph_polish *p, const char *id, const char *pin)
+{
+    if (!p)
+        return false;
+    pthread_mutex_lock(&p->lock);
+    const char *pending = ph_gate_pending_id(p->gate);
+    bool ok = pending && !strcmp(id, pending);
+    if (ok) {
+        if (!pin)
+            ph_gate_reject_pending(p->gate, id);
+        else
+            ok = ph_gate_submit_pin(p->gate, id, pin);
+        if (ok) {
+            p->pin[0] = p->typed[0] = 0;
+            if (pin && !ph_gate_save(p->gate, p->allow_path)) {
+                ph_gate_forget(p->gate, id);
+                ok = false;
+            }
+        }
+    }
+    pthread_mutex_unlock(&p->lock);
+    return ok;
+}
 bool ph_polish_copy_pin(ph_polish *polish, char *out, size_t out_len)
 {
     bool have = false;
@@ -412,7 +536,7 @@ bool ph_polish_copy_pin(ph_polish *polish, char *out, size_t out_len)
     if (!polish || !out || out_len == 0)
         return false;
     pthread_mutex_lock(&polish->lock);
-    if (polish->pin[0]) {
+    if (ph_gate_pending_id(polish->gate) && polish->pin[0]) {
         snprintf(out, out_len, "%s", polish->pin);
         have = true;
     }
@@ -420,19 +544,31 @@ bool ph_polish_copy_pin(ph_polish *polish, char *out, size_t out_len)
     return have;
 }
 
-void ph_polish_on_video(ph_polish *polish, const uint8_t *annexb, size_t len, uint64_t pts_ns)
+void ph_polish_on_video(ph_polish *polish, ph_src source, const uint8_t *annexb, size_t len,
+                        uint64_t pts_ns)
 {
     if (!polish || !annexb || len == 0)
         return;
     pthread_mutex_lock(&polish->lock);
-    if (polish->record) {
-        if (ph_codec_from_annexb(annexb, len) == PH_CODEC_H265) {
-            if (!polish->logged_hevc_record) {
-                PH_LOGW("recording stores H.264 only; this H.265 stream is shown but not saved");
-                polish->logged_hevc_record = true;
-            }
+    if (polish->stream_source != source) {
+        polish->stream_source = source;
+        polish->stream_codec = PH_CODEC_UNKNOWN;
+    }
+    ph_codec detected = polish->stream_codec == PH_CODEC_UNKNOWN
+        ? ph_codec_from_annexb(annexb, len) : ph_codec_leading_nal(annexb, len);
+    if (detected != PH_CODEC_UNKNOWN)
+        polish->stream_codec = detected;
+    if (polish->record && !polish->record_failure) {
+        if (source != polish->record_source) {
+            polish->record_failure = "Recording stopped because the screen source changed.";
+        } else if (polish->stream_codec == PH_CODEC_H265) {
+            polish->record_failure = "Recording requires an H.264 stream.";
         } else {
-            ph_record_video(polish->record, annexb, len, pts_ns, keyframe_annexb(annexb, len));
+            int rc = ph_record_video(polish->record, annexb, len, pts_ns, keyframe_annexb(annexb, len));
+            if (rc == PH_RECORD_FORMAT_CHANGED)
+                polish->record_failure = "Recording stopped because the video format changed.";
+            else if (rc < 0)
+                polish->record_failure = "Recording stopped after a write error. Check available storage.";
         }
     }
     pthread_mutex_unlock(&polish->lock);
@@ -507,7 +643,7 @@ static bool take_pin_digit(ph_polish *polish, SDL_Keycode key)
     const char *pending;
 
     pthread_mutex_lock(&polish->lock);
-    pending = polish->pin[0] ? polish->pin : NULL;
+    pending = ph_gate_pending_id(polish->gate) && polish->pin[0] ? polish->pin : NULL;
     if (!pending) {
         pthread_mutex_unlock(&polish->lock);
         return false;
@@ -535,13 +671,18 @@ static bool take_pin_digit(ph_polish *polish, SDL_Keycode key)
     }
     if (strlen(polish->typed) == 4) {
         const char *id = ph_gate_pending_id(polish->gate);
-        bool ok = id && ph_gate_submit_pin(polish->gate, id, polish->typed);
+        char candidate[129];
+        snprintf(candidate, sizeof candidate, "%s", id ? id : "");
+        bool ok = id && ph_gate_submit_pin(polish->gate, candidate, polish->typed);
         polish->typed[0] = '\0';
         if (ok) {
             polish->pin[0] = '\0';
-            if (polish->allow_path[0])
-                ph_gate_save(polish->gate, polish->allow_path);
-            PH_LOGI("device allowed; start screen mirroring again");
+            if (ph_gate_save(polish->gate, polish->allow_path)) {
+                PH_LOGI("device allowed; start screen mirroring again");
+            } else {
+                ph_gate_forget(polish->gate, candidate);
+                PH_LOGW("could not save Screen Mirroring approval");
+            }
         } else {
             PH_LOGW("PIN did not match");
         }
@@ -579,56 +720,112 @@ static void cycle_device(ph_polish *polish)
     pthread_mutex_unlock(&polish->lock);
 }
 
+bool ph_polish_capture_folder(char *path, size_t capacity)
+{
+    return ph_config_path("Captures", path, capacity) && (ph_mkdir(path) == 0 || errno == EEXIST);
+}
+
+/* Reserve the name even if two screenshots are taken in the same second. */
+static bool reserve_capture(const char *ext, char *path, size_t capacity)
+{
+    char folder[512], stamp[40];
+    time_t now = time(NULL);
+    struct tm when;
+#ifdef _WIN32
+    localtime_s(&when, &now);
+#else
+    localtime_r(&now, &when);
+#endif
+    if (!strftime(stamp, sizeof stamp, "%Y-%m-%d %H-%M-%S", &when) ||
+        !ph_polish_capture_folder(folder, sizeof folder))
+        return false;
+    for (unsigned i = 1; i <= 10000; i++) {
+        int n = snprintf(path, capacity, "%s/Porthole %s-%u.%s", folder, stamp, i, ext);
+        if (n < 0 || (size_t)n >= capacity)
+            return false;
+        FILE *file = ph_fopen(path, "wbx");
+        if (file) {
+            fclose(file);
+            return true;
+        }
+        if (errno != EEXIST)
+            return false;
+    }
+    return false;
+}
+
 static bool open_record(ph_polish *polish)
 {
-    char dir[512], path[640];
-
-    if (!ph_config_dir(dir, sizeof dir))
+    if (!reserve_capture("mp4", polish->recording_path, sizeof polish->recording_path))
         return false;
-    snprintf(path, sizeof path, "%s/porthole-%lld.mp4", dir, (long long)time(NULL));
-    {
-        ph_record *opened = ph_record_open(path);
-        if (!opened)
-            return false;
-        pthread_mutex_lock(&polish->lock);
-        polish->record = opened;
-        polish->logged_hevc_record = false;
-        pthread_mutex_unlock(&polish->lock);
+    ph_record *record = ph_record_open(polish->recording_path);
+    if (!record) {
+        ph_remove(polish->recording_path);
+        return false;
     }
+    pthread_mutex_lock(&polish->lock);
+    polish->record = record;
+    polish->record_source = polish->stream_source;
+    polish->record_failure = NULL;
+    pthread_mutex_unlock(&polish->lock);
     ph_tray_invoke(polish->tray, PH_TRAY_TOGGLE_RECORD);
-    PH_LOGI("recording %s", path);
+    polish->capture_notice = "Recording started.";
     return true;
 }
 
-static void close_record(ph_polish *polish)
+void ph_polish_stop_recording(ph_polish *polish)
 {
-    ph_record *record;
-
+    if (!polish)
+        return;
     pthread_mutex_lock(&polish->lock);
-    record = polish->record;
+    ph_record *record = polish->record;
+    const char *failure = polish->record_failure;
     polish->record = NULL;
+    polish->record_failure = NULL;
     pthread_mutex_unlock(&polish->lock);
-    ph_record_close(record);
+    if (!record)
+        return;
+    if (ph_record_close(record) == 0) {
+        polish->capture_notice = failure ? failure : "Recording saved to Captures.";
+    } else {
+        if (ph_file_size(polish->recording_path) == 0)
+            ph_remove(polish->recording_path);
+        polish->capture_notice = failure
+            ? failure : "Recording could not be finalized. Check available storage.";
+    }
     if (ph_tray_recording(polish->tray))
         ph_tray_invoke(polish->tray, PH_TRAY_TOGGLE_RECORD);
-    PH_LOGI("recording stopped");
 }
 
-static void save_shot(const struct AVFrame *frame)
+const char *ph_polish_capture_notice(ph_polish *polish)
 {
-    char dir[512], path[640];
+    if (!polish)
+        return NULL;
+    pthread_mutex_lock(&polish->lock);
+    bool failed = polish->record_failure != NULL;
+    pthread_mutex_unlock(&polish->lock);
+    if (failed)
+        ph_polish_stop_recording(polish);
+    const char *notice = polish->capture_notice;
+    polish->capture_notice = NULL;
+    return notice;
+}
 
+static void save_shot(ph_polish *polish, const struct AVFrame *frame)
+{
+    char path[640];
     if (!frame || !frame->data[0]) {
-        PH_LOGW("no picture to save yet");
+        polish->capture_notice = "Start screen sharing to take a screenshot.";
         return;
     }
-    if (!ph_config_dir(dir, sizeof dir))
-        return;
-    snprintf(path, sizeof path, "%s/porthole-%lld.png", dir, (long long)time(NULL));
-    if (ph_shot_write_png(frame, path) == 0)
-        PH_LOGI("saved %s", path);
-    else
-        PH_LOGW("couldn't save %s", path);
+    if (reserve_capture("png", path, sizeof path)) {
+        if (ph_shot_write_png(frame, path) == 0) {
+            polish->capture_notice = "Screenshot saved to Captures.";
+            return;
+        }
+        ph_remove(path);
+    }
+    polish->capture_notice = "Screenshot could not be saved. Check available storage.";
 }
 
 bool ph_polish_key(ph_polish *polish, const SDL_KeyboardEvent *event, ph_input *input,
@@ -652,14 +849,21 @@ bool ph_polish_key(ph_polish *polish, const SDL_KeyboardEvent *event, ph_input *
         return false;
     alt = (event->keysym.mod & KMOD_LALT) != 0;
     if (sc == SDL_SCANCODE_F8) {
-        save_shot(frame);
+        save_shot(polish, frame);
         return true;
     }
     if (sc == SDL_SCANCODE_F9) {
+        pthread_mutex_lock(&polish->lock);
+        bool incompatible = polish->stream_codec == PH_CODEC_H265;
+        pthread_mutex_unlock(&polish->lock);
         if (polish->record)
-            close_record(polish);
+            ph_polish_stop_recording(polish);
+        else if (!frame || !frame->data[0])
+            polish->capture_notice = "Start screen sharing to record.";
+        else if (incompatible)
+            polish->capture_notice = "Recording requires an H.264 stream.";
         else if (!open_record(polish))
-            PH_LOGW("couldn't start recording");
+            polish->capture_notice = "Recording could not start. Check available storage.";
         return true;
     }
     if (sc == SDL_SCANCODE_F6) {
@@ -751,4 +955,9 @@ bool ph_polish_click(ph_polish *polish, bool down, double nx, double ny, int vid
             (y - polish->press_y) * (y - polish->press_y) < 64.0)
         return ph_wda_tap(polish->wda, polish->press_x, polish->press_y) == 0;
     return ph_wda_drag(polish->wda, polish->press_x, polish->press_y, x, y, 0.25) == 0;
+}
+
+bool ph_polish_recording(ph_polish *polish)
+{
+    return polish && polish->record;
 }

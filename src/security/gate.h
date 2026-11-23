@@ -5,6 +5,7 @@
  * 4-digit PIN unless open-LAN is on. Five wrong PINs reject that id until reset. */
 
 #include <stdbool.h>
+#include <stddef.h>
 
 typedef struct ph_gate ph_gate;
 
@@ -30,6 +31,12 @@ bool ph_gate_submit_pin(ph_gate *gate, const char *device_id, const char *pin);
 void ph_gate_reset_failures(ph_gate *gate, const char *device_id);
 
 /* Lines are "device_id<TAB>name". Ids and names are at most 128 bytes. */
+size_t ph_gate_count(const ph_gate *gate);
+bool ph_gate_at(const ph_gate *gate, size_t index, const char **id, const char **name);
+bool ph_gate_rename(ph_gate *gate, const char *id, const char *name);
+void ph_gate_forget(ph_gate *gate, const char *id);
+void ph_gate_reject_pending(ph_gate *gate, const char *id);
+const char *ph_gate_pending_name(const ph_gate *gate);
 bool ph_gate_save(ph_gate *gate, const char *path);
 bool ph_gate_load(ph_gate *gate, const char *path);
 

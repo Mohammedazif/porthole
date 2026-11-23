@@ -396,7 +396,6 @@ static bool is_png(const void *data, size_t len)
 
 static void open_clipboard(void) {}
 static void close_clipboard(void) {}
-static void ph_hostclip_pump_platform(void) {}
 
 #endif
 
@@ -435,13 +434,155 @@ static bool already(char kind, const void *data, size_t len)
     return false;
 }
 
+#ifdef _WIN32
+typedef struct clip_image_job {
+    ph_winclip_image *image;
+    uint32_t clipboard_sequence;
+    uint64_t generation;
+    size_t len;
+    uint8_t data[];
+} clip_image_job;
+
+static SDL_mutex *clip_lock;
+static SDL_cond *clip_wake;
+static SDL_Thread *clip_worker;
+static clip_image_job *clip_request, *clip_done;
+static uint64_t clip_generation;
+static bool clip_stop, clip_pending;
+
+static void free_image_job(clip_image_job *job)
+{
+    if (job) {
+        ph_winclip_discard_image(job->image);
+        free(job);
+    }
+}
+
+static int SDLCALL process_clip_images(void *unused)
+{
+    (void)unused;
+    SDL_LockMutex(clip_lock);
+    while (!clip_stop) {
+        while (!clip_stop && !clip_request)
+            SDL_CondWait(clip_wake, clip_lock);
+        if (clip_stop)
+            break;
+        clip_image_job *job = clip_request;
+        clip_request = NULL;
+        SDL_UnlockMutex(clip_lock);
+        job->image = ph_winclip_prepare_image(job->data, job->len);
+        SDL_LockMutex(clip_lock);
+        if (!clip_stop && job->generation == clip_generation) {
+            clip_done = job;
+        } else {
+            SDL_UnlockMutex(clip_lock);
+            free_image_job(job);
+            SDL_LockMutex(clip_lock);
+        }
+    }
+    SDL_UnlockMutex(clip_lock);
+    return 0;
+}
+
+static bool queue_clip_image(const void *data, size_t len)
+{
+    if (!clip_worker || !ph_winclip_image_supported(data, len))
+        return false;
+    clip_image_job *job = calloc(1, sizeof *job + len);
+    if (!job)
+        return false;
+    job->clipboard_sequence = ph_winclip_sequence();
+    job->len = len;
+    memcpy(job->data, data, len);
+    ph_hostclip_cancel_pending();
+    SDL_LockMutex(clip_lock);
+    job->generation = clip_generation;
+    clip_request = job;
+    clip_pending = true;
+    SDL_CondSignal(clip_wake);
+    SDL_UnlockMutex(clip_lock);
+    return true;
+}
+
+static int finish_clip_image(void)
+{
+    if (!clip_worker)
+        return 0;
+    SDL_LockMutex(clip_lock);
+    clip_image_job *job = clip_done;
+    clip_done = NULL;
+    if (job)
+        clip_pending = false;
+    SDL_UnlockMutex(clip_lock);
+    if (!job)
+        return 0;
+    int result = ph_winclip_publish_image(job->image, job->clipboard_sequence);
+    if (result > 0) {
+        remember('P', job->data, job->len, &seen_kind, &seen, &seen_len);
+        remember('P', job->data, job->len, &applied_kind, &applied, &applied_len);
+    }
+    free_image_job(job);
+    return result;
+}
+#endif
+
+bool ph_hostclip_pending(void)
+{
+#ifdef _WIN32
+    /* Only the UI thread sets or clears pending. */
+    return clip_pending;
+#else
+    return false;
+#endif
+}
+
+void ph_hostclip_cancel_pending(void)
+{
+#ifdef _WIN32
+    if (!clip_worker)
+        return;
+    SDL_LockMutex(clip_lock);
+    clip_generation++;
+    clip_pending = false;
+    clip_image_job *request = clip_request, *completed = clip_done;
+    clip_request = clip_done = NULL;
+    SDL_UnlockMutex(clip_lock);
+    free_image_job(request);
+    free_image_job(completed);
+#endif
+}
+
 void ph_hostclip_init(void)
 {
     open_clipboard();
+#ifdef _WIN32
+    ph_winclip_init();
+    clip_lock = SDL_CreateMutex();
+    clip_wake = SDL_CreateCond();
+    clip_stop = false;
+    if (clip_lock && clip_wake)
+        clip_worker = SDL_CreateThread(process_clip_images, "Clipboard images", NULL);
+#endif
 }
 
 void ph_hostclip_shutdown(void)
 {
+#ifdef _WIN32
+    ph_hostclip_cancel_pending();
+    if (clip_worker) {
+        SDL_LockMutex(clip_lock);
+        clip_stop = true;
+        SDL_CondSignal(clip_wake);
+        SDL_UnlockMutex(clip_lock);
+        SDL_WaitThread(clip_worker, NULL);
+        clip_worker = NULL;
+    }
+    SDL_DestroyCond(clip_wake);
+    SDL_DestroyMutex(clip_lock);
+    clip_wake = NULL;
+    clip_lock = NULL;
+    ph_winclip_shutdown();
+#endif
     close_clipboard();
     free(seen);
     free(applied);
@@ -450,20 +591,21 @@ void ph_hostclip_shutdown(void)
     seen_kind = applied_kind = 0;
 }
 
-void ph_hostclip_pump(void)
+int ph_hostclip_pump(void)
 {
 #if defined(PH_HAVE_X11)
     if (!dpy)
-        return;
+        return 0;
     while (XPending(dpy)) {
         XEvent ev;
 
         XNextEvent(dpy, &ev);
         handle_event(&ev);
     }
-#else
-    ph_hostclip_pump_platform();
+#elif defined(_WIN32)
+    return finish_clip_image();
 #endif
+    return 0;
 }
 
 bool ph_hostclip_changed(char *kind, void **data, size_t *len)
@@ -541,59 +683,47 @@ bool ph_hostclip_changed(char *kind, void **data, size_t *len)
     return false;
 }
 
-void ph_hostclip_apply(char kind, const void *data, size_t len)
+bool ph_hostclip_apply(char kind, const void *data, size_t len)
 {
     if (!data || !len)
-        return;
+        return false;
     if (kind == 'T') {
-        char *text;
-
         if (len > PH_CLIP_TEXT_MAX || memchr(data, 0, len))
-            return;
-        text = malloc(len + 1);
+            return false;
+        char *text = malloc(len + 1);
         if (!text)
-            return;
+            return false;
         memcpy(text, data, len);
         text[len] = 0;
 #if defined(_WIN32)
-        if (ph_winclip_write_text(text, len)) {
-            remember('T', data, len, &seen_kind, &seen, &seen_len);
-            remember('T', data, len, &applied_kind, &applied, &applied_len);
-        } else {
-            PH_LOGW("clipboard text was not accepted");
-        }
+        ph_hostclip_cancel_pending();
+        bool ok = ph_winclip_write_text(text, len);
 #else
-        if (SDL_SetClipboardText(text) == 0) {
-            remember('T', data, len, &seen_kind, &seen, &seen_len);
-            remember('T', data, len, &applied_kind, &applied, &applied_len);
+        bool ok = SDL_SetClipboardText(text) == 0;
 #if defined(PH_HAVE_X11)
+        if (ok)
             we_own = false;
 #endif
-        } else {
-            PH_LOGW("clipboard text was not accepted");
-        }
 #endif
         free(text);
-        return;
-    }
-    if (kind == 'P' && is_png(data, len) && len <= PH_CLIP_IMAGE_MAX) {
+        if (!ok)
+            return false;
+    } else if (kind == 'P' && len <= PH_CLIP_IMAGE_MAX && is_png(data, len)) {
 #if defined(PH_HAVE_X11)
-        if (!dpy) {
-            PH_LOGW("clipboard image was not accepted");
-            return;
-        }
+        if (!dpy)
+            return false;
         own_png(data, len);
         if (!we_own && !incr_on)
-            return;
-        remember('P', data, len, &seen_kind, &seen, &seen_len);
-        remember('P', data, len, &applied_kind, &applied, &applied_len);
+            return false;
 #elif defined(_WIN32)
-        if (ph_winclip_write_png(data, len)) {
-            remember('P', data, len, &seen_kind, &seen, &seen_len);
-            remember('P', data, len, &applied_kind, &applied, &applied_len);
-        }
+        return queue_clip_image(data, len);
 #else
-        PH_LOGW("clipboard image was not accepted");
+        return false;
 #endif
+    } else {
+        return false;
     }
+    remember(kind, data, len, &seen_kind, &seen, &seen_len);
+    remember(kind, data, len, &applied_kind, &applied, &applied_len);
+    return true;
 }

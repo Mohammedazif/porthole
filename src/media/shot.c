@@ -9,6 +9,7 @@
 #include <libswscale/swscale.h>
 
 #include "core/log.h"
+#include "core/upath.h"
 
 static void log_av(const char *what, int err)
 {
@@ -79,7 +80,7 @@ int ph_shot_write_png(const struct AVFrame *frame, const char *path)
         log_av("PNG encoder produced no packet", err);
         goto done;
     }
-    out = fopen(path, "wb");
+    out = ph_fopen(path, "wb");
     if (!out) {
         PH_LOGW("couldn't create PNG %s", path);
         goto done;

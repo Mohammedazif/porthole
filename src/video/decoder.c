@@ -1,6 +1,5 @@
 #include "video/decoder.h"
 
-#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -16,6 +15,10 @@
 #include "core/metrics.h"
 #include "video/codecs.h"
 
+#define MAX_PACKET_BYTES (8u * 1024u * 1024u)
+#define MAX_QUEUE_AGE_MS 350
+#define MAX_CODED_PIXELS (4096 * 4096)
+
 typedef struct packet {
     struct packet *next;
     size_t len;
@@ -30,6 +33,7 @@ struct ph_decoder {
     pthread_cond_t wake;
     packet *head, *tail;
     int queued;
+    size_t queued_bytes;
     bool reset;
     bool quit;
     uint64_t generation;
@@ -63,6 +67,7 @@ static void free_queue(ph_decoder *d)
     }
     d->tail = NULL;
     d->queued = 0;
+    d->queued_bytes = 0;
 }
 
 static void reset_locked(ph_decoder *d)
@@ -86,6 +91,7 @@ static AVCodecContext *open_codec(enum AVCodecID codec_id)
     if (!ctx)
         return NULL;
     ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    ctx->max_pixels = MAX_CODED_PIXELS;
     ctx->thread_type = FF_THREAD_SLICE; /* frame threading would add a frame of latency each */
     ctx->thread_count = 4; /* one picture; do not spawn one thread per core */
     /* PTS carries local packet provenance only. Rendering remains immediate;
@@ -150,8 +156,9 @@ static AVFrame *to_yuv420p(const AVFrame *src, struct SwsContext **sws, int max_
     dst->colorspace = src->colorspace;
     if (av_frame_get_buffer(dst, 0) < 0)
         goto fail;
-    sws_scale(*sws, (const uint8_t *const *)src->data, src->linesize, 0, src->height, dst->data,
-              dst->linesize);
+    if (sws_scale(*sws, (const uint8_t *const *)src->data, src->linesize, 0, src->height, dst->data,
+                  dst->linesize) != dh)
+        goto fail;
     return dst;
 fail:
     av_frame_free(&dst);
@@ -195,10 +202,16 @@ static void *decode_thread(void *arg)
             continue;
         }
         p = d->head;
+        if (ph_metrics_now_ms() - p->received_ms > MAX_QUEUE_AGE_MS) {
+            reset_locked(d);
+            pthread_mutex_unlock(&d->lock);
+            continue;
+        }
         d->head = p->next;
         if (!d->head)
             d->tail = NULL;
         d->queued--;
+        d->queued_bytes -= p->len;
         uint64_t generation = p->generation;
         pthread_mutex_unlock(&d->lock);
 
@@ -328,7 +341,7 @@ void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len)
     uint8_t *copy;
     packet *p;
 
-    if (!d || !data || !len || len > (size_t)INT_MAX)
+    if (!d || !data || !len || len > MAX_PACKET_BYTES)
         return;
     copy = av_malloc(len + AV_INPUT_BUFFER_PADDING_SIZE);
     p = malloc(sizeof *p);
@@ -342,11 +355,12 @@ void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len)
     p->next = NULL;
     p->len = len;
     p->data = copy;
-    p->received_ms = ph_metrics_now_ms();
-
     pthread_mutex_lock(&d->lock);
+    p->received_ms = ph_metrics_now_ms();
     d->stats.packets_received++;
-    if (d->queued >= PH_DECODER_MAX_QUEUED) {
+    if (d->queued >= PH_DECODER_MAX_QUEUED ||
+        len > PH_DECODER_MAX_QUEUED_BYTES - d->queued_bytes ||
+        (d->head && p->received_ms - d->head->received_ms > MAX_QUEUE_AGE_MS)) {
         /* Can't drop single packets without corrupting the picture; start over instead. The
          * phone sends SPS/PPS with every keyframe, so decoding resumes at the next one. */
         PH_LOGW("video decoder fell behind; skipping to the next keyframe");
@@ -359,6 +373,7 @@ void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len)
         d->head = p;
     d->tail = p;
     d->queued++;
+    d->queued_bytes += len;
     pthread_cond_signal(&d->wake);
     pthread_mutex_unlock(&d->lock);
 }
@@ -407,6 +422,7 @@ void ph_decoder_get_stats(ph_decoder *d, ph_decoder_stats *stats)
     pthread_mutex_lock(&d->lock);
     *stats = d->stats;
     stats->queued_packets = (unsigned int)d->queued;
+    stats->queued_bytes = d->queued_bytes;
     pthread_mutex_unlock(&d->lock);
 }
 

@@ -6,6 +6,7 @@
 #include "video/codecs.h"
 
 #define PH_DEVICES_MAX 8
+#define PH_SESSION_DEVICE_MAX 16
 
 typedef enum ph_transport {
     PH_TRANSPORT_WIFI = 0,
@@ -24,6 +25,17 @@ typedef struct ph_device_view {
     bool active;
 } ph_device_view;
 
+typedef struct ph_session_device {
+    char id[129], name[129];
+    bool connected, active, usb, companion;
+} ph_session_device;
+typedef struct ph_session_state {
+    ph_session_device devices[PH_SESSION_DEVICE_MAX];
+    int count;
+    bool pin_required;
+    char request_id[129], request_name[129], pin[8];
+} ph_session_state;
+void ph_devices_remove(ph_devices *devices, const char *id);
 ph_devices *ph_devices_create(void);
 void ph_devices_destroy(ph_devices *devices);
 
@@ -33,6 +45,7 @@ int ph_devices_upsert(ph_devices *devices, const char *id, const char *name, con
                       ph_transport transport);
 
 void ph_devices_disconnect(ph_devices *devices, const char *id);
+bool ph_devices_rename(ph_devices *devices, const char *id, const char *name);
 
 /* The connected device becomes the only active one. */
 bool ph_devices_select(ph_devices *devices, const char *id);

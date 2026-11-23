@@ -37,5 +37,35 @@ if(PORTHOLE_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND PORTHOLE_WITH_AIRPLAY)
+    include(GNUInstallDirs)
+    install(TARGETS porthole RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(PROGRAMS helpers/ble-bluez/porthole_ble.py
+        DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/porthole")
+    install(FILES packaging/linux/porthole.desktop
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/applications")
+    foreach(size IN ITEMS 32 48 64 128 256)
+        install(FILES "branding/porthole/app-icons/dark/porthole-app-${size}.png"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/${size}x${size}/apps"
+            RENAME porthole.png)
+    endforeach()
+    install(FILES LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/porthole" RENAME copyright)
+    install(FILES third_party/UxPlay/LICENSE
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/porthole" RENAME UxPlay-LICENSE)
+    install(FILES src/ui/fonts/LICENSE
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/porthole" RENAME Geist-LICENSE)
+
+    set(CPACK_GENERATOR DEB)
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+    set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/Mohammedazif/porthole")
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Porthole maintainers")
+    set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
+    set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS
+        "avahi-daemon, bluez, python3, python3-dbus, python3-gi, xdg-utils")
+    include(CPack)
+endif()
+
 message(STATUS "Porthole ${PROJECT_VERSION} (${CMAKE_BUILD_TYPE}): "
                "airplay=${PORTHOLE_WITH_AIRPLAY} tests=${PORTHOLE_BUILD_TESTS}")

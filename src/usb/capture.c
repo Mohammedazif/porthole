@@ -7,6 +7,7 @@
 #include "usb/capture.h"
 
 #include "core/log.h"
+#include "core/upath.h"
 #include "usb/packet.h"
 #include "usb/winusb.h"
 
@@ -197,18 +198,24 @@ typedef struct ph_usb_dev {
     int iface;
     uint8_t in_ep;
     uint8_t out_ep;
+    const atomic_bool *stop;
 } ph_usb_dev;
 
-static void usb_pause(void)
+static bool stopped(const atomic_bool *stop)
 {
+    return stop && atomic_load(stop);
+}
+
+static void usb_pause(const atomic_bool *stop)
+{
+    for (int part = 0; part < 4 && !stopped(stop); part++) {
 #ifdef _WIN32
-    Sleep(200);
+        Sleep(50);
 #else
-    struct timespec ts;
-    ts.tv_sec = 0;
-    ts.tv_nsec = 200000000L;
-    nanosleep(&ts, NULL);
+        struct timespec ts = {.tv_nsec = 50000000L};
+        nanosleep(&ts, NULL);
 #endif
+    }
 }
 
 static void usb_dev_release(void *user)
@@ -231,7 +238,7 @@ static int usb_dev_read(void *user, uint8_t *dst, int cap, int timeout_ms)
     int transferred = 0;
     unsigned int timeout;
     int rc;
-    if (!dev || !dev->handle || !dst || cap < 0)
+    if (!dev || !dev->handle || !dst || cap < 0 || stopped(dev->stop))
         return -1;
     if (cap == 0)
         return 0;
@@ -253,6 +260,8 @@ static int usb_dev_write(void *user, const uint8_t *src, int len, int timeout_ms
         return -1;
     timeout = timeout_ms > 0 ? (unsigned int)timeout_ms : 0;
     while (sent < len) {
+        if (stopped(dev->stop))
+            return -1;
         int transferred = 0;
         int rc = libusb_bulk_transfer(dev->handle, dev->out_ep, (uint8_t *)(src + sent), len - sent,
                                       &transferred, timeout);
@@ -371,7 +380,7 @@ static ph_usb_dev *claim_apple(libusb_context *ctx, libusb_device *device)
     return dev;
 }
 
-static ph_usb_dev *try_claim(libusb_context *ctx)
+static ph_usb_dev *try_claim(libusb_context *ctx, const atomic_bool *stop)
 {
     libusb_device **list = NULL;
     ssize_t n;
@@ -381,13 +390,13 @@ static ph_usb_dev *try_claim(libusb_context *ctx)
     n = libusb_get_device_list(ctx, &list);
     if (n < 0)
         return NULL;
-    for (i = 0; i < n && !found; i++)
+    for (i = 0; i < n && !found && !stopped(stop); i++)
         found = claim_apple(ctx, list[i]);
     libusb_free_device_list(list, 1);
     return found;
 }
 
-static void send_enable(libusb_context *ctx)
+static void send_enable(libusb_context *ctx, const atomic_bool *stop)
 {
     libusb_device **list = NULL;
     ssize_t n;
@@ -396,7 +405,7 @@ static void send_enable(libusb_context *ctx)
     n = libusb_get_device_list(ctx, &list);
     if (n < 0)
         return;
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n && !stopped(stop); i++) {
         struct libusb_device_descriptor desc;
         libusb_device_handle *handle = NULL;
         if (libusb_get_device_descriptor(list[i], &desc) != 0)
@@ -412,7 +421,7 @@ static void send_enable(libusb_context *ctx)
     libusb_free_device_list(list, 1);
 }
 
-ph_usb_capture *ph_usb_libusb_open(void)
+ph_usb_capture *ph_usb_libusb_open(const atomic_bool *stop)
 {
     libusb_context *ctx = NULL;
     ph_usb_dev *dev;
@@ -420,21 +429,27 @@ ph_usb_capture *ph_usb_libusb_open(void)
     ph_usb_capture *cap;
     int attempt;
 
-    if (libusb_init(&ctx) != 0)
+    if (stopped(stop) || libusb_init(&ctx) != 0)
         return NULL;
-    dev = try_claim(ctx);
-    if (!dev) {
-        send_enable(ctx);
-        for (attempt = 0; attempt < 15 && !dev; attempt++) {
-            usb_pause();
-            dev = try_claim(ctx);
+    dev = try_claim(ctx, stop);
+    if (!dev && !stopped(stop)) {
+        send_enable(ctx, stop);
+        for (attempt = 0; attempt < 15 && !dev && !stopped(stop); attempt++) {
+            usb_pause(stop);
+            if (!stopped(stop))
+                dev = try_claim(ctx, stop);
         }
     }
     if (!dev) {
         libusb_exit(ctx);
         return NULL;
     }
+    if (stopped(stop)) {
+        usb_dev_release(dev);
+        return NULL;
+    }
 
+    dev->stop = stop;
     io.read = usb_dev_read;
     io.write = usb_dev_write;
     io.user = dev;
@@ -512,7 +527,7 @@ int ph_usb_write_winusb_inf(const char *path)
             FILE *file;
             if (ph_usb_winusb_inf(text, sizeof text, desc.idVendor, desc.idProduct, selected) != 0)
                 continue;
-            file = fopen(path, "w");
+            file = ph_fopen(path, "w");
             if (!file)
                 continue;
             if (fputs(text, file) < 0) {

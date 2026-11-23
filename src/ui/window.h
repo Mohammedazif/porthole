@@ -9,6 +9,7 @@
 #include <SDL.h>
 
 #include "video/crop.h"
+#include "ui/workspace.h"
 #include "control/setup.h"
 #include "core/metrics.h"
 
@@ -23,6 +24,12 @@ ph_window *ph_window_create(const char *title);
 
 /* Creation stays hidden until the connect screen has its address and name. */
 void ph_window_show(ph_window *w);
+void ph_window_refresh_folder(ph_window *w);
+ph_workspace *ph_window_workspace(ph_window *w);
+void ph_window_set_companion(ph_window *w, bool connected, bool recording, int volume);
+void ph_window_set_incoming(ph_window *window, const char *name, uint64_t bytes, uint64_t total);
+void ph_window_set_receiving(ph_window *w, int done, int total);
+ph_workspace_action ph_window_take_workspace_action(ph_window *w, uint64_t *item);
 
 void ph_window_set_title(ph_window *w, const char *title);
 
@@ -99,6 +106,11 @@ bool ph_window_take_cancel(ph_window *w);
 
 /* Whether both the companion link and the screen-sharing listener started. */
 void ph_window_set_share_available(ph_window *w, bool available);
+void ph_window_set_clipboard_available(ph_window *w, bool available);
+void ph_window_note_received(ph_window *w, unsigned files);
+void ph_window_open_received_history(ph_window *w);
+void ph_window_open_pairing(ph_window *w);
+void ph_window_set_history_profile(ph_window *w, const char *profile);
 
 /* F1 opens/closes local help. Picture coordinates are rejected while it is open. */
 void ph_window_toggle_help(ph_window *w);

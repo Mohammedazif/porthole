@@ -183,24 +183,6 @@ static void cb_report_client_request(void *cls, char *deviceid, char *model, cha
         r->cb.connected(r->cb.user, name ? name : "", model ? model : "");
 }
 
-static void cb_display_pin(void *cls, char *pin)
-{
-    (void)cls;
-    PH_LOGI("AirPlay PIN: %s", pin);
-}
-
-static void cb_register_client(void *cls, const char *device_id, const char *pk,
-                               const char *name)
-{
-    (void)cls, (void)device_id, (void)pk, (void)name;
-}
-
-static bool cb_check_register(void *cls, const char *pk)
-{
-    (void)cls, (void)pk;
-    return true;
-}
-
 static const char *cb_passwd(void *cls, int *len)
 {
     (void)cls;
@@ -242,6 +224,8 @@ static void cb_log(void *cls, int level, const char *msg)
     ph_log_level lvl;
 
     (void)cls;
+    if (strstr(msg, "CLIENT MUST NOW ENTER PIN"))
+        return;
     snprintf(line, sizeof line, "%s", msg);
     n = strlen(line);
     while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
@@ -323,9 +307,6 @@ ph_receiver *ph_receiver_start(const ph_receiver_options *opt, const ph_receiver
     cbs.audio_get_format = cb_audio_get_format;
     cbs.video_report_size = cb_video_report_size;
     cbs.report_client_request = cb_report_client_request;
-    cbs.display_pin = cb_display_pin;
-    cbs.register_client = cb_register_client;
-    cbs.check_register = cb_check_register;
     cbs.passwd = cb_passwd;
     cbs.export_dacp = cb_export_dacp;
     cbs.on_video_play = cb_on_video_play;
@@ -410,4 +391,10 @@ void ph_receiver_stop(ph_receiver *r)
     if (r->dnssd)
         dnssd_destroy(r->dnssd);
     free(r);
+}
+
+void ph_receiver_disconnect(ph_receiver *r)
+{
+    if (r)
+        atomic_store(&r->reset_requested, true);
 }

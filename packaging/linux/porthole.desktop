@@ -1,6 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=Porthole
+Comment=Share and control your iPhone screen from your PC
 Exec=porthole
+Icon=porthole
 Terminal=false
 Categories=Utility;AudioVideo;

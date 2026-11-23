@@ -557,6 +557,12 @@ void ph_audio_set_muted(ph_audio *a, bool muted)
     if (!a)
         return;
     SDL_LockMutex(a->lock);
+    if (muted && !a->muted) {
+        if (a->device)
+            SDL_ClearQueuedAudio(a->device);
+        free_holds(a);
+        a->playing = false;
+    }
     a->muted = muted;
     SDL_UnlockMutex(a->lock);
 }

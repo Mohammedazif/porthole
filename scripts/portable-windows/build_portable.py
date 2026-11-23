@@ -42,10 +42,11 @@ def main():
                     package.write(path, relative)
         archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
         resource = work / "payload.rc"
-        archive_name = archive.as_posix()
-        if '"' in archive_name or "\n" in archive_name or "\r" in archive_name:
-            raise ValueError("Resource path cannot contain quotes or newlines")
-        resource.write_text(f'101 RCDATA "{archive_name}"\n', encoding="utf-8")
+        icon = source.parents[1] / "branding/porthole/app-icons/dark/porthole.ico"
+        archive_name, icon_name = archive.as_posix(), icon.as_posix()
+        if any(character in name for name in (archive_name, icon_name) for character in '"\n\r'):
+            raise ValueError("Resource paths cannot contain quotes or newlines")
+        resource.write_text(f'1 ICON "{icon_name}"\n101 RCDATA "{archive_name}"\n', encoding="utf-8")
         object_file = work / "payload.o"
         subprocess.run([args.windres, "-i", str(resource), "-o", str(object_file), "-O", "coff"], check=True)
         binary = work / "Porthole-Portable.exe"

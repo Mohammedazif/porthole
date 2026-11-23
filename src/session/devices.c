@@ -147,6 +147,19 @@ void ph_devices_disconnect(ph_devices *devices, const char *id)
     }
 }
 
+bool ph_devices_rename(ph_devices *devices, const char *id, const char *name)
+{
+    int index = find_id(devices, id);
+    if (index < 0 || !name || !*name)
+        return false;
+    char *copy = ph_dup(name);
+    if (!copy)
+        return false;
+    free(devices->items[index].name);
+    devices->items[index].name = copy;
+    return true;
+}
+
 bool ph_devices_select(ph_devices *devices, const char *id)
 {
     int index, i;
@@ -202,4 +215,16 @@ bool ph_devices_at(const ph_devices *devices, int index, ph_device_view *out)
     out->connected = slot->connected;
     out->active = slot->active;
     return true;
+}
+
+void ph_devices_remove(ph_devices *devices, const char *id)
+{
+    int i = find_id(devices, id);
+    if (i < 0)
+        return;
+    ph_devices_disconnect(devices, id);
+    free(devices->items[i].id);
+    free(devices->items[i].name);
+    free(devices->items[i].model);
+    devices->items[i] = devices->items[--devices->count];
 }

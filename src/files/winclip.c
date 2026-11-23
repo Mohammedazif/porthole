@@ -6,6 +6,7 @@
 #ifdef _WIN32
 
 #include "core/log.h"
+#include "files/clip.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -15,11 +16,51 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/intreadwrite.h>
 #include <libswscale/swscale.h>
 
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
+
+#define MAX_IMAGE_PIXELS (4096u * 4096u)
+
+static HWND owner;
+
+void ph_winclip_init(void)
+{
+    owner = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL,
+                            GetModuleHandleW(NULL), NULL);
+}
+
+void ph_winclip_shutdown(void)
+{
+    if (owner)
+        DestroyWindow(owner);
+    owner = NULL;
+}
+
+uint32_t ph_winclip_sequence(void)
+{
+    return GetClipboardSequenceNumber();
+}
+
+static bool image_size_ok(uint32_t width, uint32_t height)
+{
+    return width && height && width <= 8192 && height <= 8192 &&
+           (uint64_t)width * height <= MAX_IMAGE_PIXELS;
+}
+
+bool ph_winclip_image_supported(const void *data, size_t len)
+{
+    static const uint8_t png_ihdr[] = {137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13,
+                                       'I', 'H', 'D', 'R'};
+    const uint8_t *bytes = data;
+    return bytes && len >= 33 && len <= PH_CLIP_IMAGE_MAX &&
+           memcmp(bytes, png_ihdr, sizeof png_ihdr) == 0 &&
+           image_size_ok(AV_RB32(bytes + 16), AV_RB32(bytes + 20));
+}
 
 static UINT png_format(void)
 {
@@ -29,11 +70,11 @@ static UINT png_format(void)
     return format;
 }
 
-static bool open_board(void)
+static bool open_board(HWND clipboard_owner)
 {
     /* Another app may hold the clipboard for a moment. */
     for (int i = 0; i < 5; i++) {
-        if (OpenClipboard(NULL))
+        if (OpenClipboard(clipboard_owner))
             return true;
         Sleep(10);
     }
@@ -91,11 +132,15 @@ static uint8_t *decode_png(const void *png, size_t len, int *w, int *h)
     struct SwsContext *sws = NULL;
     uint8_t *bgra = NULL;
 
-    if (!ctx || !frame || !pkt || avcodec_open2(ctx, codec, NULL) < 0
+    if (!ctx || !frame || !pkt)
+        goto done;
+    ctx->max_pixels = MAX_IMAGE_PIXELS;
+    if (avcodec_open2(ctx, codec, NULL) < 0
         || av_new_packet(pkt, (int)len) < 0)
         goto done;
     memcpy(pkt->data, png, len);
-    if (avcodec_send_packet(ctx, pkt) < 0 || avcodec_receive_frame(ctx, frame) < 0)
+    if (avcodec_send_packet(ctx, pkt) < 0 || avcodec_receive_frame(ctx, frame) < 0 ||
+        !image_size_ok((uint32_t)frame->width, (uint32_t)frame->height))
         goto done;
     sws = sws_getContext(frame->width, frame->height, (enum AVPixelFormat)frame->format,
                          frame->width, frame->height, AV_PIX_FMT_BGRA, SWS_POINT, NULL, NULL, NULL);
@@ -103,8 +148,12 @@ static uint8_t *decode_png(const void *png, size_t len, int *w, int *h)
     if (bgra) {
         uint8_t *dst[4] = {bgra, NULL, NULL, NULL};
         int dst_stride[4] = {frame->width * 4, 0, 0, 0};
-        sws_scale(sws, (const uint8_t *const *)frame->data, frame->linesize, 0, frame->height, dst,
-                  dst_stride);
+        if (sws_scale(sws, (const uint8_t *const *)frame->data, frame->linesize, 0,
+                      frame->height, dst, dst_stride) != frame->height) {
+            free(bgra);
+            bgra = NULL;
+            goto done;
+        }
         *w = frame->width;
         *h = frame->height;
     }
@@ -120,20 +169,24 @@ done:
 static bool dib_to_png(const BITMAPINFOHEADER *bi, size_t size, uint8_t **out, size_t *len)
 {
     const uint8_t *bits;
-    int w = bi->biWidth, h = bi->biHeight < 0 ? -bi->biHeight : bi->biHeight;
+    int w = bi->biWidth;
+    int64_t height = bi->biHeight;
     int bpp = bi->biBitCount, stride;
     size_t header = bi->biSize;
     uint8_t *rgba;
     bool ok;
 
-    if (w <= 0 || h <= 0 || w > 16384 || h > 16384 || (bpp != 24 && bpp != 32))
+    if (height < 0)
+        height = -height;
+    if (w <= 0 || !image_size_ok((uint32_t)w, (uint32_t)height) || (bpp != 24 && bpp != 32))
         return false;
+    int h = (int)height;
     if (bi->biCompression == BI_BITFIELDS && bi->biSize == sizeof(BITMAPINFOHEADER))
         header += 12; /* three colour masks follow the header */
     else if (bi->biCompression != BI_RGB && bi->biCompression != BI_BITFIELDS)
         return false;
     stride = ((w * bpp + 31) / 32) * 4;
-    if (header + (size_t)stride * (size_t)h > size)
+    if (header < sizeof *bi || header > size || (size_t)stride * (size_t)h > size - header)
         return false;
     bits = (const uint8_t *)bi + header;
     rgba = malloc((size_t)w * (size_t)h * 4);
@@ -178,12 +231,13 @@ bool ph_winclip_read_png(uint8_t **out, size_t *len, size_t max)
     last_seq = seq;
     if (!IsClipboardFormatAvailable(png_format()) && !IsClipboardFormatAvailable(CF_DIB))
         return false;
-    if (!open_board())
+    if (!open_board(NULL))
         return false;
     if ((data = GetClipboardData(png_format()))) {
         size_t size = GlobalSize(data);
         const void *bytes = GlobalLock(data);
-        if (bytes && size > 8 && size <= max && (*out = malloc(size))) {
+        if (bytes && size <= max && ph_winclip_image_supported(bytes, size) &&
+            (*out = malloc(size))) {
             memcpy(*out, bytes, size);
             *len = size;
             ok = true;
@@ -221,17 +275,30 @@ static HGLOBAL global_copy(const void *bytes, size_t len)
     return g;
 }
 
-bool ph_winclip_write_png(const void *png, size_t len)
+struct ph_winclip_image {
+    HGLOBAL png, dib;
+};
+
+ph_winclip_image *ph_winclip_prepare_image(const void *png, size_t len)
 {
     int w = 0, h = 0;
+    if (!ph_winclip_image_supported(png, len))
+        return NULL;
     uint8_t *bgra = decode_png(png, len, &w, &h);
-    HGLOBAL png_mem = global_copy(png, len), dib_mem = NULL;
-    bool ok = false;
+    if (!bgra)
+        return NULL;
+    ph_winclip_image *image = calloc(1, sizeof *image);
+    if (!image) {
+        free(bgra);
+        return NULL;
+    }
 
-    if (bgra) {
+    image->png = global_copy(png, len);
+    {
         BITMAPINFOHEADER bi = {0};
         size_t pixels = (size_t)w * (size_t)h * 4;
-        uint8_t *dib = malloc(sizeof bi + pixels);
+        image->dib = GlobalAlloc(GMEM_MOVEABLE, sizeof bi + pixels);
+        uint8_t *dib = image->dib ? GlobalLock(image->dib) : NULL;
         bi.biSize = sizeof bi;
         bi.biWidth = w;
         bi.biHeight = -h; /* top-down rows */
@@ -242,33 +309,54 @@ bool ph_winclip_write_png(const void *png, size_t len)
         if (dib) {
             memcpy(dib, &bi, sizeof bi);
             memcpy(dib + sizeof bi, bgra, pixels);
-            dib_mem = global_copy(dib, sizeof bi + pixels);
-            free(dib);
+            GlobalUnlock(image->dib);
+        } else if (image->dib) {
+            GlobalFree(image->dib);
+            image->dib = NULL;
         }
-        free(bgra);
     }
-    if ((png_mem || dib_mem) && open_board()) {
-        EmptyClipboard();
-        if (png_mem && SetClipboardData(png_format(), png_mem)) {
-            png_mem = NULL; /* the clipboard owns it now */
-            ok = true;
-        }
-        if (dib_mem && SetClipboardData(CF_DIB, dib_mem)) {
-            dib_mem = NULL;
-            ok = true;
-        }
-        CloseClipboard();
+    free(bgra);
+    if (!image->png && !image->dib) {
+        free(image);
+        return NULL;
     }
-    if (png_mem)
-        GlobalFree(png_mem);
-    if (dib_mem)
-        GlobalFree(dib_mem);
-    if (!ok)
-        PH_LOGW("clipboard image was not accepted");
-    return ok;
+    return image;
 }
 
-/* OpenClipboard(NULL): a window handle can fail while the caller still reports success. */
+int ph_winclip_publish_image(ph_winclip_image *image, uint32_t expected)
+{
+    int result = -1;
+    if (GetClipboardSequenceNumber() != expected)
+        return 0;
+    if (!image || !owner || !open_board(owner))
+        return result;
+    if (GetClipboardSequenceNumber() != expected) {
+        result = 0;
+    } else if (EmptyClipboard()) {
+        if (image->png && SetClipboardData(png_format(), image->png)) {
+            image->png = NULL;
+            result = 1;
+        }
+        if (image->dib && SetClipboardData(CF_DIB, image->dib)) {
+            image->dib = NULL;
+            result = 1;
+        }
+    }
+    CloseClipboard();
+    return result;
+}
+
+void ph_winclip_discard_image(ph_winclip_image *image)
+{
+    if (!image)
+        return;
+    if (image->png)
+        GlobalFree(image->png);
+    if (image->dib)
+        GlobalFree(image->dib);
+    free(image);
+}
+
 bool ph_winclip_read_text(char **out, size_t *len, size_t max)
 {
     HANDLE data;
@@ -281,11 +369,15 @@ bool ph_winclip_read_text(char **out, size_t *len, size_t max)
         *out = NULL;
     if (len)
         *len = 0;
-    if (!out || !len || !max || !open_board())
+    if (!out || !len || !max || !open_board(NULL))
         return false;
     data = GetClipboardData(CF_UNICODETEXT);
     wide = data ? GlobalLock(data) : NULL;
-    if (!wide || !wide[0]) {
+    size_t size = data ? GlobalSize(data) / sizeof *wide : 0;
+    if (size > max)
+        size = max + 1;
+    const wchar_t *end = wide ? wmemchr(wide, L'\0', size) : NULL;
+    if (!end || end == wide) {
         if (wide)
             GlobalUnlock(data);
         CloseClipboard();
@@ -369,9 +461,8 @@ bool ph_winclip_write_text(const char *utf8, size_t len)
         wide = calloc((size_t)wchars, sizeof *wide);
     if (wide && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, crlf, -1, wide, wchars) == wchars)
         mem = global_copy(wide, (size_t)wchars * sizeof *wide);
-    if (mem && open_board()) {
-        EmptyClipboard();
-        if (SetClipboardData(CF_UNICODETEXT, mem)) {
+    if (mem && owner && open_board(owner)) {
+        if (EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, mem)) {
             mem = NULL;
             ok = true;
         }
@@ -393,13 +484,6 @@ bool ph_winclip_read_png(uint8_t **out, size_t *len, size_t max)
         *out = NULL;
     if (len)
         *len = 0;
-    return false;
-}
-
-bool ph_winclip_write_png(const void *png, size_t len)
-{
-    (void)png;
-    (void)len;
     return false;
 }
 

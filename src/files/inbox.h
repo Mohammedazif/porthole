@@ -18,12 +18,23 @@
 
 typedef struct ph_inbox ph_inbox;
 
+typedef struct ph_inbox_item {
+    char id[33], name[96], path[1024], message[128];
+    char digest[65];
+    uint64_t bytes, total;
+    enum { PH_INBOX_RECEIVING, PH_INBOX_INTERRUPTED, PH_INBOX_STORED } state;
+} ph_inbox_item;
+
 typedef struct ph_inbox_callbacks {
     void *user;
     /* Whether the phone at this IPv4 address may send files. */
     bool (*allow)(void *user, const char *address);
+    bool (*authorize)(void *user, const char *ticket);
+    bool (*profile)(void *user, const char *ticket, char out[65]);
     void (*progress)(void *user, int done, int total);
-    /* A finished batch: each saved file's full path, one per line. */
+    void (*item)(void *user, const ph_inbox_item *item);
+    void (*saved)(void *user, const char *path); /* already in the receive folder */
+    /* A finished legacy batch: each saved file's final path, one per line. */
     void (*received)(void *user, const char *paths, int count);
 } ph_inbox_callbacks;
 
@@ -31,6 +42,7 @@ typedef struct ph_inbox_callbacks {
  * the iPhone share sheet shows ("Downloads" when NULL). NULL if the port cannot
  * be opened. */
 ph_inbox *ph_inbox_start(const char *dir, const char *save_label, const ph_inbox_callbacks *callbacks);
+void ph_inbox_disconnect(ph_inbox *inbox);
 void ph_inbox_stop(ph_inbox *inbox);
 
 /* The share sheet reads this name from the PC on the network. */

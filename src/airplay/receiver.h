@@ -42,6 +42,7 @@ typedef struct ph_receiver_options {
 ph_receiver *ph_receiver_start(const ph_receiver_options *opt, const ph_receiver_callbacks *cb);
 
 /* Call regularly from the main thread: restarts the server after a dropped connection. */
+void ph_receiver_disconnect(ph_receiver *r);
 void ph_receiver_poll(ph_receiver *r);
 
 void ph_receiver_stop(ph_receiver *r);

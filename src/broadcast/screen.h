@@ -24,6 +24,7 @@ typedef struct ph_screen_callbacks {
     void *user;
     /* Whether a phone at this IPv4 address may send its screen. */
     bool (*allow)(void *user, const char *address);
+    bool (*authorize)(void *user, const char *ticket);
     void (*connected)(void *user, const char *address);
     void (*video)(void *user, const uint8_t *annexb, size_t len, bool keyframe);
     void (*disconnected)(void *user);
@@ -31,6 +32,7 @@ typedef struct ph_screen_callbacks {
 
 /* Listens and advertises over Bonjour. NULL if the port cannot be opened. */
 ph_screen *ph_screen_start(const ph_screen_callbacks *callbacks);
+void ph_screen_disconnect(ph_screen *s);
 void ph_screen_stop(ph_screen *screen);
 
 /* Parses one frame header. Returns the payload length, or 0 for a bad header. */

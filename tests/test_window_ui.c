@@ -1,5 +1,10 @@
 /* Exercise the real software-rendered UI, including its modal/phone boundary.
  * Optional --screenshots DIR writes actual app renders for visual review. */
+#ifdef _WIN32
+#define COBJMACROS
+#include <oleacc.h>
+#include <SDL_syswm.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +14,9 @@
 #include <libavutil/frame.h>
 
 #include "control/setup.h"
+#include "core/config.h"
+#include "core/secure_link.h"
+#include "temp_path.h"
 #include "core/version.h"
 #include "ui/text.h"
 #include "ui/vendor/qrcodegen.h"
@@ -49,6 +57,98 @@ static void screenshot(ph_window *window, const char *dir, const char *name)
     av_packet_free(&packet); avcodec_free_context(&ctx); av_frame_free(&frame);
 }
 
+static void click_at(ph_window *window, int x, int y)
+{
+    SDL_Event event = {0};
+    event.type = SDL_MOUSEBUTTONDOWN;
+    event.button.button = SDL_BUTTON_LEFT;
+    event.button.windowID = ph_window_id(window);
+    event.button.x = x;
+    event.button.y = y;
+    CHECK(ph_window_chrome_event(window, &event));
+    event.type = SDL_MOUSEBUTTONUP;
+    CHECK(ph_window_chrome_event(window, &event));
+}
+
+static void workspace_key(ph_window *window, SDL_Scancode key, SDL_Keymod mod)
+{
+    SDL_Event event = {0};
+    event.type = SDL_KEYDOWN;
+    event.key.windowID = ph_window_id(window);
+    event.key.keysym.scancode = key;
+    event.key.keysym.sym = SDL_GetKeyFromScancode(key);
+    event.key.keysym.mod = mod;
+    CHECK(ph_window_chrome_event(window, &event));
+}
+
+static void assert_setup_instructions(SDL_Window *window)
+{
+    SDL_Renderer *renderer = SDL_GetRenderer(window);
+    SDL_Rect body = {50, 214, 350, 210};
+    uint32_t *pixels = malloc((size_t)body.w * (size_t)body.h * sizeof *pixels);
+    SDL_PixelFormat *format = SDL_AllocFormat(SDL_PIXELFORMAT_RGBA8888);
+    CHECK(pixels && format);
+    CHECK(SDL_RenderReadPixels(renderer, &body, format->format, pixels,
+                                body.w * (int)sizeof *pixels) == 0);
+    int lines = 0;
+    for (int y = 0; y < body.h; y++) {
+        int dark = 0;
+        for (int x = 0; x < body.w; x++) {
+            Uint8 r, g, b;
+            SDL_GetRGB(pixels[y * body.w + x], format, &r, &g, &b);
+            dark += r < 96 && g < 96 && b < 96;
+        }
+        if (dark > 24)
+            lines++;
+    }
+    CHECK(lines > 10);
+    SDL_FreeFormat(format);
+    free(pixels);
+}
+
+#ifdef _WIN32
+static void test_windows_accessibility(ph_window *w, SDL_Window *window)
+{
+    ph_window_show(w);
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    CHECK(SDL_GetWindowWMInfo(window, &info) && info.subsystem == SDL_SYSWM_WINDOWS);
+    IAccessible *root = NULL;
+    CHECK(SUCCEEDED(AccessibleObjectFromWindow(info.info.win.window, OBJID_CLIENT, &IID_IAccessible,
+                                               (void **)&root)) && root);
+    LONG count = 0;
+    CHECK(IAccessible_get_accChildCount(root, &count) == S_OK && count > 3);
+    bool copied_address = false;
+    for (LONG i = 1; i <= count; i++) {
+        VARIANT child;
+        VariantInit(&child);
+        V_VT(&child) = VT_I4;
+        V_I4(&child) = i;
+        BSTR name = NULL;
+        CHECK(IAccessible_get_accName(root, child, &name) == S_OK && name);
+        bool address = wcscmp(name, L"Copy address") == 0;
+        SysFreeString(name);
+        if (!address)
+            continue;
+        VARIANT role;
+        CHECK(IAccessible_get_accRole(root, child, &role) == S_OK &&
+              V_I4(&role) == ROLE_SYSTEM_PUSHBUTTON);
+        BSTR value = NULL;
+        CHECK(IAccessible_get_accValue(root, child, &value) == S_OK && value);
+        CHECK(!wcscmp(value, L"192.0.2.42:47731"));
+        SysFreeString(value);
+        CHECK(IAccessible_accDoDefaultAction(root, child) == S_OK);
+        char *text = SDL_GetClipboardText();
+        CHECK(text && !strcmp(text, "192.0.2.42:47731"));
+        SDL_free(text);
+        copied_address = true;
+        break;
+    }
+    CHECK(copied_address);
+    IAccessible_Release(root);
+}
+#endif
+
 static void click_shortcut(ph_window *w, int x, int y, SDL_Scancode expected)
 {
     SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
@@ -76,7 +176,20 @@ static void click_shortcut(ph_window *w, int x, int y, SDL_Scancode expected)
 int main(int argc, char **argv)
 {
     const char *dir = argc == 3 && !strcmp(argv[1], "--screenshots") ? argv[2] : NULL;
-    SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
+#ifdef _WIN32
+    bool test_accessibility = argc == 2 && !strcmp(argv[1], "--accessibility");
+#else
+    const bool test_accessibility = false;
+#endif
+    char config[1024];
+    CHECK(ph_test_temp_dir(config, sizeof config));
+#ifdef _WIN32
+    SDL_setenv("APPDATA", config, 1);
+#else
+    SDL_setenv("XDG_CONFIG_HOME", config, 1);
+#endif
+    if (!test_accessibility)
+        SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
     SDL_setenv("SDL_RENDER_DRIVER", "software", 1);
     CHECK(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) == 0);
     ph_window *w = ph_window_create("Porthole v" PORTHOLE_VERSION);
@@ -87,31 +200,36 @@ int main(int argc, char **argv)
     ph_window_set_pc_name(w, "Porthole Windows");
     ph_window_set_share_available(w, true);
     ph_window_redraw(w);
+#ifdef _WIN32
+    if (test_accessibility) {
+        test_windows_accessibility(w, native);
+        ph_window_destroy(w);
+        SDL_Quit();
+        puts("Windows accessibility: named controls, roles, values and actions passed");
+        return 0;
+    }
+#endif
     screenshot(w, dir, "01-connect");
 
     int tx, ty;
-    click_shortcut(w, 320, 16, SDL_SCANCODE_F1);
-    CHECK(ph_window_connect_target(w, PH_TARGET_SETUP, &tx, &ty));
+    ph_workspace *workspace = ph_window_workspace(w);
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_SETUP, &tx, &ty));
     click_shortcut(w, tx, ty, SDL_SCANCODE_F2);
-    CHECK(ph_window_connect_target(w, PH_TARGET_HELP, &tx, &ty));
-    click_shortcut(w, tx, ty, SDL_SCANCODE_F1);
-    CHECK(ph_window_connect_target(w, PH_TARGET_STATS, &tx, &ty));
-    click_shortcut(w, tx, ty, SDL_SCANCODE_F3);
     SDL_Event copy;
     SDL_zero(copy);
     copy.type = SDL_MOUSEBUTTONDOWN;
-    CHECK(ph_window_connect_target(w, PH_TARGET_COPY, &tx, &ty));
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_COPY_ADDRESS, &tx, &ty));
     copy.button.button = SDL_BUTTON_LEFT; copy.button.x = tx; copy.button.y = ty;
     CHECK(ph_window_chrome_event(w, &copy));
     copy.type = SDL_MOUSEBUTTONUP;
     CHECK(ph_window_chrome_event(w, &copy));
     char *clipboard = SDL_GetClipboardText();
-    CHECK(clipboard && !strcmp(clipboard, "192.0.2.42:47731  SAMPLE42"));
+    CHECK(clipboard && !strcmp(clipboard, "192.0.2.42:47731"));
     SDL_free(clipboard);
     SDL_Event fresh;
     SDL_zero(fresh);
     fresh.type = SDL_MOUSEBUTTONDOWN;
-    CHECK(ph_window_connect_target(w, PH_TARGET_NEW_CODE, &tx, &ty));
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_NEW_CODE, &tx, &ty));
     fresh.button.button = SDL_BUTTON_LEFT; fresh.button.x = tx; fresh.button.y = ty;
     CHECK(ph_window_chrome_event(w, &fresh));
     fresh.type = SDL_MOUSEBUTTONUP;
@@ -122,7 +240,11 @@ int main(int argc, char **argv)
     {
         uint8_t qr[qrcodegen_BUFFER_LEN_FOR_VERSION(8)];
         uint8_t temp[qrcodegen_BUFFER_LEN_FOR_VERSION(8)];
-        CHECK(qrcodegen_encodeText("porthole://192.0.2.42:47731/SAMPLE42", temp, qr,
+        char uri[200];
+        snprintf(uri, sizeof uri, "porthole://192.0.2.42:47731/SAMPLE42?pin=%s",
+                 ph_tls_fingerprint());
+        CHECK(strlen(ph_tls_fingerprint()) == 64);
+        CHECK(qrcodegen_encodeText(uri, temp, qr,
                                    qrcodegen_Ecc_MEDIUM, 1, 8, qrcodegen_Mask_AUTO, true));
         CHECK(qrcodegen_getSize(qr) >= 21);
         CHECK(qrcodegen_getModule(qr, 0, 0));
@@ -131,43 +253,142 @@ int main(int argc, char **argv)
     SDL_zero(gear);
     gear.type = SDL_MOUSEBUTTONDOWN;
     gear.button.button = SDL_BUTTON_LEFT;
-    CHECK(ph_window_connect_target(w, PH_TARGET_SETTINGS, &tx, &ty));
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_SETTINGS_OPEN, &tx, &ty));
     gear.button.x = tx; gear.button.y = ty;
     CHECK(ph_window_chrome_event(w, &gear));
     gear.type = SDL_MOUSEBUTTONUP;
     CHECK(ph_window_chrome_event(w, &gear));
     CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_NONE);
     screenshot(w, dir, "11-settings");
-    SDL_Event row;
-    SDL_zero(row);
-    row.type = SDL_MOUSEBUTTONDOWN;
-    row.button.button = SDL_BUTTON_LEFT;
-    CHECK(ph_window_settings_target(w, 1, 1, &tx, &ty)); /* Wheel scrolling: Feed */
-    row.button.x = tx; row.button.y = ty;
-    CHECK(ph_window_chrome_event(w, &row));
-    row.type = SDL_MOUSEBUTTONUP;
-    CHECK(ph_window_chrome_event(w, &row));
+    SDL_SetWindowSize(native, 960, 720);
+    ph_window_redraw(w);
+    click_at(w, 65, PH_WINDOW_BAR_PX + 88 + 2 * 44 + 18);
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_FEED, &tx, &ty));
+    click_at(w, tx, ty);
     CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_FEED);
-    row.type = SDL_MOUSEBUTTONDOWN;                       /* Feed again: already on */
-    CHECK(ph_window_chrome_event(w, &row));
-    row.type = SDL_MOUSEBUTTONUP;
-    CHECK(ph_window_chrome_event(w, &row));
-    CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_NONE);
-    CHECK(ph_window_settings_target(w, 5, 0, &tx, &ty));  /* Media keys switch */
-    CHECK(ph_window_media_keys(w));
-    row.type = SDL_MOUSEBUTTONDOWN; row.button.x = tx; row.button.y = ty;
-    CHECK(ph_window_chrome_event(w, &row));
-    row.type = SDL_MOUSEBUTTONUP;
-    CHECK(ph_window_chrome_event(w, &row));
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_MEDIA, &tx, &ty));
+    click_at(w, tx, ty);
     CHECK(!ph_window_media_keys(w));
     CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_SAVE);
-    CHECK(ph_window_settings_target(w, -1, 0, &tx, &ty)); /* Done */
-    gear.type = SDL_MOUSEBUTTONDOWN; gear.button.x = tx; gear.button.y = ty;
-    CHECK(ph_window_chrome_event(w, &gear));
-    gear.type = SDL_MOUSEBUTTONUP;
-    CHECK(ph_window_chrome_event(w, &gear));
-    CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_NONE);
-    CHECK(!ph_window_settings_target(w, 99, 0, &tx, &ty));
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLOSE, &tx, &ty));
+    click_at(w, tx, ty);
+    CHECK(!ph_window_help_visible(w));
+    ph_window_set_code_open(w, false);
+    ph_window_set_companion(w, true, false, 100);
+    ph_window_set_phone_name(w, "iPhone");
+    ph_history *history = ph_history_open(NULL);
+    ph_workspace_set_history(workspace, history);
+    ph_file_entry received = {.incoming = true,
+                              .state = PH_TRANSFER_COMPLETE,
+                              .name = "Sample photo.heic",
+                              .bytes = 3800000,
+                              .confirmed = 3800000};
+    CHECK(snprintf(received.path, sizeof received.path, "%s/moved-folder/Sample photo.heic",
+                   config) < (int)sizeof received.path);
+    CHECK(ph_history_add_file(history, &received) != 0);
+    ph_window_redraw(w);
+    screenshot(w, dir, "12-connected");
+    ph_window_set_receiving(w, 0, 1);
+    ph_window_set_incoming(w, "Presentation.pdf", 2000000, 4000000);
+    screenshot(w, dir, "14-receiving");
+    ph_window_set_active_transfer(w, "Sending example.txt");
+    static const char history_profile[] =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    char unread_key[80];
+    snprintf(unread_key, sizeof unread_key, "unread-%s", history_profile);
+    ph_window_set_history_profile(w, history_profile);
+    ph_window_note_received(w, 2);
+    char count[16];
+    CHECK(ph_config_read_line(unread_key, count, sizeof count) && !strcmp(count, "2"));
+    ph_window_set_history_profile(w, NULL);
+    ph_window_set_history_profile(w, history_profile);
+    const int widths[] = {320, 960};
+    for (size_t i = 0; i < SDL_arraysize(widths); ++i) {
+        SDL_SetWindowSize(native, widths[i], 480);
+        ph_window_redraw(w);
+        CHECK(ph_workspace_target(workspace, PH_WORKSPACE_HISTORY_OPEN, &tx, &ty));
+        CHECK(ph_workspace_target(workspace, PH_WORKSPACE_REVEAL, &tx, &ty));
+        CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CANCEL_SEND, &tx, &ty));
+        click_at(w, tx, ty);
+        CHECK(ph_window_take_cancel(w));
+    }
+    SDL_SetWindowSize(native, 960, 720);
+    ph_window_set_active_transfer(w, "");
+    ph_window_set_incoming(w, "", 0, 0);
+    ph_window_set_receiving(w, 0, 0);
+    ph_window_open_received_history(w);
+    CHECK(ph_config_read_line(unread_key, count, sizeof count) && !strcmp(count, "0"));
+    /* Select the first row on File history. The recorded parent has moved. */
+    click_at(w, 122, PH_WINDOW_BAR_PX + 160 + 10 + 44 + 14);
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_LOCATE, &tx, &ty));
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLOSE, &tx, &ty));
+    click_at(w, tx, ty);
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_SETTINGS_OPEN, &tx, &ty));
+    click_at(w, tx, ty);
+    ph_workspace_open_section(workspace, 0);
+    ph_window_redraw(w);
+    click_at(w, 550, PH_WINDOW_BAR_PX + 32 + 55 + 27 + 20);
+    CHECK(ph_workspace_dark(workspace));
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLOSE, &tx, &ty));
+    click_at(w, tx, ty);
+    screenshot(w, dir, "15-connected-dark");
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_SETTINGS_OPEN, &tx, &ty));
+    click_at(w, tx, ty);
+    ph_workspace_open_section(workspace, 8);
+    ph_session_state devices = {
+        .count = 2,
+        .devices = {
+            {.id = "phone:one", .name = "First iPhone", .connected = true, .active = true,
+             .companion = true},
+            {.id = "phone:two", .name = "Second iPhone", .companion = true},
+        },
+    };
+    CHECK(ph_workspace_set_sessions(workspace, &devices));
+    ph_window_redraw(w);
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_DEVICE_SELECT, &tx, &ty));
+    click_at(w, tx, ty);
+    CHECK(ph_window_take_workspace_action(w, NULL) == PH_WORKSPACE_DEVICE_SELECT);
+    CHECK(!strcmp(ph_workspace_device(workspace), "phone:two"));
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_ADD_PHONE, &tx, &ty));
+    click_at(w, tx, ty);
+    CHECK(ph_window_take_workspace_action(w, NULL) == PH_WORKSPACE_ADD_PHONE);
+    screenshot(w, dir, "16-devices-dark");
+    ph_workspace_open_section(workspace, 0);
+    ph_window_redraw(w);
+    click_at(w, 330, PH_WINDOW_BAR_PX + 32 + 55 + 27 + 20);
+    CHECK(!ph_workspace_dark(workspace));
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLOSE, &tx, &ty));
+    click_at(w, tx, ty);
+
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLIPBOARD_OPEN, &tx, &ty));
+    CHECK(ph_history_add_clip(history, 'T', "Clipboard sample", 16, true) != 0);
+    click_at(w, tx, ty);
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLIP_COPY, &tx, &ty));
+    CHECK(!ph_workspace_target(workspace, PH_WORKSPACE_CLIP_SEND, &tx, &ty));
+    ph_window_set_clipboard_available(w, true);
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLIP_SEND, &tx, &ty));
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLIP_COPY, &tx, &ty));
+    SDL_Event changing = {0};
+    changing.type = SDL_MOUSEBUTTONDOWN;
+    changing.button.button = SDL_BUTTON_LEFT;
+    changing.button.x = tx;
+    changing.button.y = ty;
+    CHECK(ph_window_chrome_event(w, &changing));
+    CHECK(ph_history_add_clip(history, 'T', "Another item", 12, true) != 0);
+    ph_window_redraw(w);
+    changing.type = SDL_MOUSEBUTTONUP;
+    CHECK(ph_window_chrome_event(w, &changing));
+    CHECK(ph_window_take_workspace_action(w, NULL) == PH_WORKSPACE_NONE);
+    click_at(w, tx, ty);
+    uint64_t item = 0;
+    CHECK(ph_window_take_workspace_action(w, &item) == PH_WORKSPACE_CLIP_COPY &&
+          item == ph_history_clip(history, 0)->id);
+    screenshot(w, dir, "13-clipboard");
+    workspace_key(w, SDL_SCANCODE_TAB, KMOD_NONE);
+    CHECK(ph_workspace_owns_keyboard(workspace));
+    workspace_key(w, SDL_SCANCODE_RETURN, KMOD_NONE);
+    CHECK(!ph_window_help_visible(w));
+    ph_window_set_code_open(w, true);
     ph_window_set_active_transfer(w, "Sending photo.jpg");
     CHECK(!ph_window_set_active_transfer(w, "Sending photo.jpg"));
     ph_window_note_transfer(w, "Sent photo.jpg");
@@ -201,6 +422,7 @@ int main(int argc, char **argv)
     ph_setup setup;
     ph_setup_open(&setup, true);
     ph_window_set_setup(w, &setup);
+    assert_setup_instructions(native);
     screenshot(w, dir, "04-setup");
     SDL_SetWindowSize(native, 960, 680); ph_window_redraw(w);
     screenshot(w, dir, "04b-setup-wide");
@@ -216,18 +438,16 @@ int main(int argc, char **argv)
     setup.visible = false;
     ph_window_set_setup(w, &setup);
     ph_window_toggle_help(w);
+    SDL_SetWindowSize(native, 460, 480);
+    ph_window_redraw(w);
     screenshot(w, dir, "05-help");
-    SDL_Event wheel;
-    SDL_zero(wheel);
-    wheel.type = SDL_MOUSEWHEEL;
-    wheel.wheel.y = -20;
-    CHECK(ph_window_chrome_event(w, &wheel));
+    workspace_key(w, SDL_SCANCODE_PAGEDOWN, KMOD_NONE);
     screenshot(w, dir, "06-help-scrolled");
     SDL_Event key;
     SDL_zero(key);
     key.type = SDL_KEYDOWN;
     key.key.keysym.scancode = SDL_SCANCODE_HOME;
-    CHECK(ph_window_chrome_event(w, &key));
+    ph_window_chrome_event(w, &key);
     ph_window_toggle_help(w);
 
     AVFrame *frame = av_frame_alloc();
@@ -246,6 +466,18 @@ int main(int argc, char **argv)
     CHECK(ph_window_to_video(w, 230, 386, &vx, &vy));
     CHECK(vx > .49 && vx < .51 && vy > .49 && vy < .51);
     CHECK(!ph_window_to_video(w, 230, 16, &vx, &vy));
+    ph_window_open_pairing(w);
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_COPY_ADDRESS, &tx, &ty));
+    CHECK(!ph_window_picture_point(w, 230, 390, &vx, &vy));
+    ph_window_set_code_open(w, false);
+    CHECK(ph_window_picture_point(w, 230, 390, &vx, &vy));
+    ph_window_set_code_open(w, true);
+    ph_window_toggle_diagnostics(w);
+    CHECK(ph_window_help_visible(w));
+    CHECK(!ph_window_picture_point(w, 230, 390, &vx, &vy));
+    click_at(w, 230, 390);
+    workspace_key(w, SDL_SCANCODE_ESCAPE, KMOD_NONE);
+    CHECK(!ph_window_help_visible(w));
     ph_window_toggle_help(w);
     CHECK(!ph_window_to_video(w, 230, 410, &vx, &vy));
     ph_window_toggle_help(w);
@@ -311,7 +543,8 @@ int main(int argc, char **argv)
     ph_window_set_share_available(w, false);
     screenshot(w, dir, "08-sharing-unavailable");
     copy.type = SDL_MOUSEBUTTONDOWN;
-    CHECK(!ph_window_chrome_event(w, &copy)); /* unavailable Copy cannot activate */
+    CHECK(!ph_workspace_target(workspace, PH_WORKSPACE_COPY_ADDRESS, &tx, &ty));
+    ph_history_close(history);
     ph_window_destroy(w);
 
     /* A fresh renderer must receive its own font atlas after the previous one dies. */

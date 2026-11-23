@@ -1,5 +1,8 @@
 #include "security/gate.h"
 
+#include "core/upath.h"
+#include <openssl/rand.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +35,7 @@ struct ph_gate {
     char pending_name[PH_GATE_TEXT_MAX + 1];
     unsigned (*rng)(void *);
     void *rng_user;
-    unsigned rng_state;
+    time_t pending_until;
 };
 
 static bool copy_text(char *dst, const char *src)
@@ -175,12 +178,13 @@ static void bump_fail(ph_gate *gate, const char *id)
     gate->fail_count++;
 }
 
-static unsigned next_rng(ph_gate *gate)
+static bool make_pin(ph_gate *gate, unsigned *number)
 {
-    if (gate->rng)
-        return gate->rng(gate->rng_user);
-    gate->rng_state = gate->rng_state * 1664525u + 1013904223u;
-    return gate->rng_state;
+    if (gate->rng) {
+        *number = gate->rng(gate->rng_user);
+        return true;
+    }
+    return RAND_bytes((unsigned char *)number, sizeof *number) == 1;
 }
 
 static void format_pin(char out[8], unsigned value)
@@ -208,9 +212,6 @@ ph_gate *ph_gate_create(void)
 
     if (!gate)
         return NULL;
-    gate->rng_state = (unsigned)time(NULL);
-    if (gate->rng_state == 0)
-        gate->rng_state = 0x6d2b79f5u;
     return gate;
 }
 
@@ -236,6 +237,7 @@ void ph_gate_set_open(ph_gate *gate, bool open_lan)
     if (!gate)
         return;
     gate->open_lan = open_lan;
+    clear_pending(gate);
 }
 
 ph_gate_decision ph_gate_decide(ph_gate *gate, const char *device_id, const char *name,
@@ -249,16 +251,18 @@ ph_gate_decision ph_gate_decide(ph_gate *gate, const char *device_id, const char
     if (fail_count_of(gate, device_id) >= PH_GATE_LOCKOUT)
         return PH_GATE_REJECT;
     if (gate->open_lan) {
-        if (!remember(gate, device_id, name))
-            return PH_GATE_REJECT;
         if (gate->has_pending && strcmp(gate->pending_id, device_id) == 0)
             clear_pending(gate);
         return PH_GATE_ADMIT;
     }
-    if (!gate->has_pending || strcmp(gate->pending_id, device_id) != 0) {
-        if (!copy_text(gate->pending_id, device_id))
+    time_t now = time(NULL);
+    if (!gate->has_pending || strcmp(gate->pending_id, device_id) != 0 ||
+        now >= gate->pending_until) {
+        unsigned value;
+        if (!make_pin(gate, &value) || !copy_text(gate->pending_id, device_id))
             return PH_GATE_REJECT;
-        format_pin(gate->pending_pin, next_rng(gate));
+        format_pin(gate->pending_pin, value);
+        gate->pending_until = now + 120;
         copy_name(gate->pending_name, name);
         gate->has_pending = true;
     } else if (name) {
@@ -269,14 +273,14 @@ ph_gate_decision ph_gate_decide(ph_gate *gate, const char *device_id, const char
 
 const char *ph_gate_pending_pin(const ph_gate *gate)
 {
-    if (!gate || !gate->has_pending)
+    if (!gate || !gate->has_pending || time(NULL) >= gate->pending_until)
         return NULL;
     return gate->pending_pin;
 }
 
 const char *ph_gate_pending_id(const ph_gate *gate)
 {
-    if (!gate || !gate->has_pending)
+    if (!gate || !gate->has_pending || time(NULL) >= gate->pending_until)
         return NULL;
     return gate->pending_id;
 }
@@ -289,7 +293,7 @@ bool ph_gate_submit_pin(ph_gate *gate, const char *device_id, const char *pin)
         return true;
     if (fail_count_of(gate, device_id) >= PH_GATE_LOCKOUT)
         return false;
-    if (!gate->has_pending || strcmp(gate->pending_id, device_id) != 0 ||
+    if (!ph_gate_pending_id(gate) || strcmp(gate->pending_id, device_id) != 0 ||
         strcmp(gate->pending_pin, pin) != 0) {
         bump_fail(gate, device_id);
         return false;
@@ -314,21 +318,28 @@ void ph_gate_reset_failures(ph_gate *gate, const char *device_id)
 
 bool ph_gate_save(ph_gate *gate, const char *path)
 {
-    FILE *f;
-    size_t i;
-
-    if (!gate || !path)
+    unsigned char suffix[8];
+    char temporary[1200];
+    if (!gate || !path || !*path || RAND_bytes(suffix, sizeof suffix) != 1)
         return false;
-    f = fopen(path, "w");
+    int n = snprintf(temporary, sizeof temporary, "%s.%02x%02x%02x%02x%02x%02x%02x%02x.tmp",
+                     path, suffix[0], suffix[1], suffix[2], suffix[3], suffix[4], suffix[5],
+                     suffix[6], suffix[7]);
+    if (n < 0 || (size_t)n >= sizeof temporary)
+        return false;
+    FILE *f = ph_fopen(temporary, "wbx");
     if (!f)
         return false;
-    for (i = 0; i < gate->allowed_count; i++) {
-        if (fprintf(f, "%s\t%s\n", gate->allowed[i].id, gate->allowed[i].name) < 0) {
-            fclose(f);
-            return false;
-        }
-    }
-    return fclose(f) == 0;
+    bool ok = true;
+    for (size_t i = 0; ok && i < gate->allowed_count; i++)
+        ok = fprintf(f, "%s\t%s\n", gate->allowed[i].id, gate->allowed[i].name) >= 0;
+    ok = ok && ph_flush_file(f);
+    if (fclose(f) != 0)
+        ok = false;
+    if (ok && ph_rename(temporary, path) == 0)
+        return true;
+    ph_remove(temporary);
+    return false;
 }
 
 static void rstrip(char *line)
@@ -348,7 +359,7 @@ bool ph_gate_load(ph_gate *gate, const char *path)
 
     if (!gate || !path)
         return false;
-    f = fopen(path, "r");
+    f = ph_fopen(path, "r");
     if (!f)
         return false;
     free(gate->allowed);
@@ -374,4 +385,43 @@ bool ph_gate_load(ph_gate *gate, const char *path)
         }
     }
     return fclose(f) == 0;
+}
+
+size_t ph_gate_count(const ph_gate *g)
+{
+    return g ? g->allowed_count : 0;
+}
+bool ph_gate_at(const ph_gate *g, size_t index, const char **id, const char **name)
+{
+    if (!g || index >= g->allowed_count)
+        return false;
+    *id = g->allowed[index].id;
+    *name = g->allowed[index].name;
+    return true;
+}
+bool ph_gate_rename(ph_gate *g, const char *id, const char *name)
+{
+    return g && id && name && *name && is_allowed(g, id) && remember(g, id, name);
+}
+void ph_gate_forget(ph_gate *g, const char *id)
+{
+    if (!g || !id)
+        return;
+    for (size_t i = 0; i < g->allowed_count; i++)
+        if (!strcmp(g->allowed[i].id, id)) {
+            g->allowed[i] = g->allowed[--g->allowed_count];
+            break;
+        }
+}
+void ph_gate_reject_pending(ph_gate *g, const char *id)
+{
+    if (g && g->has_pending && id && !strcmp(g->pending_id, id)) {
+        for (int i = 0; i < PH_GATE_LOCKOUT; i++)
+            bump_fail(g, id);
+        clear_pending(g);
+    }
+}
+const char *ph_gate_pending_name(const ph_gate *g)
+{
+    return g && g->has_pending ? g->pending_name : NULL;
 }
