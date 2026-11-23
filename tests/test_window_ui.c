@@ -170,7 +170,7 @@ static int section_y(int index)
     return PH_WINDOW_BAR_PX + 47 + 18 + index * 41 + 19;
 }
 
-static void capture_settings(ph_window *w, const char *dir)
+static void capture_settings_pages(ph_window *w, const char *dir, const char *prefix)
 {
     const char *names[] = {"appearance", "screen-and-audio", "controls", "transfers",
                           "notifications", "help", "connection-statistics", "about"};
@@ -181,8 +181,16 @@ static void capture_settings(ph_window *w, const char *dir)
         ph_window_redraw(w);
         click_at(w, 65, section_y(i));
         CHECK(ph_workspace_current_section(workspace) == i);
-        screenshot(w, dir, names[i]);
+        char name[64];
+        snprintf(name, sizeof name, "%s%s", prefix, names[i]);
+        screenshot(w, dir, name);
     }
+}
+
+static void capture_settings(ph_window *w, const char *dir)
+{
+    ph_workspace *workspace = ph_window_workspace(w);
+    capture_settings_pages(w, dir, "");
     ph_window_toggle_statistics(w);
     CHECK(ph_workspace_current_section(workspace) == 6 && ph_window_help_visible(w));
     ph_window_toggle_statistics(w);
@@ -274,6 +282,178 @@ static void test_windows_accessibility(ph_window *w, SDL_Window *window)
     CHECK(copied_address);
     IAccessible_Release(root);
 }
+
+static void click_role(ph_window *w, const char *name)
+{
+    ph_workspace *workspace = ph_window_workspace(w);
+    for (int i = 0; i < ph_workspace_accessible_count(workspace); i++) {
+        ph_workspace_control control;
+        if (!ph_workspace_accessible_control(workspace, i, &control) || strcmp(control.name, name))
+            continue;
+        click_at(w, control.bounds.x + control.bounds.w / 2,
+                 control.bounds.y + control.bounds.h / 2);
+        return;
+    }
+    fprintf(stderr, "Missing Windows UI control: %s\n", name);
+    exit(1);
+}
+
+static void close_workspace_view(ph_window *w)
+{
+    int x, y;
+    CHECK(ph_workspace_target(ph_window_workspace(w), PH_WORKSPACE_CLOSE, &x, &y));
+    click_at(w, x, y);
+}
+
+static void windows_visual_review(ph_window *w, SDL_Window *native, const char *dir)
+{
+    test_windows_accessibility(w, native);
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    CHECK(SDL_GetWindowWMInfo(native, &info) && info.subsystem == SDL_SYSWM_WINDOWS);
+    SDL_RendererInfo renderer;
+    CHECK(SDL_GetRendererInfo(SDL_GetRenderer(native), &renderer) == 0);
+    printf("Windows native SDL backend: %s, renderer: %s, window DPI: %u\n",
+           SDL_GetCurrentVideoDriver(), renderer.name, (unsigned)GetDpiForWindow(info.info.win.window));
+
+    ph_workspace *workspace = ph_window_workspace(w);
+    SDL_SetWindowSize(native, 1280, 800);
+    ph_window_redraw(w);
+    click_role(w, "Settings");
+    click_role(w, "General");
+    click_role(w, "Light");
+    CHECK(!ph_workspace_dark(workspace));
+    close_workspace_view(w);
+    screenshot(w, dir, "connect");
+    const int sizes[][2] = {{1024, 680}, {460, 740}};
+    const char *sizes_names[] = {"connect-1024", "connect-compact"};
+    for (size_t i = 0; i < SDL_arraysize(sizes_names); i++) {
+        SDL_SetWindowSize(native, sizes[i][0], sizes[i][1]);
+        ph_window_redraw(w);
+        screenshot(w, dir, sizes_names[i]);
+    }
+    puts("Pairing window and accessible copy action passed");
+
+    ph_window_set_code_open(w, false);
+    ph_window_set_companion(w, true, false, 72);
+    ph_window_set_phone_name(w, "iPhone");
+    ph_window_set_clipboard_available(w, true);
+    ph_history *history = ph_history_open(NULL);
+    CHECK(history);
+    ph_workspace_set_history(workspace, history);
+    ph_file_entry sent = {.name = "Boarding pass.pdf", .bytes = 624000, .confirmed = 624000,
+                          .state = PH_TRANSFER_COMPLETE};
+    ph_file_entry received = {.name = "IMG_4821.HEIC", .incoming = true, .bytes = 3800000,
+                              .confirmed = 3800000, .state = PH_TRANSFER_COMPLETE};
+    CHECK(ph_history_add_file(history, &sent) && ph_history_add_file(history, &received));
+    SDL_SetWindowSize(native, 1120, 680);
+    ph_window_redraw(w);
+    screenshot(w, dir, "connected");
+    ph_window_set_receiving(w, 0, 1);
+    ph_window_set_incoming(w, "Presentation.pdf", 1800000, 4000000);
+    screenshot(w, dir, "receiving");
+    ph_window_set_incoming(w, "", 0, 0);
+    ph_window_set_receiving(w, 0, 0);
+    ph_window_open_received_history(w);
+    screenshot(w, dir, "received-history");
+    close_workspace_view(w);
+
+    SDL_SetWindowSize(native, 1280, 800);
+    ph_window_open_settings(w);
+    capture_settings(w, dir);
+    ph_window_toggle_help(w);
+    click_role(w, "Guides");
+    click_role(w, "Search help and shortcuts");
+    SDL_Event input = {.type = SDL_TEXTINPUT};
+    input.text.windowID = ph_window_id(w);
+    snprintf(input.text.text, sizeof input.text.text, "broadcast");
+    CHECK(ph_window_chrome_event(w, &input));
+    screenshot(w, dir, "help-search-broadcast");
+    workspace_key(w, SDL_SCANCODE_A, KMOD_LCTRL);
+    snprintf(input.text.text, sizeof input.text.text, "no-matching-guide");
+    CHECK(ph_window_chrome_event(w, &input));
+    screenshot(w, dir, "help-search-no-results");
+    click_role(w, "Controls");
+    click_role(w, "Enable PC controls (on)");
+    CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_PAUSE);
+    click_role(w, "Feed");
+    CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_FEED);
+    click_role(w, "Relative");
+    CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_SAVE);
+    click_role(w, "Screen and audio");
+    click_role(w, "Keep the iPhone aspect ratio (on)");
+    CHECK(!ph_workspace_keep_aspect(workspace));
+    click_role(w, "Keep the iPhone aspect ratio (off)");
+    CHECK(ph_workspace_keep_aspect(workspace));
+    click_role(w, "Notifications");
+    click_role(w, "Transfer notifications (on)");
+    CHECK(!ph_workspace_notifications(workspace));
+    click_role(w, "Transfer notifications (off)");
+    CHECK(ph_workspace_notifications(workspace));
+    click_role(w, "Transfers");
+    click_role(w, "Clipboard sync (on)");
+    CHECK(!ph_workspace_clip_send(workspace) && !ph_workspace_clip_receive(workspace));
+    click_role(w, "Clipboard sync (off)");
+    CHECK(ph_workspace_clip_send(workspace) && ph_workspace_clip_receive(workspace));
+    click_role(w, "Downloads");
+    CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_PICK_FOLDER);
+    click_role(w, "General");
+    if (!ph_config_launch_managed() && !ph_config_launch_at_sign_in()) {
+        click_role(w, "Launch at sign-in (off)");
+        bool enabled = ph_config_launch_at_sign_in();
+        if (enabled)
+            click_role(w, "Launch at sign-in (on)");
+        bool removed = !ph_config_launch_at_sign_in();
+        CHECK(enabled && removed);
+    }
+    click_role(w, "Dark");
+    CHECK(ph_workspace_dark(workspace));
+    capture_settings_pages(w, dir, "dark-");
+    click_role(w, "General");
+    click_role(w, "System");
+    char prefs[96];
+    CHECK(ph_config_read_line("desktop-preferences", prefs, sizeof prefs) && prefs[0] == '2');
+    click_role(w, "Light");
+    close_workspace_view(w);
+    puts("All Settings pages, themes, Help search and preference actions passed");
+
+    AVFrame *frame = av_frame_alloc();
+    CHECK(frame);
+    frame->width = 360;
+    frame->height = 780;
+    frame->format = AV_PIX_FMT_YUV420P;
+    CHECK(av_frame_get_buffer(frame, 32) == 0);
+    for (int plane = 0; plane < 3; plane++) {
+        for (int y = 0; y < (plane ? frame->height / 2 : frame->height); y++)
+            memset(frame->data[plane] + y * frame->linesize[plane], plane ? 128 : 100,
+                   (size_t)(plane ? frame->width / 2 : frame->width));
+    }
+    ph_rect screen = {0, 0, 360, 780};
+    ph_window_set_status(w, true, true, "on");
+    ph_window_present(w, frame, &screen);
+    screenshot(w, dir, "sharing");
+    ph_window_open_settings(w);
+    ph_workspace_open_section(workspace, 0);
+    ph_window_redraw(w);
+    screenshot(w, dir, "sharing-settings");
+    ph_workspace_open_section(workspace, 2);
+    ph_window_redraw(w);
+    screenshot(w, dir, "sharing-controls");
+    close_workspace_view(w);
+    CHECK(!ph_window_help_visible(w));
+    ph_metrics_snapshot metrics = {.fps_known = true, .fps = 60,
+                                   .receive_to_present = {.known = true, .mean_ms = 7.2}};
+    ph_window_set_metrics(w, &metrics, 0, 0, 0);
+    ph_window_toggle_statistics(w);
+    CHECK(ph_workspace_current_section(workspace) == 6);
+    screenshot(w, dir, "sharing-statistics");
+    close_workspace_view(w);
+    av_frame_free(&frame);
+    test_scaled_workspace(history, dir);
+    ph_workspace_set_history(workspace, NULL);
+    ph_history_close(history);
+    puts("Screen sharing fixture and 100%, 125%, 150%, 200% raster checks passed");
+}
 #endif
 
 static void click_shortcut(ph_window *w, int x, int y, SDL_Scancode expected)
@@ -305,8 +485,16 @@ int main(int argc, char **argv)
     const char *dir = argc == 3 && !strcmp(argv[1], "--screenshots") ? argv[2] : NULL;
 #ifdef _WIN32
     bool test_accessibility = argc == 2 && !strcmp(argv[1], "--accessibility");
+    bool native_review = argc == 3 && !strcmp(argv[1], "--windows-visual-review");
+    if (native_review) {
+        dir = argv[2];
+        SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+        SDL_SetHint(SDL_HINT_WINDOWS_DPI_SCALING, "1");
+        SDL_setenv("SDL_VIDEODRIVER", "windows", 1);
+    }
 #else
     const bool test_accessibility = false;
+    const bool native_review = false;
 #endif
     char config[1024];
     CHECK(ph_test_temp_dir(config, sizeof config));
@@ -315,7 +503,7 @@ int main(int argc, char **argv)
 #else
     SDL_setenv("XDG_CONFIG_HOME", config, 1);
 #endif
-    if (!test_accessibility)
+    if (!test_accessibility && !native_review)
         SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
     SDL_setenv("SDL_RENDER_DRIVER", "software", 1);
     CHECK(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) == 0);
@@ -328,6 +516,12 @@ int main(int argc, char **argv)
     ph_window_set_share_available(w, true);
     ph_window_redraw(w);
 #ifdef _WIN32
+    if (native_review) {
+        windows_visual_review(w, native, dir);
+        ph_window_destroy(w);
+        SDL_Quit();
+        return 0;
+    }
     if (test_accessibility) {
         test_windows_accessibility(w, native);
         ph_window_destroy(w);

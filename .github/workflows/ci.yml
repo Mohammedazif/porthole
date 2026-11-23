@@ -10,10 +10,14 @@ on:
         description: Rebuild Windows Setup from another run's Windows payload
         type: string
         default: ''
+      windows_ui_only:
+        description: Run Windows tests and capture the native desktop screens
+        type: boolean
+        default: false
 
 jobs:
   linux:
-    if: ${{ !inputs.windows_payload_run }}
+    if: ${{ !inputs.windows_payload_run && !inputs.windows_ui_only }}
     name: Linux (full build)
     runs-on: ubuntu-24.04
     steps:
@@ -55,7 +59,7 @@ jobs:
           if-no-files-found: error
 
   debian:
-    if: ${{ !inputs.windows_payload_run }}
+    if: ${{ !inputs.windows_payload_run && !inputs.windows_ui_only }}
     name: Linux installer (Debian 13)
     runs-on: ubuntu-24.04
     container: debian:13
@@ -161,21 +165,41 @@ jobs:
         shell: pwsh
         run: dotnet run --project helpers/ble-winrt/Tests --configuration Release --artifacts-path build/dotnet-tests
 
+      - name: Review native Windows desktop screens
+        if: ${{ inputs.windows_ui_only }}
+        run: |
+          set -eo pipefail
+          mkdir -p out/windows-ui-review
+          build/windows-release/tests/test_window_ui.exe --windows-visual-review out/windows-ui-review \
+            2>&1 | tee out/windows-ui-review/validation.log
+
+      - name: Upload Windows visual review
+        if: ${{ always() && inputs.windows_ui_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: porthole-native-windows-review
+          path: out/windows-ui-review/
+          if-no-files-found: error
+
       - name: Package portable mirror and matching source archives
+        if: ${{ !inputs.windows_ui_only }}
         run: bash scripts/package-windows.sh
 
       - name: Verify the packaged Windows runtime
+        if: ${{ !inputs.windows_ui_only }}
         run: >-
           python scripts/portable-windows/verify_payload.py out/porthole-windows-x64
           --report out/porthole-windows-x64-verification.json
 
       - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.windows_ui_only }}
         with:
           name: porthole-windows-x64
           path: out/porthole-windows-x64/
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.windows_ui_only }}
         with:
           name: porthole-windows-x64-sources
           path: out/porthole-windows-x64-sources/
@@ -185,7 +209,7 @@ jobs:
   windows-installer:
     name: Windows Setup installer
     needs: windows
-    if: ${{ !cancelled() && (needs.windows.result == 'success' || inputs.windows_payload_run) }}
+    if: ${{ !cancelled() && !inputs.windows_ui_only && (needs.windows.result == 'success' || inputs.windows_payload_run) }}
     runs-on: windows-2022
     permissions:
       contents: read
@@ -263,7 +287,7 @@ jobs:
           if-no-files-found: error
 
   windows-minimal:
-    if: ${{ !inputs.windows_payload_run }}
+    if: ${{ !inputs.windows_payload_run && !inputs.windows_ui_only }}
     name: Windows minimal CLI
     runs-on: windows-2022
     defaults:
