@@ -175,6 +175,8 @@ static void click_workspace(ph_window *window, ph_workspace_action action)
     click_at(window, x, y);
 }
 
+static void click_shortcut(ph_window *w, int x, int y, SDL_Scancode expected);
+
 static const unsigned char clipboard_image[] = {
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
     0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02,
@@ -444,6 +446,9 @@ static void windows_visual_review(ph_window *w, SDL_Window *native, const char *
     CHECK(ph_window_chrome_event(w, &input));
     screenshot(w, dir, "help-search-no-results");
     click_role(w, "Controls");
+    int setup_x, setup_y;
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_SETUP, &setup_x, &setup_y));
+    click_shortcut(w, setup_x, setup_y, SDL_SCANCODE_F2);
     screenshot(w, dir, "controls-with-setup-button");
     ph_setup setup;
     ph_setup_open(&setup, true);
@@ -673,9 +678,13 @@ int main(int argc, char **argv)
     SDL_SetWindowSize(native, 960, 720);
     ph_window_redraw(w);
     click_at(w, 65, section_y(2));
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_SETUP, &tx, &ty));
+    click_shortcut(w, tx, ty, SDL_SCANCODE_F2);
+    CHECK(ph_workspace_current_section(workspace) == 2 && ph_window_help_visible(w));
     CHECK(ph_workspace_target(workspace, PH_WORKSPACE_FEED, &tx, &ty));
     click_at(w, tx, ty);
     CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_FEED);
+    workspace_key(w, SDL_SCANCODE_PAGEDOWN, KMOD_NONE);
     CHECK(ph_workspace_target(workspace, PH_WORKSPACE_MEDIA, &tx, &ty));
     click_at(w, tx, ty);
     CHECK(!ph_window_media_keys(w));

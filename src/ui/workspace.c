@@ -2046,7 +2046,9 @@ static int control_settings(ph_workspace *u, int x, int y, int width)
     setting_row connection[] = {
         toggle_row("Enable PC controls", "Allow this PC’s mouse and keyboard to control your iPhone.",
                    PH_WORKSPACE_CONTROLS, !u->live.paused),
-        value_row("Activation", "Managed under Mouse and keyboard in the iPhone app.", activation)
+        value_row("Activation", "Managed under Mouse and keyboard in the iPhone app.", activation),
+        button_row("Bluetooth and pointer setup", "Pair over Bluetooth and check pointer alignment.",
+                   "Set up controls", PH_WORKSPACE_SETUP, true)
     };
     y = setting_group(u, x, y, width, "CONNECTION", connection, SDL_arraysize(connection));
     if (u->live.mirroring) {
@@ -2080,11 +2082,8 @@ static int control_settings(ph_workspace *u, int x, int y, int width)
                             ? "PC controls activate when screen sharing starts."
                             : "PC controls are available while your iPhone is connected.";
     y = text(u, notice, x, y, width, 11, true, u->muted);
-    y = text(u, "File transfers and clipboard sync remain available independently.",
-             x, y + 2, width, 11, false, u->muted) + 12;
-    action_button(u, (SDL_Rect){x, y, 153, 36}, "Set up controls", PH_WORKSPACE_SETUP, 0,
-                  false, true, true, PH_ICON_MOUSE);
-    return y + 36;
+    return text(u, "File transfers and clipboard sync remain available independently.",
+                x, y + 2, width, 11, false, u->muted);
 }
 
 static int transfer_settings(ph_workspace *u, int x, int y, int width)
