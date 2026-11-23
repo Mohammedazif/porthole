@@ -2026,6 +2026,12 @@ static int screen_settings(ph_workspace *u, int x, int y, int width)
     return setting_group(u, x, y, width, "CAPTURE AND DISPLAY", capture, SDL_arraysize(capture));
 }
 
+static bool verification_required(const ph_workspace *u)
+{
+    return !u->live.paused && u->live.connected && u->live.phone_controls_managed &&
+           u->live.phone_controls_allowed && !u->live.phone_controls_verified;
+}
+
 static const char *controls_status(const ph_workspace *u)
 {
     if (u->live.paused)
@@ -2033,7 +2039,10 @@ static const char *controls_status(const ph_workspace *u)
     if (u->live.phone_controls_managed && !u->live.phone_controls_allowed)
         return "Disabled on your iPhone";
     if (u->live.controls)
-        return "Active · Mouse and keyboard enabled";
+        return u->live.mirroring ? "Ready · Close Settings to control your iPhone"
+                                 : "Mouse and keyboard enabled";
+    if (verification_required(u))
+        return "Verification required · Tap Verify Bluetooth on your iPhone";
     if (u->live.mirroring)
         return "Enabled · Waiting for Bluetooth input";
     return "Enabled · Waiting for screen sharing";
@@ -2074,7 +2083,9 @@ static int control_settings(ph_workspace *u, int x, int y, int width)
                    PH_WORKSPACE_RELEASE, u->live.release_blur)
     };
     y = setting_group(u, x, y, width, "KEYBOARD", keyboard, SDL_arraysize(keyboard));
-    const char *notice = u->live.paused
+    const char *notice = verification_required(u)
+                            ? "In Porthole on your iPhone, open Mouse and keyboard and tap Verify Bluetooth."
+                        : u->live.paused
                             ? "Enable PC controls to use this PC’s mouse and keyboard with your iPhone."
                         : u->live.mirroring
                             ? "Control your iPhone from the shared screen or toolbar. Settings input stays on this PC."
@@ -2299,10 +2310,14 @@ static void settings(ph_workspace *u)
         status_dot(u, b.x + 17, bottom + 15, true);
         fitted_label(u, "Screen sharing continues", b.x + 30, bottom + 10, b.w / 2 - 30,
                      10, false, u->muted);
-        const char *controls = u->live.paused ? "PC controls disabled" : "PC controls enabled";
+        const char *controls = verification_required(u) ? "Bluetooth verification required"
+                               : u->live.controls ? "PC controls paused in Settings"
+                               : u->live.paused ? "PC controls disabled"
+                                                : "PC controls inactive";
         int controls_width = ph_text_width(controls, PH_TEXT(10, PH_FONT_REGULAR));
-        text(u, controls, b.x + b.w - 16 - controls_width, bottom + 10, controls_width + 2,
-             10, false, u->muted);
+        int controls_space = SDL_min(controls_width + 2, b.w / 2 - 16);
+        fitted_label(u, controls, b.x + b.w - 16 - controls_space, bottom + 10,
+                     controls_space, 10, false, u->muted);
     }
 }
 static void confirmation(ph_workspace *u)

@@ -2141,6 +2141,7 @@ ph_control_policy ph_origin_control_policy(ph_origin *o)
         return policy;
     pthread_mutex_lock(&o->lock);
     policy = o->control;
+    policy.verified = policy.connected && o->controls_verified;
     pthread_mutex_unlock(&o->lock);
     return policy;
 }

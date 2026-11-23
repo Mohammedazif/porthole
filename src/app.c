@@ -431,7 +431,7 @@ static void update_title(app *a)
     const char *control = a->opt->bluetooth && a->opt->ble_helper ? a->ble_status : "off";
     bool bluetooth_ready = !strcmp(control, "on");
     ph_control_policy policy = ph_origin_control_policy(a->origin);
-    if (bluetooth_ready && policy.managed && !ph_origin_controls_verified(a->origin))
+    if (bluetooth_ready && policy.managed && !policy.verified)
         control = "Verify Bluetooth on iPhone";
     else if (bluetooth_ready && !a->input.enabled)
         control = "Waiting for screen sharing";
@@ -439,9 +439,6 @@ static void update_title(app *a)
     /* The relative pointer has to see the AssistiveTouch dot, so a photo or
      * video that is not the phone screen pauses it. The absolute pointer does
      * not: a click is that spot on the phone. */
-    if (!strcmp(control, "on") && ph_origin_control_policy(a->origin).managed &&
-        !ph_origin_controls_verified(a->origin))
-        control = "Verify keyboard on iPhone";
     bool layout_pauses_pointer = a->presentation_mode && !a->absolute;
     if (a->phone_name[0])
         snprintf(title, sizeof title, "%s - %s  [Bluetooth control: %s]%s", PORTHOLE_NAME,
@@ -2603,8 +2600,7 @@ static bool may_forward_controls(app *a)
         return false;
     ph_control_policy policy = ph_origin_control_policy(a->origin);
     return !policy.managed ||
-           (ph_origin_controls_verified(a->origin) &&
-            (!policy.screen_only || atomic_load(&a->screen_on)));
+           (policy.verified && (!policy.screen_only || atomic_load(&a->screen_on)));
 }
 
 /* The number crosses the Bluetooth keyboard link only. Verification is tied to
@@ -3225,11 +3221,13 @@ static void do_window_action(app *a, ph_window_action action, bool *running)
                 ph_abs_release_all(&a->abs, SDL_GetTicks64());
             cancel_control_intent(a, SDL_GetTicks64());
         }
-        ph_input_set_enabled(&a->input, controls_wanted(a) && !a->link_stopping &&
-                                            !strcmp(a->ble_status, "on"));
+        ph_input_set_enabled(&a->input, may_forward_controls(a));
         ph_pointer_set_enabled(&a->pointer, a->input.enabled && a->phone_name[0]
                                && !a->presentation_mode, SDL_GetTicks64());
-        ph_window_set_detail(a->win, a->controls_paused ? "Controls paused" : "Controls on");
+        update_title(a);
+        ph_window_set_detail(a->win, a->controls_paused ? "PC controls disabled"
+                                        : a->input.enabled ? "PC controls enabled"
+                                                           : "PC controls requested");
         break;
     case PH_WINDOW_ACTION_MUTE:
         if (a->audio) {

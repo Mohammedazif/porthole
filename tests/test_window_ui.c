@@ -531,6 +531,15 @@ static void windows_visual_review(ph_window *w, SDL_Window *native, const char *
     screenshot(w, dir, "sharing-settings");
     ph_workspace_open_section(workspace, 2);
     ph_window_redraw(w);
+    const ph_control_policy unverified = {.managed = true, .connected = true, .enabled = true,
+                                           .screen_only = true};
+    ph_window_set_input_policy(w, true, unverified);
+    ph_window_set_status(w, true, false, "Verify Bluetooth on iPhone");
+    screenshot(w, dir, "sharing-controls-verification-required");
+    ph_control_policy verified = unverified;
+    verified.verified = true;
+    ph_window_set_input_policy(w, true, verified);
+    ph_window_set_status(w, true, true, "on");
     screenshot(w, dir, "sharing-controls");
     close_workspace_view(w);
     CHECK(!ph_window_help_visible(w));

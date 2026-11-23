@@ -1878,7 +1878,8 @@ void ph_window_set_status(ph_window *w, bool mirroring, bool control_ready, cons
 void ph_window_set_input_policy(ph_window *w, bool bluetooth_ready, ph_control_policy policy)
 {
     if (w->bluetooth_ready == bluetooth_ready && w->input_policy.managed == policy.managed &&
-        w->input_policy.enabled == policy.enabled && w->input_policy.screen_only == policy.screen_only)
+        w->input_policy.enabled == policy.enabled && w->input_policy.screen_only == policy.screen_only &&
+        w->input_policy.verified == policy.verified)
         return;
     w->bluetooth_ready = bluetooth_ready;
     w->input_policy = policy;
@@ -3055,6 +3056,7 @@ static void draw_workspace(ph_window *w, SDL_Rect area, ph_workspace_view page)
                               .controls_connected = w->bluetooth_ready,
                               .phone_controls_managed = w->input_policy.managed,
                               .phone_controls_allowed = w->input_policy.enabled,
+                              .phone_controls_verified = w->input_policy.verified,
                               .phone_controls_screen_only = w->input_policy.screen_only,
                               .metrics = w->metrics,
                               .modal = w->settings_visible || w->page != PH_WORKSPACE_HOME ||

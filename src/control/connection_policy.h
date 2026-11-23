@@ -8,6 +8,7 @@ typedef struct ph_control_policy {
     bool connected;    /* that phone's authenticated connection is still live */
     bool enabled;
     bool screen_only;
+    bool verified;     /* the current Bluetooth peer proved its keyboard link */
 } ph_control_policy;
 
 /* Pairing is an explicit setup action, not an idle Wi-Fi connection. */

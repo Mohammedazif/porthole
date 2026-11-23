@@ -68,6 +68,7 @@ typedef struct ph_workspace_live {
         release_blur, relative, sound, recording;
     bool share_checked, share_available, clipboard_available, modal;
     bool always_on_top, controls_connected, phone_controls_managed, phone_controls_allowed,
+         phone_controls_verified,
         phone_controls_screen_only;
     ph_metrics_snapshot metrics;
     char pc[64], phone[128], address[96], code[40], folder[128], detail[256], active_file[128];
