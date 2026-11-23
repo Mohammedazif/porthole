@@ -8,8 +8,12 @@
 #include <SDL.h>
 
 #include "core/log.h"
+#include "core/upath.h"
+#include "files/places.h"
+#include "ui/brand_art.h"
+#include "ui/control_icons.h"
+#include "ui/drawing.h"
 #include "ui/text.h"
-#include "ui/window.h"
 
 #ifndef _WIN32
 #include <sys/wait.h>
@@ -29,22 +33,23 @@
 #include <SDL_syswm.h>
 #endif
 
-#define CARD_W 400
-#define CARD_H 280
-#define CARD_R 28
+#define CARD_W 356
+#define CARD_H 174
+#define CARD_R 14
 #define SLIDE_PX 40
 #define IN_MS 280
 #define OUT_MS 220
 #define POP_MS 240
 #define HOLD_MS 8000
 #define WAIT_MS 14000
-#define PAD 28
+#define PAD 17
 
 enum { PHASE_HIDDEN, PHASE_IN, PHASE_HOLD, PHASE_OUT };
 
 struct ph_transfer_card {
     SDL_Window *window;
     SDL_Renderer *renderer;
+    SDL_Texture *logo, *light_logo;
     int shaped_w; /* pixel width the Windows corner region was cut for */
     SDL_Cursor *hand;
     SDL_Cursor *arrow;
@@ -62,7 +67,7 @@ struct ph_transfer_card {
     bool hot_open, hot_show, hot_close;
     bool received;
     bool can_show;
-    bool video;
+    bool dark, action_failed;
     int done, total;
     char path[4096];
     char name[160];
@@ -70,90 +75,15 @@ struct ph_transfer_card {
     SDL_Rect open_r, show_r, close_r;
 };
 
-static void rgba(SDL_Renderer *renderer, int red, int green, int blue, int alpha)
-{
-    SDL_SetRenderDrawColor(renderer, (Uint8)red, (Uint8)green, (Uint8)blue, (Uint8)alpha);
-}
-
-static void fill_rect(SDL_Renderer *renderer, int x, int y, int w, int h)
-{
-    SDL_Rect rect = {x, y, w, h};
-    if (w > 0 && h > 0)
-        SDL_RenderFillRect(renderer, &rect);
-}
-
+#if defined(PH_HAVE_X11) && defined(PH_HAVE_XSHAPE)
 static int isqrt_int(int n)
 {
     int x = 0;
-    if (n <= 0)
-        return 0;
     while ((x + 1) <= n / (x + 1))
         x++;
     return x;
 }
-
-static void fill_circle(SDL_Renderer *renderer, int cx, int cy, int rad)
-{
-    int dy;
-    if (rad < 1)
-        return;
-    for (dy = -rad; dy <= rad; dy++) {
-        int dx = isqrt_int(rad * rad - dy * dy);
-        fill_rect(renderer, cx - dx, cy + dy, dx * 2 + 1, 1);
-    }
-}
-
-static void fill_round(SDL_Renderer *renderer, int x, int y, int w, int h, int rad)
-{
-    if (w < 1 || h < 1)
-        return;
-    if (rad > w / 2)
-        rad = w / 2;
-    if (rad > h / 2)
-        rad = h / 2;
-    if (rad < 1) {
-        fill_rect(renderer, x, y, w, h);
-        return;
-    }
-    fill_rect(renderer, x + rad, y, w - 2 * rad, h);
-    fill_rect(renderer, x, y + rad, rad, h - 2 * rad);
-    fill_rect(renderer, x + w - rad, y + rad, rad, h - 2 * rad);
-    fill_circle(renderer, x + rad, y + rad, rad);
-    fill_circle(renderer, x + w - rad - 1, y + rad, rad);
-    fill_circle(renderer, x + rad, y + h - rad - 1, rad);
-    fill_circle(renderer, x + w - rad - 1, y + h - rad - 1, rad);
-}
-
-static void thick_line(SDL_Renderer *renderer, int x0, int y0, int x1, int y1, int rad)
-{
-    int steps = abs(x1 - x0) + abs(y1 - y0);
-    int i;
-    if (steps < 1)
-        steps = 1;
-    for (i = 0; i <= steps; i++)
-        fill_circle(renderer, x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps, rad);
-}
-
-static bool ends_with(const char *text, const char *ext)
-{
-    size_t nt = strlen(text), ne = strlen(ext), i;
-    if (nt < ne)
-        return false;
-    for (i = 0; i < ne; i++) {
-        char a = text[nt - ne + i];
-        if (a >= 'A' && a <= 'Z')
-            a = (char)(a - 'A' + 'a');
-        if (a != ext[i])
-            return false;
-    }
-    return true;
-}
-
-static bool video_name(const char *name)
-{
-    return ends_with(name, ".mp4") || ends_with(name, ".mov") || ends_with(name, ".m4v")
-           || ends_with(name, ".avi") || ends_with(name, ".mkv") || ends_with(name, ".webm");
-}
+#endif
 
 static void copy_name(ph_transfer_card *c, const char *path)
 {
@@ -164,18 +94,11 @@ static void copy_name(ph_transfer_card *c, const char *path)
     for (scan = base; *scan; scan++)
         if (*scan == '/' || *scan == '\\')
             base = scan + 1;
-    n = strlen(base);
-    if (n >= sizeof c->name)
-        n = sizeof c->name - 1;
+    n = SDL_min(strlen(base), sizeof c->name - 1);
+    while (n && ((unsigned char)base[n] & 192) == 128)
+        n--;
     memcpy(c->name, base, n);
     c->name[n] = 0;
-    if (n > 72) {
-        c->name[69] = '.';
-        c->name[70] = '.';
-        c->name[71] = '.';
-        c->name[72] = 0;
-    }
-    c->video = video_name(c->name);
 }
 
 static SDL_Rect display_bounds(int x, int y)
@@ -184,7 +107,7 @@ static SDL_Rect display_bounds(int x, int y)
     int i, n = SDL_GetNumVideoDisplays();
     for (i = 0; i < n; i++) {
         SDL_Rect area;
-        if (SDL_GetDisplayBounds(i, &area) != 0)
+        if (SDL_GetDisplayUsableBounds(i, &area) != 0)
             continue;
         if (x >= area.x && y >= area.y && x < area.x + area.w && y < area.y + area.h)
             return area;
@@ -264,10 +187,8 @@ static void rest_on_display(ph_transfer_card *c)
     SDL_Rect bounds;
     SDL_GetGlobalMouseState(&mx, &my);
     bounds = display_bounds(mx, my);
-    c->rest_x = bounds.x + (bounds.w - CARD_W) / 2;
-    c->rest_y = bounds.y + (bounds.h - CARD_H) / 2;
-    if (c->rest_y < bounds.y + 24)
-        c->rest_y = bounds.y + 24;
+    c->rest_x = SDL_max(bounds.x, bounds.x + bounds.w - CARD_W - 24);
+    c->rest_y = SDL_max(bounds.y, bounds.y + bounds.h - CARD_H - 24);
 }
 
 /* One line. A long name keeps its ending, so the extension stays visible. */
@@ -282,7 +203,11 @@ static void fit_name(char *out, size_t cap, const char *text, int width, int sca
         return;
     n = strlen(text);
     tail = n > 12 ? 12 : n / 2;
+    while (tail && ((unsigned char)text[n - tail] & 192) == 128)
+        tail--;
     for (head = n > tail ? n - tail : 0; head > 0; head--) {
+        if (((unsigned char)text[head] & 192) == 128)
+            continue;
         char probe[180];
         int len = snprintf(probe, sizeof probe, "%.*s...%s", (int)head, text, text + (n - tail));
         if (len > 0 && len < (int)sizeof probe && ph_text_width(probe, scale) <= width) {
@@ -293,63 +218,26 @@ static void fit_name(char *out, size_t cap, const char *text, int width, int sca
     snprintf(out, cap, "%s", "...");
 }
 
-static int draw_centered(SDL_Renderer *renderer, const char *text, int y, int scale, SDL_Color color)
+static void draw_button(SDL_Renderer *renderer, SDL_Rect box, const char *label,
+                        ph_control_icon icon, SDL_Color bg, SDL_Color ink)
 {
-    int box = CARD_W - PAD * 2;
-    int width = ph_text_width(text, scale);
-    int x = (CARD_W - width) / 2;
-    if (width > box) {
-        x = PAD;
-        width = box;
-    }
-    return ph_ui_draw_text(renderer, text, x, y, width, scale, color);
-}
-
-static void draw_check(SDL_Renderer *renderer, int cx, int cy, int scale)
-{
-    int rad = 22 * scale / 100;
-    if (rad < 1)
+    if (box.w < 1)
         return;
-    rgba(renderer, 48, 209, 88, 255);
-    fill_circle(renderer, cx, cy, rad);
-    rgba(renderer, 255, 255, 255, 255);
-    thick_line(renderer, cx + (-11 * scale / 100), cy + (1 * scale / 100), cx + (-4 * scale / 100),
-               cy + (8 * scale / 100), scale >= 80 ? 2 : 1);
-    thick_line(renderer, cx + (-4 * scale / 100), cy + (8 * scale / 100), cx + (12 * scale / 100),
-               cy + (-8 * scale / 100), scale >= 80 ? 2 : 1);
-}
-
-static void draw_button(SDL_Renderer *renderer, SDL_Rect rect, const char *label, bool hot)
-{
-    SDL_Color ink = {255, 255, 255, 255};
-    int tw, th;
-    if (rect.w < 1)
-        return;
-    rgba(renderer, hot ? 66 : 44, hot ? 66 : 44, hot ? 72 : 48, 255);
-    fill_round(renderer, rect.x, rect.y, rect.w, rect.h, rect.h / 2);
-    tw = ph_text_width(label, 2);
-    th = ph_text_line_height(2);
-    ph_ui_draw_text(renderer, label, rect.x + (rect.w - tw) / 2, rect.y + (rect.h - th) / 2,
-                    tw + 4, 2, ink);
+    ph_ui_round_rect(renderer, box, 8, bg);
+    int font = PH_TEXT(12, PH_FONT_MEDIUM);
+    int tw = ph_text_width(label, font);
+    int left = box.x + (box.w - tw - 22) / 2;
+    ph_icon_draw(renderer, icon, (SDL_Rect){left, box.y + (box.h - 15) / 2, 15, 15}, ink);
+    ph_text_draw(renderer, label, left + 22, box.y + (box.h - ph_text_line_height(font)) / 2,
+                 tw + 3, font, ink);
 }
 
 static void layout_buttons(ph_transfer_card *c)
 {
-    int y = CARD_H - PAD - 52;
-    int w = (CARD_W - PAD * 2 - 12) / 2;
-    c->close_r = (SDL_Rect){CARD_W - PAD - 36, 16, 36, 36};
-    if (!c->received || !c->path[0]) {
-        c->open_r = (SDL_Rect){0, 0, 0, 0};
-        c->show_r = (SDL_Rect){0, 0, 0, 0};
-        return;
-    }
-    if (!c->can_show) {
-        c->open_r = (SDL_Rect){(CARD_W - 200) / 2, y, 200, 52};
-        c->show_r = (SDL_Rect){0, 0, 0, 0};
-        return;
-    }
-    c->open_r = (SDL_Rect){PAD, y, w, 52};
-    c->show_r = (SDL_Rect){PAD + w + 12, y, w, 52};
+    c->close_r = (SDL_Rect){CARD_W - PAD - 26, 12, 28, 28};
+    int y = CARD_H - PAD - 33;
+    c->open_r = c->received ? (SDL_Rect){PAD, y, 100, 33} : (SDL_Rect){0};
+    c->show_r = c->received && c->can_show ? (SDL_Rect){PAD + 108, y, 136, 33} : (SDL_Rect){0};
 }
 
 static int check_scale(const ph_transfer_card *c, Uint64 now)
@@ -367,19 +255,19 @@ static int check_scale(const ph_transfer_card *c, Uint64 now)
 
 static void paint(ph_transfer_card *c, Uint64 now)
 {
-    SDL_Color white = {255, 255, 255, 255};
-    SDL_Color gray = {174, 174, 178, 255};
-    char sub[256];
-    char frac[32];
-    int y, scale;
-
     if (!c->renderer || c->phase == PHASE_HIDDEN)
         return;
     c->dirty = false;
     c->painted_at = now;
     layout_buttons(c);
-    rgba(c->renderer, 28, 28, 30, 255);
-    SDL_RenderClear(c->renderer);
+    SDL_Color bg = c->dark ? (SDL_Color){27, 30, 34, 255} : (SDL_Color){250, 251, 253, 255};
+    SDL_Color ink = c->dark ? (SDL_Color){245, 246, 248, 255} : (SDL_Color){20, 27, 36, 255};
+    SDL_Color muted = c->dark ? (SDL_Color){173, 184, 197, 255} : (SDL_Color){77, 91, 109, 255};
+    SDL_Color tile = c->dark ? (SDL_Color){42, 48, 57, 255} : (SDL_Color){232, 236, 241, 255};
+    SDL_Color hover = c->dark ? (SDL_Color){58, 67, 80, 255} : (SDL_Color){215, 224, 234, 255};
+    SDL_Renderer *r = c->renderer;
+    SDL_SetRenderDrawColor(r, bg.r, bg.g, bg.b, 255);
+    SDL_RenderClear(r);
     /* Lay out in window points: on a 150% or 200% display the window has more pixels
      * than points, and drawing 1:1 left the card small in its top-left corner. */
     {
@@ -390,10 +278,10 @@ static void paint(ph_transfer_card *c, Uint64 now)
 #ifdef _WIN32
             if (ow != c->shaped_w) {
                 SDL_SysWMinfo info;
-                int r = CARD_R * ow / ww;
+                int radius = CARD_R * ow / ww;
                 SDL_VERSION(&info.version);
                 if (SDL_GetWindowWMInfo(c->window, &info) && info.subsystem == SDL_SYSWM_WINDOWS) {
-                    HRGN round = CreateRoundRectRgn(0, 0, ow + 1, oh + 1, 2 * r, 2 * r);
+                    HRGN round = CreateRoundRectRgn(0, 0, ow + 1, oh + 1, 2 * radius, 2 * radius);
                     if (round && SetWindowRgn(info.info.win.window, round, TRUE))
                         c->shaped_w = ow;
                     else if (round)
@@ -403,71 +291,62 @@ static void paint(ph_transfer_card *c, Uint64 now)
 #endif
         }
     }
-    rgba(c->renderer, 255, 255, 255, 255);
-    fill_circle(c->renderer, PAD + 8, 34, 8);
-    ph_ui_draw_text(c->renderer, "Porthole", PAD + 24, 22, 200, 2, white);
-    if (c->hot_close) {
-        rgba(c->renderer, 58, 58, 62, 255);
-        fill_circle(c->renderer, c->close_r.x + c->close_r.w / 2, c->close_r.y + c->close_r.h / 2,
-                    14);
-    }
-    rgba(c->renderer, 210, 210, 214, 255);
-    thick_line(c->renderer, c->close_r.x + 11, c->close_r.y + 11, c->close_r.x + 25,
-               c->close_r.y + 25, 1);
-    thick_line(c->renderer, c->close_r.x + 25, c->close_r.y + 11, c->close_r.x + 11,
-               c->close_r.y + 25, 1);
+    int title_font = PH_TEXT(13, PH_FONT_MEDIUM);
+    int secondary_font = PH_TEXT(12, PH_FONT_REGULAR);
+    SDL_Rect mark = {PAD, 17, 18, 18};
+    SDL_Texture *logo = c->dark && c->light_logo ? c->light_logo : c->logo;
+    if (logo)
+        SDL_RenderCopy(r, logo, NULL, &mark);
+    ph_text_draw(r, "Porthole", PAD + 25, 17, 180, secondary_font, muted);
+    if (c->hot_close)
+        ph_ui_round_rect(r, c->close_r, 7, hover);
+    ph_icon_draw(r, PH_ICON_CLOSE,
+                 (SDL_Rect){c->close_r.x + 6, c->close_r.y + 6, 16, 16}, ink);
 
-    scale = check_scale(c, now);
-    y = 78;
-    if (c->name[0]) {
-        char shown[180];
-        char heading[64];
-        int text_x = PAD + 56;
-        int text_w = CARD_W - text_x - PAD;
-        const char *title = c->name;
-        rgba(c->renderer, 246, 246, 248, 255);
-        fill_round(c->renderer, PAD, y, 40, 50, 6);
-        if (scale > 0)
-            draw_check(c->renderer, PAD + 32, y + 42, scale > 36 ? 36 : scale);
-        if (c->received && c->total > 1) {
-            snprintf(heading, sizeof heading, "%d files received from iPhone", c->total);
-            title = heading;
-        }
-        fit_name(shown, sizeof shown, title, text_w, 2);
-        y = ph_ui_draw_text(c->renderer, shown, text_x, y + 14, text_w, 2, white);
-        y += 2;
+    SDL_Rect file = {PAD, 53, 44, 46};
+    ph_ui_round_rect(r, file, 9, tile);
+    ph_icon_draw(r, c->received ? PH_ICON_FILE : PH_ICON_RECEIVE,
+                 (SDL_Rect){file.x + 11, file.y + 11, 22, 22}, ink);
+    if (c->received) {
+        int side = 15 * check_scale(c, now) / 100;
+        SDL_Rect badge = {file.x + 39 - side / 2, file.y + 40 - side / 2, side, side};
+        ph_ui_round_rect(r, badge, side / 2, (SDL_Color){23, 126, 70, 255});
+        ph_icon_draw(r, PH_ICON_CHECK, badge, (SDL_Color){255, 255, 255, 255});
     }
-    if (!c->received)
-        snprintf(sub, sizeof sub, "Receiving from iPhone");
-    else if (c->total > 1 && c->name[0] && c->place[0])
-        snprintf(sub, sizeof sub, "%s and %d more, in %s", c->name, c->total - 1, c->place);
-    else if (c->total > 1 && c->name[0])
-        snprintf(sub, sizeof sub, "%s and %d more", c->name, c->total - 1);
-    else if (c->place[0])
-        snprintf(sub, sizeof sub, "Saved in %s", c->place);
-    else
-        snprintf(sub, sizeof sub, "Received from iPhone");
-    y = ph_ui_draw_text(c->renderer, sub, c->name[0] ? PAD + 56 : PAD, y, CARD_W - PAD * 2 - (c->name[0] ? 56 : 0),
-                        2, gray) + 10;
+    char heading[180], sub[128], shown[180];
+    if (!c->received) {
+        snprintf(heading, sizeof heading, "Receiving from iPhone");
+        snprintf(sub, sizeof sub, "%d of %d files", c->done, c->total);
+    } else {
+        if (c->total > 1)
+            snprintf(heading, sizeof heading, "%d files received", c->total);
+        else
+            snprintf(heading, sizeof heading, "%s", c->name);
+        if (c->action_failed)
+            snprintf(sub, sizeof sub, "Unable to open the saved location");
+        else if (c->place[0])
+            snprintf(sub, sizeof sub, "Saved in %s", c->place);
+        else
+            snprintf(sub, sizeof sub, "Received from iPhone");
+    }
+    int text_x = file.x + file.w + 13, text_width = CARD_W - text_x - PAD;
+    fit_name(shown, sizeof shown, heading, text_width, title_font);
+    ph_text_draw(r, shown, text_x, 56, text_width, title_font, ink);
+    fit_name(shown, sizeof shown, sub, text_width, secondary_font);
+    ph_text_draw(r, shown, text_x, 78, text_width, secondary_font, muted);
     if (!c->received && c->total > 0) {
         int track = CARD_W - PAD * 2;
-        int fill = c->done > 0 ? track * c->done / c->total : 0;
-        if (fill > track)
-            fill = track;
-        rgba(c->renderer, 58, 58, 62, 255);
-        fill_round(c->renderer, PAD, y, track, 6, 3);
-        rgba(c->renderer, 255, 255, 255, 255);
+        int fill = (int)((int64_t)track * c->done / c->total);
+        ph_ui_round_rect(r, (SDL_Rect){PAD, 125, track, 5}, 2, tile);
         if (fill > 0)
-            fill_round(c->renderer, PAD, y, fill < 6 ? 6 : fill, 6, 3);
-        y += 16;
-        snprintf(frac, sizeof frac, "%d of %d", c->done, c->total);
-        draw_centered(c->renderer, frac, y, 2, gray);
+            ph_ui_round_rect(r, (SDL_Rect){PAD, 125, fill, 5}, 2, ink);
     }
     if (c->received) {
-        draw_button(c->renderer, c->open_r, "Open", c->hot_open);
-        draw_button(c->renderer, c->show_r, "Show in folder", c->hot_show);
+        draw_button(r, c->open_r, "Open", PH_ICON_SEND, c->hot_open ? muted : ink, bg);
+        draw_button(r, c->show_r, "Show in folder", PH_ICON_FOLDER,
+                    c->hot_show ? hover : tile, ink);
     }
-    SDL_RenderPresent(c->renderer);
+    SDL_RenderPresent(r);
 }
 
 static bool hit(SDL_Rect rect, int x, int y)
@@ -481,7 +360,11 @@ static void open_external(const char *path)
     if (!path || !path[0])
         return;
 #ifdef _WIN32
-    ShellExecuteA(NULL, "open", path, NULL, NULL, SW_SHOWNORMAL);
+    wchar_t *wide = ph_wide(path);
+    if (wide) {
+        ShellExecuteW(NULL, L"open", wide, NULL, NULL, SW_SHOWNORMAL);
+        free(wide);
+    }
 #else
     pid_t pid = fork();
     if (pid < 0)
@@ -506,20 +389,6 @@ static void open_external(const char *path)
     PH_LOGI("transfer: open %s", path);
 }
 
-static void open_folder(const char *path)
-{
-    char dir[4096];
-    const char *slash = path ? strrchr(path, '/') : NULL;
-    size_t n;
-    if (!slash || slash == path)
-        return;
-    n = (size_t)(slash - path);
-    if (n >= sizeof dir)
-        n = sizeof dir - 1;
-    memcpy(dir, path, n);
-    dir[n] = 0;
-    open_external(dir);
-}
 
 static void hide_card(ph_transfer_card *c)
 {
@@ -546,7 +415,7 @@ ph_transfer_card *ph_transfer_card_create(void)
 {
     ph_transfer_card *c = calloc(1, sizeof *c);
     Uint32 flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_BORDERLESS | SDL_WINDOW_ALWAYS_ON_TOP
-                   | SDL_WINDOW_SKIP_TASKBAR | SDL_WINDOW_TOOLTIP;
+                   | SDL_WINDOW_SKIP_TASKBAR | SDL_WINDOW_TOOLTIP | SDL_WINDOW_ALLOW_HIGHDPI;
 
     if (!c)
         return NULL;
@@ -557,6 +426,26 @@ ph_transfer_card *ph_transfer_card_create(void)
     c->renderer = SDL_CreateRenderer(c->window, -1, SDL_RENDERER_SOFTWARE);
     if (!c->renderer || !ph_text_attach(c->renderer))
         goto fail;
+    SDL_Surface *mark = SDL_CreateRGBSurfaceWithFormat(
+        0, ph_brand_icon_w, ph_brand_icon_h, 32, SDL_PIXELFORMAT_RGBA32);
+    if (mark) {
+        for (int y = 0; y < mark->h; y++)
+            memcpy((unsigned char *)mark->pixels + y * mark->pitch,
+                   ph_brand_icon + y * mark->w * 4, (size_t)mark->w * 4);
+        c->logo = SDL_CreateTextureFromSurface(c->renderer, mark);
+        if (c->logo)
+            SDL_SetTextureScaleMode(c->logo, SDL_ScaleModeLinear);
+        for (int y = 0; y < mark->h; y++) {
+            unsigned char *row = (unsigned char *)mark->pixels + y * mark->pitch;
+            for (int x = 0; x < mark->w; x++, row += 4)
+                for (int channel = 0; channel < 3; channel++)
+                    row[channel] = (unsigned char)(255 - row[channel]);
+        }
+        c->light_logo = SDL_CreateTextureFromSurface(c->renderer, mark);
+        if (c->light_logo)
+            SDL_SetTextureScaleMode(c->light_logo, SDL_ScaleModeLinear);
+        SDL_FreeSurface(mark);
+    }
     c->hand = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_HAND);
     c->arrow = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW);
     c->opacity_ok = true;
@@ -573,10 +462,16 @@ void ph_transfer_card_destroy(ph_transfer_card *c)
 {
     if (!c)
         return;
-    if (c->renderer)
+    if (c->renderer) {
         ph_text_detach(c->renderer);
-    if (c->renderer)
+        ph_icon_release(c->renderer);
+        ph_ui_release_drawing(c->renderer);
+        if (c->logo)
+            SDL_DestroyTexture(c->logo);
+        if (c->light_logo)
+            SDL_DestroyTexture(c->light_logo);
         SDL_DestroyRenderer(c->renderer);
+    }
     if (c->window)
         SDL_DestroyWindow(c->window);
     if (c->hand)
@@ -584,6 +479,19 @@ void ph_transfer_card_destroy(ph_transfer_card *c)
     if (c->arrow)
         SDL_FreeCursor(c->arrow);
     free(c);
+}
+
+Uint32 ph_transfer_card_id(const ph_transfer_card *c)
+{
+    return c ? SDL_GetWindowID(c->window) : 0;
+}
+
+void ph_transfer_card_set_theme(ph_transfer_card *c, bool dark)
+{
+    if (c && c->dark != dark) {
+        c->dark = dark;
+        c->dirty = true;
+    }
 }
 
 void ph_transfer_card_place(ph_transfer_card *c, const char *place)
@@ -612,11 +520,11 @@ void ph_transfer_card_show(ph_transfer_card *c, const char *path, int done, int 
     } else {
         c->path[0] = 0;
         c->name[0] = 0;
-        c->video = false;
     }
     c->done = done;
     c->total = total;
     c->can_show = can_show;
+    c->action_failed = false;
     c->received = total > 0 && done >= total && c->path[0];
     c->touch = now;
     c->dirty = true;
@@ -688,9 +596,11 @@ void ph_transfer_card_tick(ph_transfer_card *c, Uint64 now)
         }
     }
     place_opacity(c, y, opacity);
-    popping = c->check_at && now - c->check_at < POP_MS + 40;
-    if (c->check_at && now - c->check_at >= POP_MS)
+    popping = c->check_at != 0;
+    if (popping && now - c->check_at >= POP_MS) {
         c->check_at = 0;
+        c->dirty = true;
+    }
     if (c->dirty || (popping && now - c->painted_at >= 32))
         paint(c, now);
 }
@@ -731,7 +641,9 @@ bool ph_transfer_card_event(ph_transfer_card *c, const SDL_Event *event, Uint64 
             c->dirty = true;
             paint(c, now);
         } else if (event->window.event == SDL_WINDOWEVENT_EXPOSED
-                   || event->window.event == SDL_WINDOWEVENT_SHOWN) {
+                   || event->window.event == SDL_WINDOWEVENT_SHOWN
+                   || event->window.event == SDL_WINDOWEVENT_SIZE_CHANGED
+                   || event->window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED) {
             c->dirty = true;
             paint(c, now);
         }
@@ -767,7 +679,9 @@ bool ph_transfer_card_event(ph_transfer_card *c, const SDL_Event *event, Uint64 
             open_external(c->path);
             c->touch = now;
         } else if (show) {
-            open_folder(c->path);
+            c->action_failed = !ph_place_reveal(c->path, true);
+            c->dirty = true;
+            paint(c, now);
             c->touch = now;
         }
     }

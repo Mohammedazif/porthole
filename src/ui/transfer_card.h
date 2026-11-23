@@ -11,6 +11,8 @@ typedef struct ph_transfer_card ph_transfer_card;
 
 ph_transfer_card *ph_transfer_card_create(void);
 void ph_transfer_card_destroy(ph_transfer_card *c);
+Uint32 ph_transfer_card_id(const ph_transfer_card *c);
+void ph_transfer_card_set_theme(ph_transfer_card *c, bool dark);
 
 /* path is NULL while a share is still arriving. done/total are that batch.
  * can_show adds the button that opens the folder the file landed in. */

@@ -96,6 +96,7 @@ if(PORTHOLE_WITH_AIRPLAY)
         ui/control_icons.c
         ui/drawing.c
         ui/workspace.c
+        ui/clipboard_preview.c
         ui/text.c
         ui/drag_ghost.c
         ui/transfer_card.c

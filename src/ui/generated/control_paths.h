@@ -153,6 +153,12 @@ static const glyph_point info_points[] = {
     {32,192},{37,151},{53,112},{79,79},{112,53},{151,37},{192,32},
     {-1,-1},{192,160},{192,272},{-1,-1},{192,112},{192,112}
 };
+static const glyph_point check_points[] = {
+    {68,191},{152,274},{317,108},
+};
+static const glyph_point down_points[] = {
+    {96,144},{192,240},{288,144},
+};
 static const glyph_point search_points[] = {
     {160,48},{194,53},{226,69},{251,94},{267,126},{272,160},{267,194},{251,226},{226,251},
     {194,267},{160,272},{126,267},{94,251},{69,226},{53,194},{48,160},{53,126},{69,94},
@@ -186,4 +192,6 @@ static const struct {const glyph_point *p; size_t n;} shapes[] = {
     [PH_ICON_STATS]={stats_points, SDL_arraysize(stats_points)},
     [PH_ICON_INFO]={info_points, SDL_arraysize(info_points)},
     [PH_ICON_SEARCH]={search_points, SDL_arraysize(search_points)},
+    [PH_ICON_CHECK]={check_points, SDL_arraysize(check_points)},
+    [PH_ICON_DOWN]={down_points, SDL_arraysize(down_points)},
 };

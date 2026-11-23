@@ -474,15 +474,31 @@ bool ph_place_reveal(const char *path, bool select_file)
     wchar_t *wide = ph_wide(path);
     if (!wide)
         return false;
+    for (wchar_t *p = wide; *p; p++)
+        if (*p == L'/')
+            *p = L'\\';
+    HRESULT apartment = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     bool ok = false;
     if (select_file) {
-        PIDLIST_ABSOLUTE pidl = ILCreateFromPathW(wide);
+        PIDLIST_ABSOLUTE pidl = SUCCEEDED(apartment) || apartment == RPC_E_CHANGED_MODE
+                                    ? ILCreateFromPathW(wide) : NULL;
         if (pidl) {
             ok = SUCCEEDED(SHOpenFolderAndSelectItems(pidl, 0, NULL, 0));
             ILFree(pidl);
         }
-    } else
+        if (!ok) {
+            wchar_t *separator = wcsrchr(wide, L'\\');
+            if (separator) {
+                /* Keep the separator for a path at a volume root. */
+                separator[1] = L'\0';
+                ok = (INT_PTR)ShellExecuteW(NULL, L"open", wide, NULL, NULL, SW_SHOWNORMAL) > 32;
+            }
+        }
+    } else {
         ok = (INT_PTR)ShellExecuteW(NULL, L"open", wide, NULL, NULL, SW_SHOWNORMAL) > 32;
+    }
+    if (SUCCEEDED(apartment))
+        CoUninitialize();
     free(wide);
     return ok;
 #else

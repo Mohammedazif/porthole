@@ -84,6 +84,8 @@ void ph_setup_back(ph_setup *s)
         s->step = s->controls ? PH_SETUP_CALIBRATE : PH_SETUP_MIRROR;
     else if (s->controls && s->step > PH_SETUP_PREPARE)
         s->step--;
+    else
+        ph_setup_close(s);
     s->error = PH_SETUP_OK;
 }
 

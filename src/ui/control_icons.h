@@ -29,6 +29,8 @@ typedef enum {
     PH_ICON_STATS,
     PH_ICON_INFO,
     PH_ICON_SEARCH,
+    PH_ICON_CHECK,
+    PH_ICON_DOWN,
 } ph_control_icon;
 void ph_icon_draw(SDL_Renderer *renderer, ph_control_icon kind, SDL_Rect box, SDL_Color color);
 void ph_icon_release(SDL_Renderer *renderer);

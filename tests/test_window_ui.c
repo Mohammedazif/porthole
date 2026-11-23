@@ -17,11 +17,14 @@
 #include "control/setup.h"
 #include "core/config.h"
 #include "core/secure_link.h"
+#include "core/upath.h"
+#include "files/places.h"
 #include "temp_path.h"
 #include "core/version.h"
 #include "ui/control_icons.h"
 #include "ui/drawing.h"
 #include "ui/text.h"
+#include "ui/transfer_card.h"
 #include "ui/vendor/qrcodegen.h"
 #include "ui/window.h"
 
@@ -165,6 +168,41 @@ static void click_at(ph_window *window, int x, int y)
     CHECK(ph_window_chrome_event(window, &event));
 }
 
+static void click_workspace(ph_window *window, ph_workspace_action action)
+{
+    int x, y;
+    CHECK(ph_workspace_target(ph_window_workspace(window), action, &x, &y));
+    click_at(window, x, y);
+}
+
+static const unsigned char clipboard_image[] = {
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02,
+    0x08, 0x02, 0x00, 0x00, 0x00, 0xfd, 0xd4, 0x9a, 0x73, 0x00, 0x00, 0x00,
+    0x16, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x78, 0xe6, 0x66, 0x23,
+    0xb2, 0x20, 0x80, 0xc1, 0x3c, 0xef, 0xe1, 0xaf, 0x43, 0xba, 0x00, 0x26,
+    0x13, 0x05, 0xdc, 0xeb, 0x07, 0xdf, 0x59, 0x00, 0x00, 0x00, 0x00, 0x49,
+    0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+};
+
+static void check_clipboard_thumbnail(SDL_Renderer *renderer)
+{
+    SDL_Rect thumbnail = {78, 230, 120, 114};
+    SDL_Surface *pixels = SDL_CreateRGBSurfaceWithFormat(
+        0, thumbnail.w, thumbnail.h, 32, SDL_PIXELFORMAT_RGBA32);
+    CHECK(pixels);
+    CHECK(SDL_RenderReadPixels(renderer, &thumbnail, pixels->format->format,
+                               pixels->pixels, pixels->pitch) == 0);
+    int colored = 0;
+    for (int y = 0; y < pixels->h; y++)
+        for (int x = 0; x < pixels->w; x++) {
+            const Uint8 *point = (const Uint8 *)pixels->pixels + y * pixels->pitch + x * 4;
+            colored += point[0] > 200 && point[1] < 95 && point[2] < 95;
+        }
+    SDL_FreeSurface(pixels);
+    CHECK(colored > 100);
+}
+
 static int section_y(int index)
 {
     return PH_WINDOW_BAR_PX + 47 + 18 + index * 41 + 19;
@@ -191,9 +229,12 @@ static void capture_settings(ph_window *w, const char *dir)
 {
     ph_workspace *workspace = ph_window_workspace(w);
     capture_settings_pages(w, dir, "");
+    int section = ph_workspace_current_section(workspace);
     ph_window_toggle_statistics(w);
     CHECK(ph_workspace_current_section(workspace) == 6 && ph_window_help_visible(w));
     ph_window_toggle_statistics(w);
+    CHECK(ph_workspace_current_section(workspace) == section && ph_window_help_visible(w));
+    click_workspace(w, PH_WORKSPACE_CLOSE);
     CHECK(!ph_window_help_visible(w));
     ph_window_toggle_help(w);
     CHECK(ph_workspace_current_section(workspace) == 5);
@@ -300,9 +341,7 @@ static void click_role(ph_window *w, const char *name)
 
 static void close_workspace_view(ph_window *w)
 {
-    int x, y;
-    CHECK(ph_workspace_target(ph_window_workspace(w), PH_WORKSPACE_CLOSE, &x, &y));
-    click_at(w, x, y);
+    click_workspace(w, PH_WORKSPACE_CLOSE);
 }
 
 static void windows_visual_review(ph_window *w, SDL_Window *native, const char *dir)
@@ -341,10 +380,21 @@ static void windows_visual_review(ph_window *w, SDL_Window *native, const char *
     ph_history *history = ph_history_open(NULL);
     CHECK(history);
     ph_workspace_set_history(workspace, history);
+    SDL_SetWindowSize(native, 1120, 680);
+    ph_window_open_received_history(w);
+    screenshot(w, dir, "received-history-empty");
+    close_workspace_view(w);
     ph_file_entry sent = {.name = "Boarding pass.pdf", .bytes = 624000, .confirmed = 624000,
                           .state = PH_TRANSFER_COMPLETE};
-    ph_file_entry received = {.name = "IMG_4821.HEIC", .incoming = true, .bytes = 3800000,
+    ph_file_entry received = {.name = "Café photo.png", .incoming = true, .bytes = 3800000,
                               .confirmed = 3800000, .state = PH_TRANSFER_COMPLETE};
+    char folder[1024];
+    CHECK(ph_test_temp_dir(folder, sizeof folder));
+    CHECK(snprintf(received.path, sizeof received.path, "%s/%s", folder, received.name)
+          < (int)sizeof received.path);
+    FILE *saved = ph_fopen(received.path, "wb");
+    CHECK(saved && fwrite(clipboard_image, sizeof clipboard_image, 1, saved) == 1);
+    CHECK(fclose(saved) == 0);
     CHECK(ph_history_add_file(history, &sent) && ph_history_add_file(history, &received));
     SDL_SetWindowSize(native, 1120, 680);
     ph_window_redraw(w);
@@ -356,7 +406,27 @@ static void windows_visual_review(ph_window *w, SDL_Window *native, const char *
     ph_window_set_receiving(w, 0, 0);
     ph_window_open_received_history(w);
     screenshot(w, dir, "received-history");
+    click_role(w, received.name);
+    screenshot(w, dir, "received-file-detail");
+    click_workspace(w, PH_WORKSPACE_REVEAL);
+    CHECK(ph_window_take_workspace_action(w, NULL) == PH_WORKSPACE_REVEAL);
+    CHECK(ph_place_reveal(received.path, true));
     close_workspace_view(w);
+    puts("File history and Explorer reveal with a Unicode filename passed");
+
+    ph_transfer_card *receipt = ph_transfer_card_create();
+    CHECK(receipt);
+    SDL_Window *receipt_window = SDL_GetWindowFromID(ph_transfer_card_id(receipt));
+    CHECK(receipt_window && (SDL_GetWindowFlags(receipt_window) & SDL_WINDOW_ALLOW_HIGHDPI));
+    Uint64 now = SDL_GetTicks64();
+    ph_transfer_card_place(receipt, "Downloads");
+    ph_transfer_card_show(receipt, received.path, 1, 1, true, now);
+    ph_transfer_card_tick(receipt, now + 500);
+    screenshot_renderer(SDL_GetRenderer(receipt_window), dir, "receipt-light");
+    ph_transfer_card_set_theme(receipt, true);
+    ph_transfer_card_tick(receipt, now + 501);
+    screenshot_renderer(SDL_GetRenderer(receipt_window), dir, "receipt-dark");
+    ph_transfer_card_destroy(receipt);
 
     SDL_SetWindowSize(native, 1280, 800);
     ph_window_open_settings(w);
@@ -374,6 +444,15 @@ static void windows_visual_review(ph_window *w, SDL_Window *native, const char *
     CHECK(ph_window_chrome_event(w, &input));
     screenshot(w, dir, "help-search-no-results");
     click_role(w, "Controls");
+    screenshot(w, dir, "controls-with-setup-button");
+    ph_setup setup;
+    ph_setup_open(&setup, true);
+    ph_window_set_setup(w, &setup);
+    screenshot(w, dir, "setup-from-settings");
+    CHECK(ph_window_setup_click(w, 1255, PH_WINDOW_BAR_PX + 24) == PH_SETUP_ACTION_CLOSE);
+    ph_setup_close(&setup);
+    ph_window_set_setup(w, &setup);
+    CHECK(ph_window_help_visible(w) && ph_workspace_current_section(workspace) == 2);
     click_role(w, "Enable PC controls (on)");
     CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_PAUSE);
     click_role(w, "Feed");
@@ -397,6 +476,15 @@ static void windows_visual_review(ph_window *w, SDL_Window *native, const char *
     CHECK(ph_workspace_clip_send(workspace) && ph_workspace_clip_receive(workspace));
     click_role(w, "Downloads");
     CHECK(ph_window_take_action(w) == PH_WINDOW_ACTION_PICK_FOLDER);
+    CHECK(ph_history_add_clip(history, 'T', "Clipboard sample", 16, true));
+    CHECK(ph_history_add_clip(history, 'P', clipboard_image, sizeof clipboard_image, false));
+    click_workspace(w, PH_WORKSPACE_HISTORY_OPEN);
+    close_workspace_view(w);
+    CHECK(ph_window_help_visible(w) && ph_workspace_current_section(workspace) == 3);
+    click_workspace(w, PH_WORKSPACE_CLIPBOARD_OPEN);
+    screenshot(w, dir, "clipboard-history-with-thumbnail");
+    close_workspace_view(w);
+    CHECK(ph_window_help_visible(w) && ph_workspace_current_section(workspace) == 3);
     click_role(w, "General");
     if (!ph_config_launch_managed() && !ph_config_launch_at_sign_in()) {
         click_role(w, "Launch at sign-in (off)");
@@ -452,6 +540,7 @@ static void windows_visual_review(ph_window *w, SDL_Window *native, const char *
     test_scaled_workspace(history, dir);
     ph_workspace_set_history(workspace, NULL);
     ph_history_close(history);
+    CHECK(ph_remove(received.path) == 0);
     puts("Screen sharing fixture and 100%, 125%, 150%, 200% raster checks passed");
 }
 #endif
@@ -684,6 +773,8 @@ int main(int argc, char **argv)
     ph_window_open_settings(w);
     capture_settings(w, dir);
     SDL_SetWindowSize(native, 960, 720);
+    ph_window_open_settings(w);
+    ph_workspace_open_section(workspace, 3);
     ph_window_redraw(w);
     CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLIPBOARD_OPEN, &tx, &ty));
     CHECK(ph_history_add_clip(history, 'T', "Clipboard sample", 16, true) != 0);
@@ -708,6 +799,9 @@ int main(int argc, char **argv)
     uint64_t item = 0;
     CHECK(ph_window_take_workspace_action(w, &item) == PH_WORKSPACE_CLIP_COPY &&
           item == ph_history_clip(history, 0)->id);
+    CHECK(ph_history_add_clip(history, 'P', clipboard_image, sizeof clipboard_image, false));
+    ph_window_redraw(w);
+    check_clipboard_thumbnail(SDL_GetRenderer(native));
     screenshot(w, dir, "13-clipboard");
     CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLOSE, &tx, &ty));
     workspace_key(w, SDL_SCANCODE_TAB, KMOD_NONE);
@@ -724,6 +818,8 @@ int main(int argc, char **argv)
     CHECK(focused.action == PH_WORKSPACE_CLOSE);
 #endif
     workspace_key(w, SDL_SCANCODE_RETURN, KMOD_NONE);
+    CHECK(ph_window_help_visible(w) && ph_workspace_current_section(workspace) == 3);
+    click_workspace(w, PH_WORKSPACE_CLOSE);
     CHECK(!ph_window_help_visible(w));
     ph_window_set_code_open(w, true);
     ph_window_set_active_transfer(w, "Sending photo.jpg");
@@ -766,7 +862,11 @@ int main(int argc, char **argv)
     SDL_SetWindowSize(native, 960, 680); ph_window_redraw(w);
     screenshot(w, dir, "04b-setup-wide");
     SDL_SetWindowSize(native, 460, 740); ph_window_redraw(w);
-    CHECK(ph_window_setup_click(w, 220, 694) == PH_SETUP_ACTION_NONE); /* first Back */
+    CHECK(ph_window_setup_click(w, 220, 694) == PH_SETUP_ACTION_BACK);
+    ph_setup_back(&setup);
+    CHECK(!setup.visible);
+    ph_setup_open(&setup, true);
+    ph_window_set_setup(w, &setup);
     CHECK(ph_window_setup_click(w, 370, 694) == PH_SETUP_ACTION_NEXT);
     setup.step = PH_SETUP_BLUETOOTH;
     ph_window_set_setup(w, &setup);

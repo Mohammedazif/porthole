@@ -166,7 +166,7 @@ jobs:
         run: dotnet run --project helpers/ble-winrt/Tests --configuration Release --artifacts-path build/dotnet-tests
 
       - name: Review native Windows desktop screens
-        if: ${{ inputs.windows_ui_only }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           set -eo pipefail
           mkdir -p out/windows-ui-review
@@ -174,7 +174,7 @@ jobs:
             2>&1 | tee out/windows-ui-review/validation.log
 
       - name: Upload Windows visual review
-        if: ${{ always() && inputs.windows_ui_only }}
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
           name: porthole-native-windows-review

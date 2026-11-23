@@ -3004,8 +3004,12 @@ static void sync_clipboard(app *a)
     }
     if (flags & PH_ORIGIN_CLIP_SENT)
         ph_window_set_detail(a->win, "On the iPhone, paste with Ctrl+V");
-    if (applied && !a->remote_clipboard_pending && (flags & PH_ORIGIN_CLIP_GOT))
-        ph_window_set_detail(a->win, "iPhone clipboard is on this PC");
+    if (applied && !a->remote_clipboard_pending && (flags & PH_ORIGIN_CLIP_GOT)) {
+        char pc[64], message[128];
+        ph_origin_pc_name(pc, sizeof pc);
+        snprintf(message, sizeof message, "Clipboard received on %s", pc);
+        ph_window_set_detail(a->win, message);
+    }
     now = SDL_GetTicks64();
     if (now - a->clip_poll_at < 400)
         return;
@@ -3210,7 +3214,7 @@ static void do_window_action(app *a, ph_window_action action, bool *running)
     case PH_WINDOW_ACTION_FORGET:
         if (a->origin)
             ph_origin_forget(a->origin);
-        ph_window_set_detail(a->win, "This PC forgot the iPhone. Enter the code again.");
+        ph_window_set_detail(a->win, "iPhone removed. Enter the connection code to pair again.");
         break;
     case PH_WINDOW_ACTION_PAUSE:
         a->controls_paused = !a->controls_paused;
@@ -3448,8 +3452,15 @@ static void apply_window_action(app *a, bool *running)
                         a->win,
                         "Unable to resume the transfer. Check the connection and source file.");
             } else if (action == PH_WORKSPACE_REVEAL) {
-                if (!ph_place_reveal(f->path, true))
-                    ph_window_set_detail(a->win, "Unable to show this file in its folder.");
+                if (!ph_place_reveal(f->path, true)) {
+                    ph_workspace_refresh_files(ui);
+                    ph_file_availability status = ph_history_file_availability(f);
+                    ph_window_set_detail(a->win, status == PH_FILE_MISSING
+                                                     ? "File not found. Locate it in File history."
+                                                 : status == PH_FILE_LOCATION_UNAVAILABLE
+                                                     ? "The saved location is unavailable."
+                                                     : "File Explorer could not open the saved location.");
+                }
             } else if (ph_place_pick_file(path, sizeof path)) {
                 if (ph_history_match_file(f, path)) {
                     if (!ph_history_update_file(a->history, id, f->state, f->confirmed, path))
@@ -3792,6 +3803,7 @@ int ph_app_run(const ph_app_options *opt)
         track_push(&a);
         sync_clipboard(&a);
         follow_pull(&a);
+        ph_transfer_card_set_theme(a.card, ph_workspace_dark(ph_window_workspace(a.win)));
         ph_transfer_card_tick(a.card, SDL_GetTicks64());
         if (a.keyboard_lift_at && SDL_GetTicks64() >= a.keyboard_lift_at) {
             a.keyboard_lift_at = 0;

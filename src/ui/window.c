@@ -37,6 +37,12 @@ struct ph_window {
 #endif
     ph_workspace_action workspace_action;
     ph_workspace_view page;
+    struct {
+        ph_workspace_view page;
+        int section;
+        bool settings;
+    } navigation[8];
+    size_t navigation_depth;
     uint64_t action_item;
     char incoming_file[128];
     uint64_t incoming_bytes, incoming_size;
@@ -939,12 +945,11 @@ static setup_frame setup_layout(int width)
 static void setup_buttons(int width, int height, SDL_Rect buttons[3])
 {
     setup_frame f = setup_layout(width);
-    int button_width = (f.width - 20) / 3;
-    if (f.wide && button_width > 132) button_width = 132;
-    int x = f.wide ? f.left + f.width - 3 * button_width - 20 : f.left;
-    for (int i = 0; i < 3; i++)
-        buttons[i] = (SDL_Rect){x + i * (button_width + 10), height - 66, button_width, 40};
+    int button_width = SDL_min(132, (f.width - 10) / 2);
+    int x = f.left + f.width - 2 * button_width - 10;
     buttons[0] = (SDL_Rect){width - 40, PH_WINDOW_BAR_PX + 8, 32, 32};
+    buttons[1] = (SDL_Rect){x, height - 66, button_width, 40};
+    buttons[2] = (SDL_Rect){x + button_width + 10, height - 66, button_width, 40};
 }
 
 static bool setup_next_enabled(const ph_setup *setup)
@@ -969,10 +974,8 @@ static dialog_colors dialog_theme(ph_window *w)
 }
 static void dismiss_icon(SDL_Renderer *r, SDL_Rect b, SDL_Color color)
 {
-    int x = b.x + b.w / 2, y = b.y + b.h / 2;
-    SDL_SetRenderDrawColor(r, color.r, color.g, color.b, 255);
-    stroke(r, x - 5, y - 5, x + 5, y + 5);
-    stroke(r, x - 5, y + 5, x + 5, y - 5);
+    ph_icon_draw(r, PH_ICON_CLOSE,
+                 (SDL_Rect){b.x + (b.w - 20) / 2, b.y + (b.h - 20) / 2, 20, 20}, color);
 }
 
 static void draw_setup(ph_window *w, int width, int height, int top)
@@ -1004,9 +1007,8 @@ static void draw_setup(ph_window *w, int width, int height, int top)
                 rounded(w->renderer, (SDL_Rect){dot.x + 1, dot.y + 1, 26, 26}, 13, ui.bg);
             snprintf(n, sizeof n, "%d", i + 1);
             if (done) {
-                SDL_SetRenderDrawColor(w->renderer, 255, 255, 255, 255);
-                stroke(w->renderer, dot.x + 8, dot.y + 14, dot.x + 12, dot.y + 18);
-                stroke(w->renderer, dot.x + 12, dot.y + 18, dot.x + 19, dot.y + 10);
+                ph_icon_draw(w->renderer, PH_ICON_CHECK,
+                             (SDL_Rect){dot.x + 5, dot.y + 5, 18, 18}, ui.surface);
             } else {
                 draw_text(w->renderer, n,
                           dot.x + (28 - ph_text_width(n, PH_TEXT(13, PH_FONT_MEDIUM))) / 2,
@@ -1039,12 +1041,7 @@ static void draw_setup(ph_window *w, int width, int height, int top)
         break;
     case PH_SETUP_BLUETOOTH:
         title = "Connect Bluetooth";
-#ifdef _WIN32
-        body = "On iPhone: Settings > Bluetooth.\n"
-               "Select this PC's Bluetooth name under Other Devices.\n\n"
-               "Accept the Windows pairing prompt.\n"
-               "If pairing fails, remove the old entry on both devices and pair again.";
-#else
+#ifndef _WIN32
         body = "On iPhone: Settings > Bluetooth.\n"
                "Select Porthole under Other Devices.\n\n"
                "Wait until the controls connect.\n"
@@ -1053,14 +1050,6 @@ static void draw_setup(ph_window *w, int width, int height, int top)
         break;
     case PH_SETUP_MIRROR:
         title = "Share your screen";
-        body = "Open Porthole on your iPhone.\n"
-               "Pair this PC in the iPhone app. Use the QR code or enter the connection details.\n\n"
-               "Tap Share screen. In the iOS dialog choose Porthole, then Start Broadcast.\n\n"
-               "Keep both devices on the same Wi-Fi.";
-        if (s->controls)
-            body = "Open Porthole on your iPhone and pair with this PC.\n\n"
-                   "Under Settings > Mouse and keyboard, select Verify Bluetooth.\n\n"
-                   "Tap Share screen, then choose Porthole and Start Broadcast.";
         break;
     case PH_SETUP_CALIBRATE:
         title = "Check pointer alignment";
@@ -1080,9 +1069,6 @@ static void draw_setup(ph_window *w, int width, int height, int top)
     int y = draw_text(w->renderer, title, margin, top + (frame.wide ? 52 : 64), content_width,
                       PH_TEXT(frame.wide ? 28 : 22, PH_FONT_SEMIBOLD), ui.ink);
     SDL_Rect card = {margin, y + 14, content_width, buttons[1].y - y - 34};
-    rounded(w->renderer, card, 14, ui.edge);
-    rounded(w->renderer, (SDL_Rect){card.x + 1, card.y + 1, card.w - 2, card.h - 2}, 13,
-            ui.surface);
     SDL_Rect viewport = {card.x + 20, card.y + 18, card.w - 40, card.h - 36};
     if (viewport.h < 1) viewport.h = 1;
     char status[160] = "";
@@ -1100,11 +1086,27 @@ static void draw_setup(ph_window *w, int width, int height, int top)
                        : s->error == PH_SETUP_CANCELED ? "Check paused. Press Start to retry."
                        : s->error == PH_SETUP_SAVE_FAILED ? "Could not save calibration. Check the configuration folder, then retry."
                        : "Pointer not confirmed. Check AssistiveTouch and Tracking Sensitivity, then retry.";
-    char share_body[700];
-    if (s->step == PH_SETUP_MIRROR && w->code_open && w->pull_hint[0]) {
-        snprintf(share_body, sizeof share_body, "%s\n\n%s%s", body,
-                 "This PC: ", w->pull_hint);
-        body = share_body;
+    char pairing_body[700];
+    const char *pc = w->pc_name[0] ? w->pc_name : "Porthole";
+    if (s->step == PH_SETUP_MIRROR) {
+        snprintf(pairing_body, sizeof pairing_body,
+                 "Open Porthole on your iPhone and select %s.\n\n%s"
+                 "Select Share screen, then Start Broadcast. Keep both devices on the same Wi-Fi network.",
+                 pc, s->controls ? "Under Settings > Mouse and keyboard, select Verify Bluetooth.\n\n" : "");
+        if (w->code_open && w->pull_hint[0]) {
+            size_t used = strlen(pairing_body);
+            snprintf(pairing_body + used, sizeof pairing_body - used, "\n\n%s · %s",
+                     pc, w->pull_hint);
+        }
+        body = pairing_body;
+    } else if (s->step == PH_SETUP_BLUETOOTH) {
+#ifdef _WIN32
+        snprintf(pairing_body, sizeof pairing_body,
+                 "On iPhone: Settings > Bluetooth.\n"
+                 "Select %s under Other Devices and accept the Windows pairing prompt.\n\n"
+                 "If pairing fails, remove the old entry on both devices and pair again.", pc);
+        body = pairing_body;
+#endif
     }
     int body_h = text_height(body, viewport.w, PH_TEXT(15, PH_FONT_REGULAR));
     int status_h = status[0] ? 18 + text_height(status, viewport.w - 16, PH_TEXT(13, PH_FONT_MEDIUM)) : 0;
@@ -1112,7 +1114,13 @@ static void draw_setup(ph_window *w, int width, int height, int top)
     bool good = (s->step == PH_SETUP_BLUETOOTH && s->bluetooth_ready)
                 || (s->step == PH_SETUP_MIRROR && s->mirroring)
                 || (s->step == PH_SETUP_CALIBRATE && s->calibrated);
-    modal_range(w, body_h + status_h + error_h, viewport.h);
+    int content_height = body_h + status_h + error_h;
+    viewport.h = SDL_min(viewport.h, content_height + 4);
+    card.h = viewport.h + 36;
+    rounded(w->renderer, card, 14, ui.edge);
+    rounded(w->renderer, (SDL_Rect){card.x + 1, card.y + 1, card.w - 2, card.h - 2}, 13,
+            ui.surface);
+    modal_range(w, content_height, viewport.h);
     SDL_RenderSetClipRect(w->renderer, &viewport);
     y = draw_text(w->renderer, body, viewport.x, viewport.y - w->modal_scroll, viewport.w,
                   PH_TEXT(15, PH_FONT_REGULAR), ui.ink);
@@ -1131,11 +1139,12 @@ static void draw_setup(ph_window *w, int width, int height, int top)
                        : s->step == PH_SETUP_CALIBRATE && !s->calibrated
                              ? s->error != PH_SETUP_OK ? "Retry" : "Start" : "Next";
     const char *labels[] = {NULL, "Back", next};
-    bool first = s->step == (s->controls ? PH_SETUP_PREPARE : PH_SETUP_MIRROR);
-    dismiss_icon(w->renderer, buttons[0], ui.muted);
+    rounded(w->renderer, buttons[0], 7, ui.edge);
+    rounded(w->renderer, (SDL_Rect){buttons[0].x + 1, buttons[0].y + 1, 30, 30}, 6, ui.surface);
+    dismiss_icon(w->renderer, buttons[0], ui.ink);
     for (int i = 1; i < 3; i++)
         draw_button(w, buttons[i], labels[i], i == 2,
-                      i == 1 ? first : i == 2 ? !setup_next_enabled(s) : false, false);
+                    i == 2 && !setup_next_enabled(s), false);
 
 }
 
@@ -2089,11 +2098,50 @@ static void set_settings(ph_window *w, bool open)
     ph_window_redraw(w);
 }
 
+static void open_view(ph_window *w, ph_workspace_view page, bool settings, int section)
+{
+    int previous_section = ph_workspace_current_section(w->workspace);
+    if (w->page != page || w->settings_visible != settings ||
+        (settings && page == PH_WORKSPACE_HOME && previous_section != section)) {
+        if (w->navigation_depth == SDL_arraysize(w->navigation)) {
+            w->navigation_depth--;
+            memmove(w->navigation, w->navigation + 1,
+                    w->navigation_depth * sizeof w->navigation[0]);
+        }
+        size_t next = w->navigation_depth++;
+        w->navigation[next].page = w->page;
+        w->navigation[next].section = previous_section;
+        w->navigation[next].settings = w->settings_visible;
+    }
+    w->page = page;
+    if (page == PH_WORKSPACE_HOME && previous_section != section)
+        ph_workspace_open_section(w->workspace, section);
+    set_settings(w, settings);
+    ph_window_redraw(w);
+}
+
+static void close_view(ph_window *w)
+{
+    if (w->navigation_depth) {
+        size_t last = --w->navigation_depth;
+        w->page = w->navigation[last].page;
+        if (w->page == PH_WORKSPACE_HOME)
+            ph_workspace_open_section(w->workspace, w->navigation[last].section);
+        set_settings(w, w->navigation[last].settings);
+    } else if (w->settings_visible || w->page != PH_WORKSPACE_HOME) {
+        w->page = PH_WORKSPACE_HOME;
+        set_settings(w, false);
+    } else if (w->transfers_open) {
+        flip_panel(w, &w->transfers_open, TRANSFERS_W);
+    }
+    ph_window_redraw(w);
+}
+
 void ph_window_open_settings(ph_window *w)
 {
-    if (!w || w->settings_visible)
+    if (!w || (w->settings_visible && w->page == PH_WORKSPACE_HOME))
         return;
-    set_settings(w, true);
+    open_view(w, PH_WORKSPACE_HOME, true, ph_workspace_current_section(w->workspace));
 }
 
 void ph_window_set_transfer_percent(ph_window *w, int percent)
@@ -2206,11 +2254,9 @@ void ph_window_open_received_history(ph_window *w)
     ph_workspace_open_history(w->workspace, true);
     w->diagnostics_visible = false;
     w->help_visible = false;
-    w->page = PH_WORKSPACE_HISTORY;
     mark_received_read(w);
-    if (mirror_chrome(w))
-        set_settings(w, true);
-    ph_window_redraw(w);
+    open_view(w, PH_WORKSPACE_HISTORY, w->settings_visible || mirror_chrome(w),
+              ph_workspace_current_section(w->workspace));
 }
 
 void ph_window_open_pairing(ph_window *w)
@@ -2220,6 +2266,7 @@ void ph_window_open_pairing(ph_window *w)
     w->diagnostics_visible = false;
     w->help_visible = false;
     w->page = PH_WORKSPACE_HOME;
+    w->navigation_depth = 0;
     set_settings(w, false);
     w->pairing_visible = w->has_picture;
     ph_window_redraw(w);
@@ -2230,13 +2277,9 @@ void ph_window_toggle_help(ph_window *w)
     if (w->workspace) {
         if (w->page == PH_WORKSPACE_HOME && ph_workspace_current_section(w->workspace) == 5 &&
             w->settings_visible)
-            set_settings(w, false);
-        else {
-            w->page = PH_WORKSPACE_HOME;
-            ph_workspace_open_section(w->workspace, 5);
-            set_settings(w, true);
-            ph_window_redraw(w);
-        }
+            close_view(w);
+        else
+            open_view(w, PH_WORKSPACE_HOME, true, 5);
         return;
     }
     w->help_visible = !w->help_visible;
@@ -2252,13 +2295,10 @@ void ph_window_toggle_statistics(ph_window *w)
     }
     if (w->settings_visible && w->page == PH_WORKSPACE_HOME &&
         ph_workspace_current_section(w->workspace) == 6) {
-        set_settings(w, false);
+        close_view(w);
         return;
     }
-    w->page = PH_WORKSPACE_HOME;
-    ph_workspace_open_section(w->workspace, 6);
-    set_settings(w, true);
-    ph_window_redraw(w);
+    open_view(w, PH_WORKSPACE_HOME, true, 6);
 }
 
 bool ph_window_help_visible(const ph_window *w)
@@ -2295,8 +2335,7 @@ ph_setup_action ph_window_setup_click(const ph_window *w, int x, int y)
     if (SDL_PointInRect(&point, &buttons[0]))
         return PH_SETUP_ACTION_CLOSE;
     if (SDL_PointInRect(&point, &buttons[1]))
-        return w->setup.step == (w->setup.controls ? PH_SETUP_PREPARE : PH_SETUP_MIRROR)
-                   ? PH_SETUP_ACTION_NONE : PH_SETUP_ACTION_BACK;
+        return PH_SETUP_ACTION_BACK;
     if (SDL_PointInRect(&point, &buttons[2]))
         return !setup_next_enabled(&w->setup) ? PH_SETUP_ACTION_NONE
                : w->setup.step == PH_SETUP_CALIBRATE && !w->setup.calibrated
@@ -3168,31 +3207,22 @@ static void dispatch_workspace_action(ph_window *w)
     ph_workspace_action action = ph_workspace_take_action(w->workspace, &item);
     switch (action) {
     case PH_WORKSPACE_SETTINGS_OPEN:
-        w->page = PH_WORKSPACE_HOME;
-        set_settings(w, true);
+        ph_window_open_settings(w);
         break;
     case PH_WORKSPACE_HISTORY_OPEN:
     case PH_WORKSPACE_CLIPBOARD_OPEN:
-        w->page =
-            action == PH_WORKSPACE_HISTORY_OPEN ? PH_WORKSPACE_HISTORY : PH_WORKSPACE_CLIPBOARD;
         if (action == PH_WORKSPACE_HISTORY_OPEN)
             mark_received_read(w);
-        if (w->has_picture)
-            set_settings(w, true);
+        open_view(w, action == PH_WORKSPACE_HISTORY_OPEN ? PH_WORKSPACE_HISTORY : PH_WORKSPACE_CLIPBOARD,
+                  w->settings_visible || mirror_chrome(w), ph_workspace_current_section(w->workspace));
         break;
     case PH_WORKSPACE_CLOSE:
-        if (w->settings_visible || w->page != PH_WORKSPACE_HOME) {
-            w->page = PH_WORKSPACE_HOME;
-            set_settings(w, false);
-        } else if (w->transfers_open)
-            flip_panel(w, &w->transfers_open, TRANSFERS_W);
+        close_view(w);
         break;
     case PH_WORKSPACE_STATS:
         ph_window_toggle_statistics(w);
         break;
     case PH_WORKSPACE_SETUP:
-        w->page = PH_WORKSPACE_HOME;
-        set_settings(w, false);
         push_shortcut(w, SDL_SCANCODE_F2, KMOD_NONE);
         break;
     case PH_WORKSPACE_NEW_CODE:
@@ -3394,8 +3424,10 @@ bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
             ph_window_redraw(w);
         }
         else if (hit == CHROME_SETTINGS) {
-            w->page = PH_WORKSPACE_HOME;
-            set_settings(w, !w->settings_visible);
+            if (w->settings_visible && w->page == PH_WORKSPACE_HOME)
+                close_view(w);
+            else
+                ph_window_open_settings(w);
             w->modal_scroll = 0;
             ph_window_redraw(w);
         }
@@ -3423,7 +3455,6 @@ bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
                 w->pending_action = PH_WINDOW_ACTION_PAUSE;
                 break;
             case SET_GUIDE:
-                w->settings_visible = false;
                 push_shortcut(w, SDL_SCANCODE_F2, KMOD_NONE);
                 break;
             case SET_CTRL:

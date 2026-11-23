@@ -1,4 +1,5 @@
 #include "ui/workspace.h"
+#include "ui/clipboard_preview.h"
 #include "ui/control_icons.h"
 #include "ui/drawing.h"
 #include "ui/text.h"
@@ -71,7 +72,7 @@ struct ph_workspace {
     size_t cursor, anchor;
     ph_session_state sessions;
     char device_id[129], edit_value[129];
-    bool section_menu;
+    bool section_menu, date_menu;
     int date_range;
     struct {
         uint64_t id;
@@ -79,6 +80,11 @@ struct ph_workspace {
     } availability[64];
     uint64_t selected, clip_selected[100];
     size_t clip_selected_n;
+    struct {
+        uint64_t id;
+        SDL_Texture *texture;
+        int width, height;
+    } previews[24];
     bool history_open, editing, tray, notifications, sync, to_phone, to_pc, shortcuts;
     bool launch_at_sign_in, launch_managed, keep_aspect;
     unsigned expanded_guides;
@@ -91,6 +97,18 @@ struct ph_workspace {
     bool theme_started;
     SDL_Color ink, muted, surface, background, border, selected_bg, positive;
 };
+static const char *pc_name(const ph_workspace *u)
+{
+    return u->live.pc[0] ? u->live.pc : "Porthole";
+}
+
+static void clear_previews(ph_workspace *u)
+{
+    for (size_t i = 0; i < SDL_arraysize(u->previews); i++)
+        if (u->previews[i].texture)
+            SDL_DestroyTexture(u->previews[i].texture);
+    memset(u->previews, 0, sizeof u->previews);
+}
 static void color(SDL_Renderer *r, SDL_Color c)
 {
     SDL_SetRenderDrawColor(r, c.r, c.g, c.b, c.a);
@@ -352,6 +370,7 @@ void ph_workspace_destroy(ph_workspace *u)
         atomic_store(&u->stop, true);
         if (u->theme_started)
             pthread_join(u->theme_thread, NULL);
+        clear_previews(u);
         free(u);
     }
 }
@@ -363,6 +382,7 @@ void ph_workspace_refresh_files(ph_workspace *u)
 void ph_workspace_set_history(ph_workspace *u, ph_history *h)
 {
     if (u) {
+        clear_previews(u);
         u->history = h;
         u->revision++;
         u->selected = 0;
@@ -438,6 +458,7 @@ void ph_workspace_open_history(ph_workspace *u, bool received)
     u->selected = 0;
     u->filter = received ? 2 : 0;
     u->date_range = 0;
+    u->date_menu = false;
     u->scroll = 0;
     u->search[0] = 0;
 }
@@ -453,6 +474,8 @@ static void size_text(uint64_t bytes, char out[40])
         snprintf(out, 40, "%.1f GB", (double)bytes / 1073741824);
     else if (bytes >= 1048576)
         snprintf(out, 40, "%.1f MB", (double)bytes / 1048576);
+    else if (bytes < 1024)
+        snprintf(out, 40, "%u B", (unsigned)bytes);
     else
         snprintf(out, 40, "%.0f KB", (double)bytes / 1024);
 }
@@ -549,8 +572,8 @@ static int text_span_width(const char *s, size_t bytes, int font)
 static void entry_box(ph_workspace *u, SDL_Rect box, const char *value, const char *label,
                       int action)
 {
-    bool help_search = action == UI_SEARCH && u->view == PH_WORKSPACE_SETTINGS;
-    if (help_search) {
+    bool search = action == UI_SEARCH;
+    if (search) {
         rounded(u, box, 8, u->border);
         rounded(u, (SDL_Rect){box.x + 1, box.y + 1, box.w - 2, box.h - 2}, 7, u->surface);
         ph_icon_draw(u->renderer, PH_ICON_SEARCH,
@@ -558,7 +581,7 @@ static void entry_box(ph_workspace *u, SDL_Rect box, const char *value, const ch
     } else {
         rounded(u, box, 7, u->selected_bg);
     }
-    int x = box.x + (help_search ? 39 : 10);
+    int x = box.x + (search ? 39 : 10);
     int width = box.x + box.w - x - 10;
     int label_y = box.y + (box.h - ph_text_line_height(PH_TEXT(12, PH_FONT_REGULAR))) / 2;
     if (u->editing && action == (u->confirm ? UI_EDIT_DEVICE : UI_SEARCH)) {
@@ -588,7 +611,8 @@ static void entry_box(ph_workspace *u, SDL_Rect box, const char *value, const ch
 
 static void search_box(ph_workspace *u, SDL_Rect box)
 {
-    entry_box(u, box, u->search, "Search", UI_SEARCH);
+    entry_box(u, box, u->search,
+              u->view == PH_WORKSPACE_HISTORY ? "Search files or locations" : "Search", UI_SEARCH);
 }
 
 static void file_badge(ph_workspace *u, SDL_Rect box, const char *name)
@@ -628,6 +652,39 @@ static void file_badge(ph_workspace *u, SDL_Rect box, const char *name)
                  box.w - 4, font, ink);
 }
 
+static time_t history_cutoff(const ph_workspace *u)
+{
+    if (!u->date_range)
+        return 0;
+    time_t now = time(NULL);
+    struct tm *local = localtime(&now);
+    if (!local)
+        return 0;
+    struct tm day = *local;
+    day.tm_hour = day.tm_min = day.tm_sec = 0;
+    day.tm_isdst = -1;
+    if (u->date_range == 2)
+        day.tm_mday -= 6;
+    return mktime(&day);
+}
+
+static bool file_matches(const ph_workspace *u, const ph_file_entry *f, time_t cutoff)
+{
+    return f->time >= cutoff && (u->filter != 1 || !f->incoming) &&
+           (u->filter != 2 || f->incoming) &&
+           (contains(f->name, u->search) || contains(f->path, u->search));
+}
+
+static int history_row_count(const ph_workspace *u, int limit)
+{
+    time_t cutoff = history_cutoff(u);
+    int count = 0;
+    for (size_t i = 0; i < ph_history_file_count(u->history) && count < limit; i++)
+        if (file_matches(u, ph_history_file(u->history, i), cutoff))
+            count++;
+    return count;
+}
+
 static void draw_file_rows(ph_workspace *u, SDL_Rect b, bool full)
 {
     const char *filters[] = {"All transfers", "Sent", "Received"};
@@ -652,24 +709,10 @@ static void draw_file_rows(ph_workspace *u, SDL_Rect b, bool full)
     SDL_RenderSetClipRect(u->renderer, &clip);
     int cy = y - u->scroll;
     bool any = false;
-    time_t cutoff = 0;
-    if (full && u->date_range) {
-        time_t now = time(NULL);
-        struct tm *local = localtime(&now);
-        if (local) {
-            struct tm day = *local;
-            day.tm_hour = day.tm_min = day.tm_sec = 0;
-            day.tm_isdst = -1;
-            if (u->date_range == 2)
-                day.tm_mday -= 6;
-            cutoff = mktime(&day);
-        }
-    }
+    time_t cutoff = full ? history_cutoff(u) : 0;
     for (size_t i = 0; i < ph_history_file_count(u->history); i++) {
         const ph_file_entry *f = ph_history_file(u->history, i);
-        if (f->time < cutoff || (u->filter == 1 && f->incoming) ||
-            (u->filter == 2 && !f->incoming) ||
-            (!contains(f->name, u->search) && !contains(f->path, u->search)))
+        if (!file_matches(u, f, cutoff))
             continue;
         any = true;
         if (cy + 66 > y && cy < y + clip.h) {
@@ -712,9 +755,22 @@ static void draw_file_rows(ph_workspace *u, SDL_Rect b, bool full)
         cy += 66;
     }
     SDL_RenderSetClipRect(u->renderer, NULL);
-    if (!any && clip.h >= 54)
-        text(u, u->search[0] ? "No matching transfers." : "No file transfers yet.", b.x + 14,
-             y + 28, b.w - 28, 13, false, u->muted);
+    if (!any && clip.h >= 66) {
+        const char *heading = u->search[0] || (full && u->date_range) ? "No matching transfers"
+                              : u->filter == 2 ? "No received transfers"
+                              : u->filter == 1 ? "No sent transfers" : "No file transfers yet";
+        const char *hint = u->search[0] || (full && u->date_range)
+                               ? "Try a different search or date range."
+                           : u->filter == 2 ? "Files received from your iPhone appear here."
+                           : u->filter == 1 ? "Files sent to your iPhone appear here."
+                           : "Sent and received files appear here.";
+        int left = b.x + 12;
+        rounded(u, (SDL_Rect){left, y + 17, 38, 38}, 9, u->selected_bg);
+        ph_icon_draw(u->renderer, u->filter == 2 ? PH_ICON_RECEIVE : PH_ICON_FILE,
+                     (SDL_Rect){left + 9, y + 26, 20, 20}, u->muted);
+        fitted_label(u, heading, left + 52, y + 15, b.w - 76, 13, true, u->ink);
+        fitted_label(u, hint, left + 52, y + 37, b.w - 76, 11, false, u->muted);
+    }
     u->scroll_limit = SDL_max(cy + u->scroll - y - clip.h, 0);
 }
 static const ph_file_entry *selected_file(ph_workspace *u)
@@ -731,10 +787,14 @@ static void draw_file_detail(ph_workspace *u, SDL_Rect b)
     const ph_file_entry *f = selected_file(u);
     if (!f)
         return;
+    b.h = SDL_min(b.h, 370);
     card(u, b);
     int x = b.x + 18, y = b.y + 18, width = b.w - 36;
-    fitted_label(u, f->name, x, y, width - 26, 17, true, u->ink);
-    y += 32;
+    SDL_Rect heading_clip = {x, y, width - 26, 48};
+    SDL_RenderSetClipRect(u->renderer, &heading_clip);
+    int title_end = text(u, f->name, x, y, width - 26, 16, true, u->ink);
+    SDL_RenderSetClipRect(u->renderer, NULL);
+    y = SDL_min(title_end, y + 48) + 7;
     close_button(u, b.x + b.w - 38, b.y + 10, UI_CANCEL);
     char date[40];
     timestamp(f->time, date);
@@ -742,8 +802,12 @@ static void draw_file_detail(ph_workspace *u, SDL_Rect b)
     y = text(u, f->incoming ? "SAVED LOCATION" : "SOURCE LOCATION", x, y, width, 10, true,
              u->muted) +
         9;
-    fitted_label(u, f->path[0] ? f->path : "Location not recorded", x, y, width, 11, false, u->ink);
-    y += 26;
+    SDL_Rect location_clip = {x, y, width, 36};
+    SDL_RenderSetClipRect(u->renderer, &location_clip);
+    int path_end = text(u, f->path[0] ? f->path : "Location not recorded",
+                        x, y, width, 11, false, u->ink);
+    SDL_RenderSetClipRect(u->renderer, NULL);
+    y = SDL_min(path_end, y + 36) + 14;
     if (f->incoming && f->state == PH_TRANSFER_PAUSED)
         y = text(u, "Retry from your iPhone to resume this transfer.", x, y, width, 12, false,
                  u->muted) +
@@ -760,10 +824,10 @@ static void draw_file_detail(ph_workspace *u, SDL_Rect b)
                  x, y, width, 12, false, u->muted) +
             18;
     }
-    button(u, (SDL_Rect){x, y, width < 230 ? width : 160, 34},
-           can_locate ? "Locate file…" : "Show in folder",
-           can_locate ? PH_WORKSPACE_LOCATE : PH_WORKSPACE_REVEAL, f->id, false,
-           can_locate || state == PH_FILE_PRESENT);
+    action_button(u, (SDL_Rect){x, y, SDL_min(width, 160), 34},
+                  can_locate ? "Locate file…" : "Show in folder",
+                  can_locate ? PH_WORKSPACE_LOCATE : PH_WORKSPACE_REVEAL, f->id, false,
+                  can_locate || state == PH_FILE_PRESENT, true, PH_ICON_FOLDER);
     if (!f->incoming && state == PH_FILE_PRESENT &&
         (f->state == PH_TRANSFER_CHANGED || f->state == PH_TRANSFER_FAILED ||
          f->state == PH_TRANSFER_PAUSED || f->state == PH_TRANSFER_CANCELED)) {
@@ -778,6 +842,7 @@ static void draw_file_detail(ph_workspace *u, SDL_Rect b)
 }
 static void history_page(ph_workspace *u)
 {
+    const char *dates[] = {"All time", "Today", "Last 7 days"};
     SDL_Rect b = u->rect;
     int pad = b.w < 600 ? 20 : 32;
     text(u, "File history", b.x + pad, b.y + 28, b.w - 2 * pad - 40, 27, true, u->ink);
@@ -785,22 +850,36 @@ static void history_page(ph_workspace *u)
          b.w - 2 * pad, 12, false, u->muted);
     close_button(u, b.x + b.w - pad - 28, b.y + 24, PH_WORKSPACE_CLOSE);
     search_box(u, (SDL_Rect){b.x + pad, b.y + 104, b.w - 2 * pad - 130, 36});
-    button(u, (SDL_Rect){b.x + b.w - pad - 118, b.y + 104, 118, 36},
-           u->date_range == 0   ? "All time"
-           : u->date_range == 1 ? "Today"
-                                : "Last 7 days",
-           UI_DATE, 0, false, true);
+    SDL_Rect date = {b.x + b.w - pad - 118, b.y + 104, 118, 36};
+    button(u, date, dates[u->date_range], UI_DATE, 0, false, true);
+    ph_icon_draw(u->renderer, PH_ICON_DOWN,
+                 (SDL_Rect){date.x + date.w - 22, date.y + 11, 14, 14}, u->muted);
     int detail = u->selected && b.w >= 850 ? 340 : 0;
-    SDL_Rect list = {b.x + pad, b.y + 160, b.w - 2 * pad - detail - (detail ? 20 : 0), b.h - 184};
+    int remaining = b.h - 184;
+    int matches = history_row_count(u, SDL_max(1, remaining / 66));
+    int list_height = SDL_min(remaining, matches ? 64 + matches * 66 : 157);
+    SDL_Rect list = {b.x + pad, b.y + 160, b.w - 2 * pad - detail - (detail ? 20 : 0),
+                     list_height};
     if (!u->selected || detail) {
         card(u, list);
         SDL_Rect rows = {list.x + 14, list.y + 10, list.w - 28, list.h - 20};
         draw_file_rows(u, rows, true);
     }
     if (detail)
-        draw_file_detail(u, (SDL_Rect){list.x + list.w + 20, list.y, detail, list.h});
+        draw_file_detail(u, (SDL_Rect){list.x + list.w + 20, list.y, detail, remaining});
     else if (u->selected)
         draw_file_detail(u, (SDL_Rect){b.x + pad, b.y + 160, b.w - 2 * pad, b.h - 184});
+    if (u->date_menu) {
+        SDL_Rect menu = {date.x, date.y + date.h + 5, date.w, 110};
+        card(u, menu);
+        for (size_t i = 0; i < SDL_arraysize(dates); i++) {
+            SDL_Rect option = {menu.x + 5, menu.y + 5 + (int)i * 33, menu.w - 10, 32};
+            if ((int)i == u->date_range)
+                rounded(u, option, 6, u->selected_bg);
+            text(u, dates[i], option.x + 10, option.y + 8, option.w - 20, 12, false, u->ink);
+            hit(u, option, UI_DATE, i + 1, dates[i]);
+        }
+    }
 }
 static bool clip_checked(const ph_workspace *u, uint64_t id)
 {
@@ -830,25 +909,58 @@ static const char *clipboard_status(const ph_workspace *u, bool short_label)
     return short_label ? "Enabled" : "Clipboard sync is on";
 }
 
-/* Clipboard images are PNG. Reading the header avoids decoding in the renderer. */
 static void image_preview(const ph_clip_entry *item, char *label, size_t capacity)
 {
     char bytes[40];
     size_text(item->size, bytes);
-    const unsigned char *d = item->data;
-    if (item->size >= 24 && !memcmp(d, "\x89PNG\r\n\x1a\n", 8) && !memcmp(d + 12, "IHDR", 4)) {
-        uint32_t width = (uint32_t)d[16] << 24 | (uint32_t)d[17] << 16 | (uint32_t)d[18] << 8 | d[19];
-        uint32_t height = (uint32_t)d[20] << 24 | (uint32_t)d[21] << 16 | (uint32_t)d[22] << 8 | d[23];
+    uint32_t width, height;
+    if (ph_clipboard_png_size(item->data, item->size, &width, &height)) {
         snprintf(label, capacity, "Image · %u × %u · %s", (unsigned)width, (unsigned)height, bytes);
     } else {
         snprintf(label, capacity, "Image · %s", bytes);
     }
 }
 
+static void draw_clipboard_thumbnail(ph_workspace *u, const ph_clip_entry *item, SDL_Rect box)
+{
+    size_t slot = item->id % SDL_arraysize(u->previews);
+    if (u->previews[slot].id != item->id) {
+        if (u->previews[slot].texture)
+            SDL_DestroyTexture(u->previews[slot].texture);
+        u->previews[slot].id = item->id;
+        u->previews[slot].texture = ph_clipboard_thumbnail(u->renderer, item->data, item->size);
+        if (u->previews[slot].texture)
+            SDL_QueryTexture(u->previews[slot].texture, NULL, NULL,
+                             &u->previews[slot].width, &u->previews[slot].height);
+    }
+    rounded(u, box, 7, u->selected_bg);
+    SDL_Texture *texture = u->previews[slot].texture;
+    int width = u->previews[slot].width, height = u->previews[slot].height;
+    if (texture && width > 0 && height > 0) {
+        int side = SDL_min(box.w, box.h) - 6;
+        int longest = SDL_max(width, height);
+        width = SDL_max(1, width * side / longest);
+        height = SDL_max(1, height * side / longest);
+        SDL_Rect dest = {box.x + (box.w - width) / 2, box.y + (box.h - height) / 2,
+                         width, height};
+        SDL_RenderCopy(u->renderer, texture, NULL, &dest);
+    } else {
+        ph_icon_draw(u->renderer, PH_ICON_FILE,
+                     (SDL_Rect){box.x + (box.w - 21) / 2, box.y + (box.h - 21) / 2, 21, 21},
+                     u->muted);
+    }
+}
+
 static void clipboard_page(ph_workspace *u)
 {
     SDL_Rect b = u->rect;
-    int x = b.x + 16, y = b.y + 15, width = b.w - 32;
+    bool compact = b.w < 530;
+    int pad = compact ? 14 : 32;
+    int width = SDL_min(860, b.w - pad * 2);
+    int x = b.x + (b.w - width) / 2, y = b.y + (compact ? 16 : 28);
+    if (!compact)
+        rect(u, b, u->background);
+    size_t total = ph_history_clip_count(u->history);
     size_t kept = 0;
     for (size_t i = 0; i < u->clip_selected_n; i++) {
         for (size_t j = 0; j < ph_history_clip_count(u->history); j++)
@@ -858,68 +970,89 @@ static void clipboard_page(ph_workspace *u)
             }
     }
     u->clip_selected_n = kept;
-    text(u, "Clipboard", x, y, width - 32, 20, true, u->ink);
-    close_button(u, b.x + b.w - 42, y - 3, PH_WORKSPACE_CLOSE);
-    y += 45;
+    text(u, "Clipboard", x, y, width - 32, compact ? 20 : 27, true, u->ink);
+    close_button(u, x + width - 29, y - 3, PH_WORKSPACE_CLOSE);
+    y += compact ? 39 : 48;
     bool ready = clipboard_ready(u);
     status_dot(u, x, y + 5, ready);
     fitted_label(u, clipboard_status(u, false), x + 13, y, width - 13, 12, false,
                  ready ? u->positive : u->muted);
-    y += 33;
+    y += 39;
     char count[64];
-    snprintf(count, sizeof count, "Clipboard history · %zu", ph_history_clip_count(u->history));
-    text(u, count, x, y, width - 92, 12, true, u->ink);
+    snprintf(count, sizeof count, "Clipboard history · %zu", total);
+    text(u, count, x, y, width - 92, 14, true, u->ink);
     button(u, (SDL_Rect){x + width - 88, y - 6, 88, 28}, "Clear history", UI_CLEAR, 0, false,
            ph_history_clip_count(u->history) > 0);
     y += 35;
-    button(u, (SDL_Rect){x, y, 76, 27},
-           u->clip_selected_n && u->clip_selected_n == ph_history_clip_count(u->history)
-               ? "Deselect all"
-               : "Select all",
-           UI_CLIP_CHECK, 0, false, ph_history_clip_count(u->history) > 0);
-    button(u, (SDL_Rect){x + width - 116, y, 116, 27}, "Delete selected", UI_CLIP_DELETE, 0, false,
-           u->clip_selected_n > 0);
-    y += 38;
+    if (total) {
+        button(u, (SDL_Rect){x, y, 83, 27}, kept == total ? "Deselect all" : "Select all",
+               UI_CLIP_CHECK, 0, false, true);
+        if (kept && !compact) {
+            char selected[32];
+            snprintf(selected, sizeof selected, "%zu selected", kept);
+            text(u, selected, x + 96, y + 6, 160, 11, false, u->muted);
+        }
+        button(u, (SDL_Rect){x + width - 116, y, 116, 27}, "Delete selected", UI_CLIP_DELETE,
+               0, false, kept > 0);
+        y += 38;
+    }
     SDL_Rect clip = {x, y, width, SDL_max(0, b.y + b.h - y - 48)};
     SDL_RenderSetClipRect(u->renderer, &clip);
     int cy = y - u->scroll;
-    for (size_t i = 0; i < ph_history_clip_count(u->history); i++) {
+    for (size_t i = 0; i < total; i++) {
         const ph_clip_entry *c = ph_history_clip(u->history, i);
-        if (cy + 110 > clip.y && cy < clip.y + clip.h) {
-            if (clip_checked(u, c->id))
-                rounded(u, (SDL_Rect){x, cy, width, 106}, 6, u->selected_bg);
-            SDL_Rect check = {x + 2, cy + 13, 13, 13};
-            rounded(u, check, 3, clip_checked(u, c->id) ? u->ink : u->border);
+        bool image = c->kind == 'P', checked = clip_checked(u, c->id);
+        int row_height = image ? 124 : 100;
+        if (cy + row_height > clip.y && cy < clip.y + clip.h) {
+            SDL_Rect row = {x, cy, width, row_height - 9};
+            card(u, row);
+            if (checked)
+                rounded(u, (SDL_Rect){x + 1, cy + 1, width - 2, row.h - 2}, 11, u->selected_bg);
+            SDL_Rect check = {x + 12, cy + 15, 16, 16};
+            rounded(u, check, 4, checked ? u->ink : u->muted);
+            if (checked)
+                ph_icon_draw(u->renderer, PH_ICON_CHECK, check, u->surface);
+            else
+                rounded(u, (SDL_Rect){check.x + 1, check.y + 1, 14, 14}, 3, u->surface);
+            int content = x + 39;
+            if (image) {
+                draw_clipboard_thumbnail(u, c, (SDL_Rect){content, cy + 12, 59, 59});
+                content += 70;
+            }
             char preview[200], date[40];
             timestamp(c->time, date);
             if (c->kind == 'T')
                 snprintf(preview, sizeof preview, "%.190s", (const char *)c->data);
             else
                 image_preview(c, preview, sizeof preview);
-            hit(u, (SDL_Rect){x, cy, width, 32}, UI_CLIP_CHECK, c->id,
-                clip_checked(u, c->id) ? "Deselect clipboard item" : "Select clipboard item");
-            fitted_label(u, preview, x + 24, cy + 10, width - 28, 12, false, u->ink);
-            char sub[80];
-            snprintf(sub, sizeof sub, "%s · %s", c->incoming ? "From iPhone" : "From this PC",
-                     date);
-            text(u, sub, x + 24, cy + 39, width - 28, 10, false, u->muted);
-            button(u, (SDL_Rect){x, cy + 66, 58, 28}, "Copy", PH_WORKSPACE_CLIP_COPY, c->id,
-                   false, true);
-            button(u, (SDL_Rect){x + 66, cy + 66, 106, 28}, "Send to iPhone",
+            hit(u, (SDL_Rect){x, cy, width, image ? 72 : 47}, UI_CLIP_CHECK, c->id,
+                checked ? "Deselect clipboard item" : "Select clipboard item");
+            fitted_label(u, preview, content, cy + 13, x + width - content - 12, 13, true, u->ink);
+            char sub[128];
+            snprintf(sub, sizeof sub, "From %s · %s", c->incoming ? "iPhone" : pc_name(u), date);
+            fitted_label(u, sub, content, cy + 35, x + width - content - 12, 11, false, u->muted);
+            int buttons = cy + row_height - 47;
+            action_button(u, (SDL_Rect){x + 12, buttons, 65, 28}, "Copy", PH_WORKSPACE_CLIP_COPY,
+                          c->id, false, true, true, PH_ICON_COPY);
+            button(u, (SDL_Rect){x + 84, buttons, 106, 28}, "Send to iPhone",
                    PH_WORKSPACE_CLIP_SEND, c->id, false, ready && u->to_phone);
-            button(u, (SDL_Rect){x + width - 63, cy + 66, 60, 28}, "Delete", UI_CLIP_REMOVE, c->id,
+            button(u, (SDL_Rect){x + width - 67, buttons, 55, 28}, "Delete", UI_CLIP_REMOVE, c->id,
                    false, true);
-            line(u, x, cy + 109, width);
         }
-        cy += 110;
+        cy += row_height;
     }
     SDL_RenderSetClipRect(u->renderer, NULL);
-    if (!ph_history_clip_count(u->history))
-        text(u, "No clipboard history.\nCopied text and images appear here.", x, y + 26, width, 13,
+    if (!total) {
+        card(u, (SDL_Rect){x, y, width, 82});
+        ph_icon_draw(u->renderer, PH_ICON_CLIPBOARD, (SDL_Rect){x + 14, y + 21, 24, 24}, u->muted);
+        text(u, "No clipboard items", x + 49, y + 17, width - 60, 13, true, u->ink);
+        text(u, "Copied text and images appear here.", x + 49, y + 39, width - 60, 11,
              false, u->muted);
+    }
     u->scroll_limit = SDL_max(cy + u->scroll - y - clip.h, 0);
-    text(u, "Up to 100 recent items · Stored on this PC", x, b.y + b.h - 31, width, 10, false,
-         u->muted);
+    char storage[128];
+    snprintf(storage, sizeof storage, "Up to 100 recent items · Stored on %s", pc_name(u));
+    fitted_label(u, storage, x, b.y + b.h - 31, width, 11, false, u->muted);
 }
 static int incoming_progress(ph_workspace *u, int x, int y, int width)
 {
@@ -1113,8 +1246,8 @@ static void wide_pairing(ph_workspace *u, int x, int y, int width, bool spacious
     text(u, "Scan with the Porthole iPhone app", qr_x, qr_y + q + 12, q, 11, false, u->muted);
     int dx = qr_x + q + (spacious ? 23 : 24);
     int dw = pair.x + pair.w - (spacious ? 26 : 22) - dx;
-    text(u, "THIS PC", dx, y + (spacious ? 26 : 19), dw, 11, true, u->muted);
-    fitted_label(u, u->live.pc[0] ? u->live.pc : "Porthole", dx, y + (spacious ? 45 : 37),
+    text(u, "COMPUTER NAME", dx, y + (spacious ? 26 : 19), dw, 11, true, u->muted);
+    fitted_label(u, pc_name(u), dx, y + (spacious ? 45 : 37),
                  dw, 23, true, u->ink);
     int fields_y = y + (spacious ? 96 : 79);
     rounded(u, (SDL_Rect){dx, fields_y, dw, 100}, 8, u->border);
@@ -1223,8 +1356,10 @@ static void home(ph_workspace *u)
     int pad = b.w < 600 ? 20 : 44, x = b.x + pad, width = b.w - 2 * pad, y = b.y + 30;
     if (!u->live.paired && !u->live.address[0] && u->live.share_checked) {
         y = text(u, "iPhone connection unavailable", x, y, width, 24, true, u->ink) + 14;
-        y = text(u, "Restart Porthole and verify that your PC is connected to Wi-Fi.", x, y, width,
-                 14, false, u->muted) + 24;
+        char recovery[200];
+        snprintf(recovery, sizeof recovery, "Check the Wi-Fi connection on %s, then restart Porthole.",
+                 pc_name(u));
+        y = text(u, recovery, x, y, width, 14, false, u->muted) + 24;
         pairing_actions(u, x, y, width);
         return;
     }
@@ -1245,11 +1380,11 @@ static void home(ph_workspace *u)
         } else
             y = text(u, "Connect your iPhone", x, y, width, wide ? 37 : width < 350 ? 24 : 30,
                      true, u->ink) + 10;
-        y = text(u,
-                 "Open Porthole on your iPhone and select this PC. Connect both devices to the "
-                 "same Wi-Fi network.",
-                 x, y, width, spacious ? 15 : 14, false, u->muted) +
-            (spacious ? 34 : 26);
+        char instructions[210];
+        snprintf(instructions, sizeof instructions, "Open Porthole on your iPhone and select %s. "
+                 "Connect both devices to the same Wi-Fi network.", pc_name(u));
+        y = text(u, instructions, x, y, width, spacious ? 15 : 14, false, u->muted)
+            + (spacious ? 34 : 26);
         if (wide) {
             wide_pairing(u, x, y, width, spacious);
             return;
@@ -1259,8 +1394,8 @@ static void home(ph_workspace *u)
             int q = 100, dx = x + q + 20;
             if (u->live.code[0])
                 qr(u, (SDL_Rect){x + 6, y + 8, q, q});
-            text(u, "THIS PC", dx, y + 18, width - q - 32, 10, true, u->muted);
-            fitted_label(u, u->live.pc[0] ? u->live.pc : "Porthole", dx, y + 36, width - q - 32, 15,
+            text(u, "COMPUTER NAME", dx, y + 18, width - q - 32, 10, true, u->muted);
+            fitted_label(u, pc_name(u), dx, y + 36, width - q - 32, 15,
                          true, u->ink);
             button(u, (SDL_Rect){dx, y + 66, 90, 28}, "New code", PH_WORKSPACE_NEW_CODE, 0, false,
                    u->live.code[0] != 0);
@@ -1287,8 +1422,8 @@ static void home(ph_workspace *u)
         int q = b.w < 620 ? 116 : 168, dx = x + q + 40;
         if (u->live.code[0])
             qr(u, (SDL_Rect){x + 18, y + 26, q, q});
-        text(u, "THIS PC", dx, y + 24, width - q - 64, 11, true, u->muted);
-        text(u, u->live.pc[0] ? u->live.pc : "Porthole", dx, y + 44, width - q - 64, 22, true,
+        text(u, "COMPUTER NAME", dx, y + 24, width - q - 64, 11, true, u->muted);
+        text(u, pc_name(u), dx, y + 44, width - q - 64, 22, true,
              u->ink);
         text(u, "Address", dx, y + 84, width - q - 64, 11, false, u->muted);
         text(u, u->live.address[0] ? u->live.address : "Starting…", dx, y + 104, width - q - 94, 14,
@@ -1328,7 +1463,10 @@ static void home(ph_workspace *u)
     paired_features(u, (SDL_Rect){x, y, width, 52});
     y += 74;
     if (!u->live.connected) {
-        y = text(u, "Open Porthole on your iPhone to reconnect.", x, y, width, 14, false,
+        char instructions[160];
+        snprintf(instructions, sizeof instructions, "Open Porthole on your iPhone and select %s to reconnect.",
+                 pc_name(u));
+        y = text(u, instructions, x, y, width, 14, false,
                  u->muted) +
             18;
         char history_name[32];
@@ -1373,7 +1511,7 @@ static void home(ph_workspace *u)
                  (SDL_Rect){x + 39, y + (drop_height - 34) / 2, 34, 34}, u->ink);
     text(u, "Send to iPhone", x + 90, y + drop_height / 2 - 22, width - 244,
          15, true, u->ink);
-    text(u, "Drop files here or browse your PC.", x + 90, y + drop_height / 2 + 2,
+    text(u, "Drop files here or browse for files.", x + 90, y + drop_height / 2 + 2,
          width - 244, 11, false, u->muted);
     button(u, (SDL_Rect){x + width - 133, y + (drop_height - 36) / 2, 96, 36}, "Send files",
            PH_WORKSPACE_SEND_FILES, 0, true, true);
@@ -1584,8 +1722,8 @@ static int appearance_settings(ph_workspace *u, int x, int y, int width, bool in
     int column = (width - 2 * padding - 2 * gap) / 3;
     int tile_h = thumb_h + 48;
     int copy_width = width - 2 * padding;
-    const char *subtitle = "Choose an appearance or follow your PC’s settings.";
-    const char *note = "System follows your PC’s light or dark appearance automatically.";
+    const char *subtitle = "Choose an appearance for Porthole.";
+    const char *note = "System follows your light or dark appearance setting.";
     int subtitle_h = ph_text_height(subtitle, copy_width, PH_TEXT(12, PH_FONT_REGULAR));
     int note_h = ph_text_height(note, copy_width, PH_TEXT(11, PH_FONT_REGULAR));
     int tile_y = y + 58 + subtitle_h;
@@ -1630,13 +1768,23 @@ static int guide_contents(ph_workspace *u, const help_guide *guide, size_t index
     int left = box.x + (box.w < 400 ? 40 : 61), right = box.x + box.w - 18;
     int y = box.y + 69;
     for (size_t i = 0; i < SDL_arraysize(guide->steps); i++) {
+        char copy[240];
+        const char *step = guide->steps[i];
+        if (index == 0 && i == 1) {
+            snprintf(copy, sizeof copy, "Open Porthole on your iPhone and select %s, or scan the QR code.",
+                     pc_name(u));
+            step = copy;
+        } else if (index == 1 && i == 0) {
+            snprintf(copy, sizeof copy, "Connect your iPhone to %s in Porthole.", pc_name(u));
+            step = copy;
+        }
         if (draw) {
             char number[8];
             snprintf(number, sizeof number, "%u.", (unsigned)i + 1);
             text(u, number, left, y, 22, 12, false, u->muted);
-            text(u, guide->steps[i], left + 19, y, right - left - 19, 12, false, u->muted);
+            text(u, step, left + 19, y, right - left - 19, 12, false, u->muted);
         }
-        y += ph_text_height(guide->steps[i], right - left - 19, PH_TEXT(12, PH_FONT_REGULAR)) + 6;
+        y += ph_text_height(step, right - left - 19, PH_TEXT(12, PH_FONT_REGULAR)) + 6;
     }
     y += 8;
     if (draw)
@@ -1842,7 +1990,7 @@ static int general_settings(ph_workspace *u, int x, int y, int width, bool inlin
                    UI_TRAY, u->tray),
         toggle_row("Launch at sign-in", u->launch_managed
                        ? "Managed by the Windows installer for all users."
-                       : "Start Porthole when you sign in to your PC.",
+                       : "Start Porthole automatically when you sign in.",
                    UI_SIGN_IN, u->launch_at_sign_in || u->launch_managed)
     };
     rows[1].enabled = !u->launch_managed;
@@ -1934,9 +2082,9 @@ static int control_settings(ph_workspace *u, int x, int y, int width)
     y = text(u, notice, x, y, width, 11, true, u->muted);
     y = text(u, "File transfers and clipboard sync remain available independently.",
              x, y + 2, width, 11, false, u->muted) + 12;
-    action_button(u, (SDL_Rect){x, y, 130, 31}, "Set up controls", PH_WORKSPACE_SETUP, 0,
-                  false, true, false, -1);
-    return y + 31;
+    action_button(u, (SDL_Rect){x, y, 153, 36}, "Set up controls", PH_WORKSPACE_SETUP, 0,
+                  false, true, true, PH_ICON_MOUSE);
+    return y + 36;
 }
 
 static int transfer_settings(ph_workspace *u, int x, int y, int width)
@@ -2278,6 +2426,7 @@ void ph_workspace_draw(ph_workspace *u, SDL_Renderer *renderer, SDL_Rect b, ph_w
     if (view != u->view) {
         u->revision++;
         u->scroll = 0;
+        u->date_menu = false;
         u->pressed = (ui_hit){0};
         u->focused = (ui_hit){0};
         u->confirm = 0;
@@ -2428,7 +2577,12 @@ static void activate(ph_workspace *u, ui_hit h)
         return;
     }
     if (a == UI_DATE) {
-        u->date_range = (u->date_range + 1) % 3;
+        if (!h.id) {
+            u->date_menu = !u->date_menu;
+            return;
+        }
+        u->date_range = (int)h.id - 1;
+        u->date_menu = false;
         u->scroll = 0;
         u->selected = 0;
         return;
@@ -2482,7 +2636,9 @@ static void activate(ph_workspace *u, ui_hit h)
     }
     if (a == UI_CLIP_REMOVE) {
         if (u->view == PH_WORKSPACE_CLIPBOARD) {
-            if (!ph_history_remove_clip(u->history, h.id))
+            if (ph_history_remove_clip(u->history, h.id))
+                clear_previews(u);
+            else
                 history_save_error(u);
         } else {
             u->confirm = 3;
@@ -2490,9 +2646,10 @@ static void activate(ph_workspace *u, ui_hit h)
         return;
     }
     if (a == UI_CLIP_DELETE) {
-        if (ph_history_remove_clips(u->history, u->clip_selected, u->clip_selected_n))
+        if (ph_history_remove_clips(u->history, u->clip_selected, u->clip_selected_n)) {
+            clear_previews(u);
             u->clip_selected_n = 0;
-        else
+        } else
             history_save_error(u);
         return;
     }
@@ -2519,6 +2676,7 @@ static void activate(ph_workspace *u, ui_hit h)
                 history_save_error(u);
                 return;
             }
+            clear_previews(u);
             u->clip_selected_n = 0;
         } else if (u->confirm == 2) {
             if (!ph_history_clear_files(u->history)) {
@@ -2680,10 +2838,12 @@ bool ph_workspace_event(ph_workspace *u, const SDL_Event *event)
         return true;
     }
     if (event->type == SDL_KEYDOWN && symbol == SDLK_ESCAPE &&
-        (u->confirm || u->history_open || u->view == PH_WORKSPACE_SETTINGS ||
+        (u->confirm || u->date_menu || u->history_open || u->view == PH_WORKSPACE_SETTINGS ||
          u->view == PH_WORKSPACE_CLIPBOARD || u->focused.action)) {
         if (u->confirm)
             u->confirm = 0;
+        else if (u->date_menu)
+            u->date_menu = false;
         else if (u->view != PH_WORKSPACE_HOME) {
             u->history_open = false;
             queue(u, PH_WORKSPACE_CLOSE, 0);
