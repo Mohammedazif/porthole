@@ -1091,9 +1091,9 @@ static void draw_setup(ph_window *w, int width, int height, int top)
     const char *pc = w->pc_name[0] ? w->pc_name : "Porthole";
     if (s->step == PH_SETUP_MIRROR) {
         snprintf(pairing_body, sizeof pairing_body,
-                 "Open Porthole on your iPhone and select %s.\n\n%s"
+                 "Open Porthole on your iPhone. Scan this PC’s QR code or select it if it’s saved.\n\n%s"
                  "Select Share screen, then Start Broadcast. Keep both devices on the same Wi-Fi network.",
-                 pc, s->controls ? "Under Settings > Mouse and keyboard, select Verify Bluetooth.\n\n" : "");
+                 s->controls ? "Under Settings > Mouse and keyboard, select Verify Bluetooth.\n\n" : "");
         if (w->code_open && w->pull_hint[0]) {
             size_t used = strlen(pairing_body);
             snprintf(pairing_body + used, sizeof pairing_body - used, "\n\n%s · %s",

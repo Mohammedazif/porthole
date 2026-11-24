@@ -1,6 +1,5 @@
 #include "files/inbox.h"
 
-#include "core/bonjour.h"
 #include "core/log.h"
 #include "files/pull.h"
 #include "files/digest.h"
@@ -54,7 +53,6 @@ struct ph_inbox {
     pthread_t thread;
     pthread_mutex_t client_lock;
     atomic_bool stop, disconnect;
-    ph_bonjour *bonjour;
     ph_inbox_item item;
 };
 
@@ -598,43 +596,7 @@ static void *inbox_main(void *arg)
     return NULL;
 }
 
-/* "dir=<folder>" as one DNS-SD TXT field, so the share sheet can name the folder. */
-static void advertise(ph_inbox *in, const char *label)
-{
-    char name[64], field[96], clean[80];
-    unsigned char txt[128];
-    uint16_t len = 0;
-    size_t i = 0;
-    int n;
-
-    ph_bonjour_stop(in->bonjour);
-    in->bonjour = NULL;
-    ph_bonjour_host_name(name, sizeof name);
-    if (!label || !label[0])
-        label = "Downloads";
-    for (; label[i] && i + 1 < sizeof clean; i++)
-        clean[i] = (label[i] == '\n' || label[i] == '\r') ? ' ' : label[i];
-    clean[i] = 0;
-    n = snprintf(field, sizeof field, "dir=%s", clean);
-    if (n > 0 && n < 256) {
-        txt[0] = (unsigned char)n;
-        memcpy(txt + 1, field, (size_t)n);
-        len = (uint16_t)(n + 1);
-        txt[len++] = 8;
-        memcpy(txt + len, "resume=2", 8);
-        len += 8;
-    }
-    in->bonjour = ph_bonjour_advertise(name, PH_INBOX_SERVICE, PH_INBOX_PORT,
-                                       len ? txt : NULL, len);
-}
-
-void ph_inbox_set_save_label(ph_inbox *inbox, const char *save_label)
-{
-    if (inbox)
-        advertise(inbox, save_label);
-}
-
-ph_inbox *ph_inbox_start(const char *dir, const char *save_label, const ph_inbox_callbacks *callbacks)
+ph_inbox *ph_inbox_start(const char *dir, const ph_inbox_callbacks *callbacks)
 {
     ph_inbox *in = calloc(1, sizeof *in);
 
@@ -656,7 +618,6 @@ ph_inbox *ph_inbox_start(const char *dir, const char *save_label, const ph_inbox
         ph_sock_close(in->listen_fd);
         goto fail;
     }
-    ph_inbox_set_save_label(in, save_label);
     PH_LOGI("share: listening on port %d", PH_INBOX_PORT);
     return in;
 fail:
@@ -673,7 +634,6 @@ void ph_inbox_stop(ph_inbox *in)
     shutdown(in->listen_fd, SHUT_RDWR);
     pthread_join(in->thread, NULL);
     ph_sock_close(in->listen_fd);
-    ph_bonjour_stop(in->bonjour);
     pthread_mutex_destroy(&in->client_lock);
     free(in);
 }

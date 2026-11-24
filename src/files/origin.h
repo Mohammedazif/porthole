@@ -10,8 +10,6 @@
 
 /* The phone app connects here and answers a picture hash with the original file. */
 #define PH_PULL_PORT 47731
-/* Bonjour type the iPhone browses to list this PC. The pairing code is not in the advert. */
-#define PH_PULL_SERVICE "_porthole-pc._tcp"
 /* A long 4K video can be several gigabytes. */
 #define PH_PULL_MAX_BYTES (16ull * 1024ull * 1024ull * 1024ull)
 

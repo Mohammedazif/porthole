@@ -13,7 +13,6 @@
 #include <stdint.h>
 
 #define PH_INBOX_PORT 47733
-#define PH_INBOX_SERVICE "_porthole-share._tcp"
 #define PH_INBOX_MAX_FILES 500
 
 typedef struct ph_inbox ph_inbox;
@@ -38,15 +37,12 @@ typedef struct ph_inbox_callbacks {
     void (*received)(void *user, const char *paths, int count);
 } ph_inbox_callbacks;
 
-/* Saves batches under dir, each in its own folder. save_label is the folder name
- * the iPhone share sheet shows ("Downloads" when NULL). NULL if the port cannot
- * be opened. */
-ph_inbox *ph_inbox_start(const char *dir, const char *save_label, const ph_inbox_callbacks *callbacks);
+/* Saves batches under dir, each in its own folder. */
+ph_inbox *ph_inbox_start(const char *dir, const ph_inbox_callbacks *callbacks);
 void ph_inbox_disconnect(ph_inbox *inbox);
 void ph_inbox_stop(ph_inbox *inbox);
 
 /* The share sheet reads this name from the PC on the network. */
-void ph_inbox_set_save_label(ph_inbox *inbox, const char *save_label);
 
 /* The file count of a "PSHR 1 <count>" hello, or -1. */
 int ph_inbox_parse_hello(const char *line);

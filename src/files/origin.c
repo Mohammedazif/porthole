@@ -1,6 +1,6 @@
 #include "files/origin.h"
 
-#include "core/bonjour.h"
+#include "core/host.h"
 #include "core/config.h"
 #include "core/log.h"
 #include "core/metrics.h"
@@ -75,14 +75,13 @@ struct ph_origin {
     ph_origin_screen screen;
     bool have_screen;
     unsigned ask_id, canceled_pull;
-    char advertised_ip[64];
+    char lan_ip[64];
     unsigned ready_id;
     ph_origin_result ready;
     char dir[512];
     char path[768];
     char token[16], reconnect_key[33], channel_ticket[65];
     ph_paired_phones phones;
-    ph_bonjour *bonjour;
     int push_fd;
     ph_origin_send push_queue[PH_PUSH_QUEUE]; /* files waiting, oldest first */
     char active_push_key[80];
@@ -124,38 +123,6 @@ static void fill_hint(char *hint, size_t hint_len, const char *ip, const char *t
 {
     if (hint && hint_len)
         snprintf(hint, hint_len, "%s:%d  %s", ip, PH_PULL_PORT, token);
-}
-
-static void service_name(char *out, size_t len)
-{
-    ph_bonjour_host_name(out, len);
-}
-
-/* DNS-SD TXT: one length byte, then "addr=<ipv4>". Empty when there is no LAN address. */
-static uint16_t txt_addr(uint8_t *out, size_t cap, const char *ip)
-{
-    char item[72];
-    int n;
-
-    if (!ip || !strcmp(ip, "this-pc"))
-        return 0;
-    n = snprintf(item, sizeof item, "addr=%s", ip);
-    if (n < 1 || n > 255 || (size_t)n + 1 > cap)
-        return 0;
-    out[0] = (uint8_t)n;
-    memcpy(out + 1, item, (size_t)n);
-    return (uint16_t)(n + 1);
-}
-
-static void advertise_pc(ph_origin *o, const char *ip)
-{
-    uint8_t txt[80];
-    uint16_t txt_len = txt_addr(txt, sizeof txt, ip);
-    char name[64];
-
-    service_name(name, sizeof name);
-    o->bonjour = ph_bonjour_advertise(name, PH_PULL_SERVICE, PH_PULL_PORT,
-                                      txt_len ? txt : NULL, txt_len);
 }
 
 #ifdef _WIN32
@@ -1166,7 +1133,7 @@ static void serve_client(ph_origin *o, int fd)
         goto done;
     }
     char hostname[64], encoded[96], welcome[196];
-    service_name(hostname, sizeof hostname);
+    ph_host_name(hostname, sizeof hostname);
     EVP_EncodeBlock((unsigned char *)encoded, (const unsigned char *)hostname,
                     (int)strlen(hostname));
     int welcome_len =
@@ -1691,8 +1658,7 @@ ph_origin *ph_origin_start(char *hint, size_t hint_len, ph_origin_start_status *
         return NULL;
     }
     lan_address(ip, sizeof ip);
-    advertise_pc(o, ip);
-    snprintf(o->advertised_ip, sizeof o->advertised_ip, "%s", ip);
+    snprintf(o->lan_ip, sizeof o->lan_ip, "%s", ip);
     fill_hint(hint, hint_len, ip, o->token);
     if (status)
         *status = PH_ORIGIN_START_OK;
@@ -1706,12 +1672,9 @@ bool ph_origin_refresh_address(ph_origin *o, char *hint, size_t hint_len)
         return false;
     char ip[64], token[16];
     lan_address(ip, sizeof ip);
-    if (!strcmp(ip, o->advertised_ip))
+    if (!strcmp(ip, o->lan_ip))
         return false;
-    ph_bonjour_stop(o->bonjour);
-    o->bonjour = NULL;
-    advertise_pc(o, ip);
-    snprintf(o->advertised_ip, sizeof o->advertised_ip, "%s", ip);
+    snprintf(o->lan_ip, sizeof o->lan_ip, "%s", ip);
     pthread_mutex_lock(&o->lock);
     snprintf(token, sizeof token, "%s", o->token);
     pthread_mutex_unlock(&o->lock);
@@ -1928,7 +1891,6 @@ void ph_origin_stop(ph_origin *o)
         pthread_join(o->send_thread, NULL);
     ph_sock_close(o->listen_fd);
     ph_sock_close(o->push_fd);
-    ph_bonjour_stop(o->bonjour);
     free(o->out_data);
     free(o->in_data);
     while (o->results) {
@@ -1943,7 +1905,7 @@ void ph_origin_stop(ph_origin *o)
 
 void ph_origin_pc_name(char *out, size_t len)
 {
-    service_name(out, len);
+    ph_host_name(out, len);
 }
 
 bool ph_origin_code_open(ph_origin *o)

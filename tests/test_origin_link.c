@@ -3,7 +3,7 @@
  * and one result each. Requires the local companion ports to be available. */
 #include <SDL.h>
 
-#include "core/bonjour.h"
+#include "core/host.h"
 #include "core/metrics.h"
 #include "core/sock.h"
 #include "core/secure_link.h"
@@ -45,24 +45,7 @@ static struct {
 } links[4];
 static char ticket[65];
 
-/* DNS-SD has separate platform tests. The TLS and file checks require only loopback. */
-ph_bonjour *ph_bonjour_advertise(const char *name, const char *type, uint16_t port,
-                                  const void *txt, uint16_t txt_len)
-{
-    (void)name;
-    (void)type;
-    (void)port;
-    (void)txt;
-    (void)txt_len;
-    return NULL;
-}
-
-void ph_bonjour_stop(ph_bonjour *bonjour)
-{
-    (void)bonjour;
-}
-
-void ph_bonjour_host_name(char *out, size_t len)
+void ph_host_name(char *out, size_t len)
 {
     snprintf(out, len, "Porthole Test PC");
 }
@@ -400,7 +383,7 @@ static void test_resume_receive(const char *dir, ph_origin *origin)
     CHECK(ph_place_set_save_dir(dir));
     ph_inbox_callbacks callbacks = {
         .user = origin, .authorize = verify_ticket, .profile = receive_profile};
-    ph_inbox *inbox = ph_inbox_start(dir, "Test", &callbacks);
+    ph_inbox *inbox = ph_inbox_start(dir, &callbacks);
     CHECK(inbox);
     char response[100], path[1200];
     int fd = channel(PH_INBOX_PORT);

@@ -8,9 +8,13 @@ static const help_guide help_guides[] = {
     {PH_ICON_WIFI, "Connect your iPhone",
      "Pair an iPhone, reconnect, or switch between saved devices.",
      {"Connect your iPhone and PC to the same Wi-Fi network.",
-      "Open Porthole on your iPhone and select this PC, or scan its QR code.",
-      "Enter the connection code if prompted. Use your saved PC to reconnect later."},
+      "In the iPhone app, scan the QR code on this PC or enter its pairing details manually.",
+      "Reconnect by selecting this PC under Saved PC in the iPhone app."},
+#ifdef _WIN32
+     "If Windows Firewall prompts you, allow Porthole on private networks. Use Settings → Devices to add or select an iPhone."},
+#else
      "To pair another iPhone, open Settings → Devices → Add iPhone. To switch back, select a saved iPhone there."},
+#endif
     {PH_ICON_PHONE, "Share your screen",
      "Start or stop an iPhone broadcast.",
      {"Connect your iPhone to this PC in Porthole.",

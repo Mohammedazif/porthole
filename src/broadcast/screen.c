@@ -1,6 +1,5 @@
 #include "broadcast/screen.h"
 
-#include "core/bonjour.h"
 #include "core/log.h"
 #include "core/metrics.h"
 
@@ -34,7 +33,6 @@ struct ph_screen {
     pthread_t thread;
     pthread_mutex_t client_lock;
     atomic_bool stop, disconnect;
-    ph_bonjour *bonjour;
 };
 
 /* Allow the sender's initial frame deadline to expire before closing an idle stream. */
@@ -192,7 +190,6 @@ ph_screen *ph_screen_start(const ph_screen_callbacks *callbacks)
         ph_sock_close(s->listen_fd);
         goto fail;
     }
-    s->bonjour = ph_bonjour_advertise("Porthole", PH_SCREEN_SERVICE, PH_SCREEN_PORT, NULL, 0);
     PH_LOGI("screen broadcast: listening on port %d", PH_SCREEN_PORT);
     return s;
 fail:
@@ -209,7 +206,6 @@ void ph_screen_stop(ph_screen *s)
     shutdown(s->listen_fd, SHUT_RDWR);
     pthread_join(s->thread, NULL);
     ph_sock_close(s->listen_fd);
-    ph_bonjour_stop(s->bonjour);
     pthread_mutex_destroy(&s->client_lock);
     free(s);
 }

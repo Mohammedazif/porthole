@@ -15,7 +15,6 @@
 #include <stdint.h>
 
 #define PH_SCREEN_PORT 47732
-#define PH_SCREEN_SERVICE "_porthole-screen._tcp"
 #define PH_SCREEN_FRAME_MAX (8u * 1024u * 1024u)
 
 typedef struct ph_screen ph_screen;
@@ -30,7 +29,7 @@ typedef struct ph_screen_callbacks {
     void (*disconnected)(void *user);
 } ph_screen_callbacks;
 
-/* Listens and advertises over Bonjour. NULL if the port cannot be opened. */
+/* Listens for a paired iPhone broadcast. NULL if the port cannot be opened. */
 ph_screen *ph_screen_start(const ph_screen_callbacks *callbacks);
 void ph_screen_disconnect(ph_screen *s);
 void ph_screen_stop(ph_screen *screen);

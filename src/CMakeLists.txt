@@ -5,7 +5,7 @@ add_library(porthole_core STATIC
     core/secure_link.c
     core/config.c
     core/metrics.c
-    core/bonjour.c
+    core/host.c
     control/keyboard.c
     control/input.c
     control/connection_policy.c
@@ -49,7 +49,7 @@ target_include_directories(porthole_core PUBLIC
 )
 if(UNIX)
     find_package(Threads REQUIRED)
-    # broadcast/screen.c: its listener thread, and Bonjour loaded at run time
+    # The companion listeners and the legacy AirPlay receiver share these dependencies.
     target_link_libraries(porthole_core PUBLIC m Threads::Threads ${CMAKE_DL_LIBS})
 endif()
 if(WIN32)

@@ -3255,8 +3255,6 @@ static void do_window_action(app *a, ph_window_action action, bool *running)
             ph_window_set_detail(a->win, "That folder cannot be used");
             break;
         }
-        if (a->inbox)
-            ph_inbox_set_save_label(a->inbox, label);
         snprintf(dir, sizeof dir, "Files from the iPhone save in %s", label);
         ph_window_set_detail(a->win, dir);
         ph_window_refresh_folder(a->win);
@@ -3264,8 +3262,6 @@ static void do_window_action(app *a, ph_window_action action, bool *running)
     }
     case PH_WINDOW_ACTION_SAVE_DOWNLOADS:
         ph_place_set_save_dir(NULL);
-        if (a->inbox)
-            ph_inbox_set_save_label(a->inbox, "Downloads");
         ph_window_set_detail(a->win, "Files from the iPhone save in Downloads");
         ph_window_redraw(a->win);
         break;
@@ -3697,12 +3693,7 @@ int ph_app_run(const ph_app_options *opt)
             .item = inbox_item,
             .saved = inbox_saved,
         };
-        {
-            char label[64];
-            if (!ph_place_save_label(label, sizeof label))
-                snprintf(label, sizeof label, "Downloads");
-            a.inbox = ph_inbox_start(a.pull_dir, label, &inbox_cb);
-        }
+        a.inbox = ph_inbox_start(a.pull_dir, &inbox_cb);
     }
     if (opt->diagnostics)
         ph_window_toggle_diagnostics(a.win);
@@ -3806,7 +3797,10 @@ int ph_app_run(const ph_app_options *opt)
         {
             struct ph_audio_settings sound = {0};
             bool sound_on = !a.audio || !ph_audio_settings(a.audio, &sound) || !sound.muted;
-            a.companion_connected = ph_origin_control_policy(a.origin).connected;
+            ph_control_policy policy = ph_origin_control_policy(a.origin);
+            a.companion_connected = policy.connected;
+            ph_window_set_input_policy(a.win, a.link && !a.link_stopping &&
+                                              !strcmp(a.ble_status, "on"), policy);
             ph_window_set_companion(a.win, a.companion_connected, ph_polish_recording(a.polish),
                                     (int)lroundf(100 * powf(10, sound.volume_db / 20)));
             ph_window_set_live_state(a.win, a.feed_mode, a.controls_paused, sound_on);

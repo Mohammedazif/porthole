@@ -1446,9 +1446,8 @@ static void home(ph_workspace *u)
         } else
             y = text(u, "Connect your iPhone", x, y, width, wide ? 37 : width < 350 ? 24 : 30,
                      true, u->ink) + 10;
-        char instructions[210];
-        snprintf(instructions, sizeof instructions, "Open Porthole on your iPhone and select %s. "
-                 "Connect both devices to the same Wi-Fi network.", pc_name(u));
+        const char *instructions = "Open Porthole on your iPhone to scan the QR code or enter the "
+                                   "pairing details. Keep both devices on the same local network.";
         y = text(u, instructions, x, y, width, spacious ? 15 : 14, false, u->muted)
             + (spacious ? 34 : 26);
         if (wide) {
@@ -1836,11 +1835,7 @@ static int guide_contents(ph_workspace *u, const help_guide *guide, size_t index
     for (size_t i = 0; i < SDL_arraysize(guide->steps); i++) {
         char copy[240];
         const char *step = guide->steps[i];
-        if (index == 0 && i == 1) {
-            snprintf(copy, sizeof copy, "Open Porthole on your iPhone and select %s, or scan the QR code.",
-                     pc_name(u));
-            step = copy;
-        } else if (index == 1 && i == 0) {
+        if (index == 1 && i == 0) {
             snprintf(copy, sizeof copy, "Connect your iPhone to %s in Porthole.", pc_name(u));
             step = copy;
         }
@@ -2111,6 +2106,9 @@ static const char *controls_status(const ph_workspace *u)
                                  : "Mouse and keyboard enabled";
     if (verification_required(u))
         return "Verification required · Tap Verify Bluetooth on your iPhone";
+    if (u->live.phone_controls_verified)
+        return u->live.mirroring ? "Bluetooth verified · Waiting for input"
+                                 : "Bluetooth verified · Waiting for screen sharing";
     if (u->live.mirroring)
         return "Enabled · Waiting for Bluetooth input";
     return "Enabled · Waiting for screen sharing";

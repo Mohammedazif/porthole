@@ -486,6 +486,11 @@ static void windows_visual_review(ph_window *w, SDL_Window *native, const char *
     CHECK(ph_window_chrome_event(w, &input));
     screenshot(w, dir, "help-search-no-results");
     click_role(w, "Controls");
+    const ph_control_policy idle_verified = {
+        .managed = true, .connected = true, .enabled = true, .verified = true, .screen_only = true
+    };
+    ph_window_set_input_policy(w, true, idle_verified);
+    screenshot(w, dir, "controls-verified-waiting-for-sharing");
     int setup_x, setup_y;
     CHECK(ph_workspace_target(workspace, PH_WORKSPACE_SETUP, &setup_x, &setup_y));
     click_shortcut(w, setup_x, setup_y, SDL_SCANCODE_F2);
