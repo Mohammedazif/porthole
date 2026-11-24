@@ -746,10 +746,12 @@ int main(int argc, char **argv)
     CHECK(!ph_control_connection_wanted(policy, true, true, false));
     test_resume_send(o, path_b, key);
     phone = reconnect_phone(key);
-    char capability[16];
+    char capability[96];
     say(phone, "SCREEN?\nSCREEN? 2\nIV?\n");
     line(phone, capability, sizeof capability);
     CHECK(!strcmp(capability, "SCREEN 2"));
+    line(phone, capability, sizeof capability);
+    CHECK(!strncmp(capability, "SCREENKEY ", 10) && strlen(capability + 10) == 64);
     line(phone, capability, sizeof capability);
     CHECK(!strcmp(capability, "IV READY"));
     test_screen_channel(o);
