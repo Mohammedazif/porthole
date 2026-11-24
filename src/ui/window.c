@@ -78,6 +78,7 @@ struct ph_window {
     char pc_name[64];
     char phone_label[64];
     bool code_open;
+    ph_origin_start_status pairing_status;
     bool pairing_visible;
     bool share_checked, share_available;
     bool new_code;
@@ -1928,8 +1929,16 @@ void ph_window_set_pull_hint(ph_window *w, const char *hint)
     if (!w)
         return;
     snprintf(w->pull_hint, sizeof w->pull_hint, "%s", hint ? hint : "");
-    if (w->help_visible || !w->has_picture)
+    if (w->help_visible || w->settings_visible || w->pairing_visible || !w->has_picture)
         ph_window_redraw(w);
+}
+
+void ph_window_set_pairing_status(ph_window *w, ph_origin_start_status status)
+{
+    if (w && w->pairing_status != status) {
+        w->pairing_status = status;
+        ph_window_redraw(w);
+    }
 }
 
 bool ph_window_take_new_code(ph_window *w)
@@ -3079,6 +3088,7 @@ static void draw_workspace(ph_window *w, SDL_Rect area, ph_workspace_view page)
                               .recording = w->recording,
                               .share_checked = w->share_checked,
                               .share_available = w->share_available,
+                              .pairing_status = w->pairing_status,
                               .clipboard_available = w->clipboard_available,
                               .always_on_top = (SDL_GetWindowFlags(w->window) & SDL_WINDOW_ALWAYS_ON_TOP) != 0,
                               .controls_connected = w->bluetooth_ready,
@@ -3097,6 +3107,10 @@ static void draw_workspace(ph_window *w, SDL_Rect area, ph_workspace_view page)
     char second[40] = "", third[40] = "";
     if (sscanf(w->pull_hint, "%95s %39s %39s", live.address, second, third) >= 2)
         snprintf(live.code, sizeof live.code, "%s", strcmp(second, "code") == 0 ? third : second);
+    if (!strncmp(live.address, "this-pc:", sizeof "this-pc:" - 1)) {
+        live.address[0] = 0;
+        live.code[0] = 0;
+    }
     snprintf(live.phone, sizeof live.phone, "%s", w->phone_label);
     snprintf(live.pc, sizeof live.pc, "%s", w->pc_name);
     snprintf(live.folder, sizeof live.folder, "%s", w->save_label);

@@ -166,23 +166,21 @@ static void lan_address(char *out, size_t len)
     ULONG size = 16 * 1024;
     IP_ADAPTER_ADDRESSES *list = NULL, *ad;
     char fallback[64] = "";
+    ULONG result = ERROR_BUFFER_OVERFLOW;
 
     snprintf(out, len, "this-pc");
-    for (int tries = 0; tries < 3; tries++) {
-        ULONG r;
+    for (int tries = 0; tries < 3 && result == ERROR_BUFFER_OVERFLOW; tries++) {
         free(list);
         list = malloc(size);
         if (!list)
             return;
-        r = GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST
-                                              | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
-                                 NULL, list, &size);
-        if (r == NO_ERROR)
-            break;
-        if (r != ERROR_BUFFER_OVERFLOW) {
-            free(list);
-            return;
-        }
+        result = GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST
+                                                   | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                                      NULL, list, &size);
+    }
+    if (result != NO_ERROR) {
+        free(list);
+        return;
     }
     for (ad = list; ad; ad = ad->Next) {
         IP_ADAPTER_UNICAST_ADDRESS *u;
@@ -1633,14 +1631,22 @@ static void *origin_main(void *arg)
     return NULL;
 }
 
-ph_origin *ph_origin_start(char *hint, size_t hint_len)
+ph_origin *ph_origin_start(char *hint, size_t hint_len, ph_origin_start_status *status)
 {
     ph_origin *o;
     int fd;
     char ip[64];
 
-    if (!*ph_tls_fingerprint())
+    if (hint && hint_len)
+        hint[0] = 0;
+    if (status)
+        *status = PH_ORIGIN_START_FAILED;
+    if (!*ph_tls_fingerprint()) {
+        PH_LOGW("pairing: could not load the desktop identity");
+        if (status)
+            *status = PH_ORIGIN_START_IDENTITY;
         return NULL;
+    }
     o = calloc(1, sizeof *o);
     if (!o)
         return NULL;
@@ -1659,7 +1665,9 @@ ph_origin *ph_origin_start(char *hint, size_t hint_len)
     }
     fd = ph_sock_listen(PH_PULL_PORT, false, 4);
     if (fd < 0) {
-        PH_LOGW("photo pull: port %d is unavailable", PH_PULL_PORT);
+        PH_LOGW("pairing: port %d is unavailable", PH_PULL_PORT);
+        if (status)
+            *status = PH_ORIGIN_START_LISTENER;
         free(o);
         return NULL;
     }
@@ -1686,6 +1694,8 @@ ph_origin *ph_origin_start(char *hint, size_t hint_len)
     advertise_pc(o, ip);
     snprintf(o->advertised_ip, sizeof o->advertised_ip, "%s", ip);
     fill_hint(hint, hint_len, ip, o->token);
+    if (status)
+        *status = PH_ORIGIN_START_OK;
     PH_LOGI("photo pull: listening on %s:%d", ip, PH_PULL_PORT);
     return o;
 }
@@ -1755,9 +1765,13 @@ static void remove_phone(ph_paired_phones *phones, int i)
 static bool open_pairing_code(ph_origin *o, bool replace, char *hint, size_t hint_len)
 {
     char token[16], ip[64];
-    if (!o || !make_token(token, sizeof token))
+    if (!o)
         return false;
     pthread_mutex_lock(&o->lock);
+    if (!make_token(token, sizeof token)) {
+        pthread_mutex_unlock(&o->lock);
+        return false;
+    }
     ph_paired_phones next = o->phones;
     if (replace && next.selected >= 0)
         remove_phone(&next, next.selected);

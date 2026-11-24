@@ -1184,7 +1184,8 @@ static void pairing_actions(ph_workspace *u, int x, int y, int width)
     int small = width < 350 ? 74 : 104;
     int guide = SDL_min(150, width - 2 * small - 12);
     button(u, (SDL_Rect){x, y, guide, 34}, "Set up controls", PH_WORKSPACE_SETUP, 0, false, true);
-    button(u, (SDL_Rect){x + guide + 6, y, small, 34}, "Devices", UI_SECTION + 7, 0, false, true);
+    button(u, (SDL_Rect){x + guide + 6, y, small, 34}, "Devices",
+           UI_SECTION + PH_SETTINGS_DEVICES, 0, false, true);
     button(u, (SDL_Rect){x + guide + small + 12, y, small, 34}, "Settings",
            PH_WORKSPACE_SETTINGS_OPEN, 0, false, true);
 }
@@ -1314,7 +1315,7 @@ static void wide_pairing(ph_workspace *u, int x, int y, int width, bool spacious
     action_button(u, (SDL_Rect){x, footer, 158, 34}, "Certificate fingerprint", UI_FINGERPRINT,
                   0, false, true, false, -1);
     action_button(u, (SDL_Rect){x + width - 272, footer, 148, 34}, "Connection options",
-                  UI_SECTION + 7, 0, false, true, false, PH_ICON_SLIDERS);
+                  UI_SECTION + PH_SETTINGS_DEVICES, 0, false, true, false, PH_ICON_SLIDERS);
     action_button(u, (SDL_Rect){x + width - 110, footer, 110, 34}, "Settings",
                   PH_WORKSPACE_SETTINGS_OPEN, 0, false, true, !spacious,
                   spacious ? -1 : PH_ICON_GEAR);
@@ -1393,17 +1394,39 @@ static void drop_zone(ph_workspace *u, SDL_Rect box)
     }
 }
 
+static const char *pairing_recovery(const ph_workspace *u)
+{
+    switch (u->live.pairing_status) {
+    case PH_ORIGIN_START_IDENTITY:
+        return "Porthole couldn’t open its connection credentials. Check that your app data "
+               "folder is accessible, then try again.";
+    case PH_ORIGIN_START_LISTENER:
+        return "The pairing port is in use or blocked. Quit any other copy of Porthole, "
+               "including in the system tray, then try again.";
+    case PH_ORIGIN_START_FAILED:
+        return "Porthole couldn’t start pairing. Try again.";
+    default:
+        return "Connect this PC to the same local network as your iPhone using Wi-Fi or Ethernet, "
+               "then try again.";
+    }
+}
+
 static void home(ph_workspace *u)
 {
     SDL_Rect b = u->rect;
     int pad = b.w < 600 ? 20 : 44, x = b.x + pad, width = b.w - 2 * pad, y = b.y + 30;
     if (!u->live.paired && !u->live.address[0] && u->live.share_checked) {
-        y = text(u, "iPhone connection unavailable", x, y, width, 24, true, u->ink) + 14;
-        char recovery[200];
-        snprintf(recovery, sizeof recovery, "Check the Wi-Fi connection on %s, then restart Porthole.",
-                 pc_name(u));
-        y = text(u, recovery, x, y, width, 14, false, u->muted) + 24;
-        pairing_actions(u, x, y, width);
+        y = text(u, "Connect your iPhone", x, y, width, 30, true, u->ink) + 18;
+        int paragraph = SDL_min(width - 32, 525);
+        const char *recovery = pairing_recovery(u);
+        int height = 115 + ph_text_height(recovery, paragraph, PH_TEXT(13, PH_FONT_REGULAR));
+        card(u, (SDL_Rect){x, y, SDL_min(width, 565), height});
+        y = text(u, "Pairing unavailable", x + 16, y + 15, paragraph, 17, true, u->ink) + 7;
+        y = text(u, recovery, x + 16, y, paragraph, 13, false, u->muted) + 20;
+        button(u, (SDL_Rect){x + 16, y, 92, 34}, "Try again", PH_WORKSPACE_RETRY_PAIRING,
+               0, true, true);
+        button(u, (SDL_Rect){x + 116, y, 86, 34}, "Devices", UI_SECTION + PH_SETTINGS_DEVICES,
+               0, false, true);
         return;
     }
     if (!u->live.paired) {
@@ -1499,7 +1522,7 @@ static void home(ph_workspace *u)
         text(u, "Wi-Fi", x + 154, y + 38, 55, 12, false, u->muted);
     int button_y = y + (width < 550 ? 65 : 10);
     action_button(u, (SDL_Rect){x + width - 272, button_y, 148, 34}, "Connection options",
-                  UI_SECTION + 7, 0, false, true, false, PH_ICON_SLIDERS);
+                  UI_SECTION + PH_SETTINGS_DEVICES, 0, false, true, false, PH_ICON_SLIDERS);
     action_button(u, (SDL_Rect){x + width - 110, button_y, 110, 34}, "Settings",
                   PH_WORKSPACE_SETTINGS_OPEN, 0, false, true, true, PH_ICON_GEAR);
     y += width < 550 ? 115 : 78;
@@ -1988,11 +2011,13 @@ static int device_row(ph_workspace *u, int x, int y, int width, int index)
          : d->usb  ? "USB · Screen only"
                    : "AirPlay · Screen only",
          x + 14, y + 35, width - 28, 12, false, u->muted);
-    text(u, connected ? "Connected" : "Disconnected", x + 14, y + 56, width - 28, 11, false,
+    const char *status = connected ? "Connected" : companion && d && !d->active ? "Saved"
+                                                                              : "Disconnected";
+    text(u, status, x + 14, y + 56, width - 28, 11, false,
          connected ? u->positive : u->muted);
     int dx = x + 12, dy = y + 83;
     if (d && (companion || d->usb || connected)) {
-        const char *action = d->active ? "Selected" : companion ? "Use for files"
+        const char *action = d->active ? "Selected" : companion ? "Select iPhone"
                             : d->usb && !connected            ? "Reconnect"
                                                              : "Switch view";
         button(u, (SDL_Rect){dx, dy, 92, 28}, action, UI_SELECT_DEVICE, index, false, !d->active);
@@ -2267,11 +2292,21 @@ static int device_settings(ph_workspace *u, int x, int y, int width)
             selected = selected || u->sessions.devices[i].active;
         }
     }
-    button(u, (SDL_Rect){x, y, 118, 32}, "Add iPhone", PH_WORKSPACE_ADD_PHONE, 0, true,
-           u->live.paired);
-    if (u->live.paired && (selected || !registry))
-        button(u, (SDL_Rect){x + 128, y, 118, 32}, "New code", PH_WORKSPACE_NEW_CODE, 0, false, true);
-    y += 46;
+    if (u->live.address[0]) {
+        button(u, (SDL_Rect){x, y, 118, 32}, registry || u->live.paired ? "Add iPhone" : "Pair iPhone",
+               PH_WORKSPACE_ADD_PHONE, 0, true, true);
+        if (u->live.paired && (selected || !registry) && width >= 246)
+            button(u, (SDL_Rect){x + 128, y, 118, 32}, "New code", PH_WORKSPACE_NEW_CODE,
+                   0, false, true);
+        y += 44;
+        if (registry)
+            y = text(u, "Pair another iPhone and switch between saved devices here.",
+                     x, y, width, 12, false, u->muted) + 14;
+    } else {
+        y = text(u, pairing_recovery(u), x, y, width, 13, false, u->muted) + 12;
+        button(u, (SDL_Rect){x, y, 118, 32}, "Try again", PH_WORKSPACE_RETRY_PAIRING, 0, true, true);
+        y += 46;
+    }
     if (!registry && u->live.paired)
         y = device_row(u, x, y, width, 0);
     for (int i = 0; i < u->sessions.count; i++)
@@ -2319,7 +2354,7 @@ static void settings(ph_workspace *u)
                                    "File storage and clipboard preferences", "Porthole alerts on this PC",
                                    "Guides for connecting, sharing, and controlling your iPhone.",
                                    "Current connection details", NULL, "Version and license"};
-        int section = SDL_clamp(u->section, 0, 8);
+        int section = SDL_clamp(u->section, 0, PH_SETTINGS_COUNT - 1);
         y = settings_heading(u, x, y, width, inline_settings, titles[section], subtitles[section]);
         switch (section) {
         case 0: y = general_settings(u, x, y, width, inline_settings); break;
@@ -2333,8 +2368,8 @@ static void settings(ph_workspace *u)
         case 4: y = notification_settings(u, x, y, width); break;
         case 5: y = help_settings(u, x, y - 1, width); break;
         case 6: y = statistics_settings(u, x, y, width); break;
-        case 7: y = device_settings(u, x, y, width); break;
-        case 8: {
+        case PH_SETTINGS_DEVICES: y = device_settings(u, x, y, width); break;
+        case PH_SETTINGS_ABOUT: {
             setting_row about[] = {value_row("Porthole", NULL, PORTHOLE_VERSION),
                                    value_row("License", NULL, "GPL-3.0")};
             y = setting_group(u, x, y, width, "APPLICATION", about, SDL_arraysize(about));
@@ -2581,7 +2616,7 @@ static void activate(ph_workspace *u, ui_hit h)
         save_preferences(u);
         return;
     }
-    if (a >= UI_SECTION && a < UI_SECTION + 9) {
+    if (a >= UI_SECTION && a < UI_SECTION + PH_SETTINGS_COUNT) {
         ph_workspace_open_section(u, a - UI_SECTION);
         if (u->view == PH_WORKSPACE_HOME)
             queue(u, PH_WORKSPACE_SETTINGS_OPEN, 0);

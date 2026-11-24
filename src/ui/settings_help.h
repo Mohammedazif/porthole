@@ -6,11 +6,11 @@ typedef struct {
 
 static const help_guide help_guides[] = {
     {PH_ICON_WIFI, "Connect your iPhone",
-     "Pair, reconnect, or replace a connection code.",
+     "Pair an iPhone, reconnect, or switch between saved devices.",
      {"Connect your iPhone and PC to the same Wi-Fi network.",
       "Open Porthole on your iPhone and select this PC, or scan its QR code.",
       "Enter the connection code if prompted. Use your saved PC to reconnect later."},
-     "Generating a new code replaces the saved connection code and requires pairing again."},
+     "To pair another iPhone, open Settings → Devices → Add iPhone. To switch back, select a saved iPhone there."},
     {PH_ICON_PHONE, "Share your screen",
      "Start or stop an iPhone broadcast.",
      {"Connect your iPhone to this PC in Porthole.",

@@ -189,7 +189,7 @@ typedef struct app {
     char notified_file[1024];
     int place_x, place_y;
     Uint64 place_at;
-    ph_origin *origin;
+    _Atomic(ph_origin *) origin;
     Uint64 clip_poll_at, address_poll_at;
     char pull_dir[640];
     /* Original file for this drag; empty while the phone is looking. */
@@ -3272,6 +3272,25 @@ static void do_window_action(app *a, ph_window_action action, bool *running)
     }
 }
 
+static void retry_pairing(app *a)
+{
+    char hint[96];
+    if (a->origin) {
+        if (ph_origin_refresh_address(a->origin, hint, sizeof hint))
+            ph_window_set_pull_hint(a->win, hint);
+        return;
+    }
+    ph_origin_start_status status;
+    a->origin = ph_origin_start(hint, sizeof hint, &status);
+    ph_window_set_pairing_status(a->win, status);
+    ph_window_set_share_available(a->win, a->origin && a->screen);
+    if (a->origin) {
+        ph_window_set_pull_hint(a->win, hint);
+        ph_window_set_code_open(a->win, ph_origin_code_open(a->origin));
+        sync_pairing_history(a);
+    }
+}
+
 static void apply_window_action(app *a, bool *running)
 {
     do_window_action(a, ph_window_take_action(a->win), running);
@@ -3284,8 +3303,12 @@ static void apply_window_action(app *a, bool *running)
     ph_workspace *ui = ph_window_workspace(a->win);
     const char *device = ph_workspace_device(ui), *value = ph_workspace_value(ui);
     const char *phone_id = strncmp(device, "phone:", 6) == 0 ? device + 6 : NULL;
-    if (action == PH_WORKSPACE_ADD_PHONE) {
-        if (ph_origin_add_phone(a->origin, path, sizeof path)) {
+    if (action == PH_WORKSPACE_RETRY_PAIRING) {
+        retry_pairing(a);
+    } else if (action == PH_WORKSPACE_ADD_PHONE) {
+        if (a->origin && ph_origin_code_open(a->origin) && !ph_origin_code_expired(a->origin)) {
+            ph_window_open_pairing(a->win);
+        } else if (ph_origin_add_phone(a->origin, path, sizeof path)) {
             ph_inbox_disconnect(a->inbox);
             ph_screen_disconnect(a->screen);
             sync_pairing_history(a);
@@ -3646,12 +3669,7 @@ int ph_app_run(const ph_app_options *opt)
         ph_polish_apply_saved(a.polish, SDL_GetWindowFromID(ph_window_id(a.win)));
     update_title(&a);
     {
-        char hint[96];
         char pc[64];
-        a.origin = ph_origin_start(hint, sizeof hint);
-        sync_pairing_history(&a);
-        if (a.origin && hint[0])
-            ph_window_set_pull_hint(a.win, hint);
         ph_origin_pc_name(pc, sizeof pc);
         ph_window_set_pc_name(a.win, pc);
     }
@@ -3667,7 +3685,7 @@ int ph_app_run(const ph_app_options *opt)
         atomic_init(&a.screen_on, false);
         atomic_init(&a.airplay_on, false);
         a.screen = ph_screen_start(&screen_cb);
-        ph_window_set_share_available(a.win, a.origin && a.screen);
+        retry_pairing(&a);
     }
     if (ensure_pull_dir(&a)) {
         ph_inbox_callbacks inbox_cb = {
@@ -3737,7 +3755,7 @@ int ph_app_run(const ph_app_options *opt)
             if (ph_workspace_set_sessions(ph_window_workspace(a.win), &state)) {
                 if (state.request_id[0] && strcmp(state.request_id, a.request_id)) {
                     release_everything(&a);
-                    ph_workspace_open_section(ph_window_workspace(a.win), 8);
+                    ph_workspace_open_section(ph_window_workspace(a.win), PH_SETTINGS_DEVICES);
                     ph_window_open_settings(a.win);
                 }
                 snprintf(a.request_id, sizeof a.request_id, "%s", state.request_id);
@@ -3854,7 +3872,7 @@ done:
     a.ghost = NULL;
     ph_screen_stop(a.screen); /* before the origin its allow callback reads */
     ph_inbox_stop(a.inbox);
-    ph_origin_stop(a.origin);
+    ph_origin_stop(atomic_exchange(&a.origin, NULL));
     ph_hostclip_shutdown();
     if (a.usb_started) {
         atomic_store(&a.usb_stop, true);

@@ -12,7 +12,7 @@
 #include <signal.h>
 #endif
 
-static pthread_once_t once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t identity_lock = PTHREAD_MUTEX_INITIALIZER;
 static SSL_CTX *identity;
 static char fingerprint[65];
 static _Thread_local SSL *connection;
@@ -112,8 +112,12 @@ static void load_identity(void)
 }
 const char *ph_tls_fingerprint(void)
 {
-    pthread_once(&once, load_identity);
-    return fingerprint;
+    pthread_mutex_lock(&identity_lock);
+    if (!identity)
+        load_identity();
+    const char *result = identity ? fingerprint : "";
+    pthread_mutex_unlock(&identity_lock);
+    return result;
 }
 
 static bool wait_tls(SSL *session, int result, uint64_t deadline)

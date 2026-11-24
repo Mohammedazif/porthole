@@ -361,6 +361,11 @@ void ph_window_set_detail(ph_window *w, const char *detail)
 }
 void ph_window_set_pull_hint(ph_window *w, const char *hint) { (void)w, (void)hint; }
 void ph_window_set_share_available(ph_window *w, bool available) { (void)w; (void)available; }
+void ph_window_set_pairing_status(ph_window *w, ph_origin_start_status status)
+{
+    (void)w;
+    (void)status;
+}
 bool ph_window_take_new_code(ph_window *w) { (void)w; return false; }
 ph_window_action ph_window_take_action(ph_window *w) { (void)w; return PH_WINDOW_ACTION_NONE; }
 bool ph_window_ctrl_is_command(const ph_window *w) { (void)w; return true; }

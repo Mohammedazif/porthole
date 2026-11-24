@@ -3,6 +3,7 @@
 #include <SDL.h>
 #include "core/metrics.h"
 #include "files/history.h"
+#include "files/origin.h"
 #include "session/devices.h"
 
 typedef struct ph_workspace ph_workspace;
@@ -14,6 +15,7 @@ typedef enum ph_workspace_view {
     PH_WORKSPACE_CLIPBOARD,
     PH_WORKSPACE_FILES
 } ph_workspace_view;
+enum { PH_SETTINGS_DEVICES = 7, PH_SETTINGS_ABOUT, PH_SETTINGS_COUNT };
 typedef enum ph_workspace_action {
     PH_WORKSPACE_NONE,
     PH_WORKSPACE_CLOSE,
@@ -61,12 +63,14 @@ typedef enum ph_workspace_action {
     PH_WORKSPACE_CAPTURES,
     PH_WORKSPACE_CLEAR_ALL_CLIPBOARD,
     PH_WORKSPACE_ADD_PHONE,
+    PH_WORKSPACE_RETRY_PAIRING,
     PH_WORKSPACE_ALWAYS_ON_TOP
 } ph_workspace_action;
 typedef struct ph_workspace_live {
     bool paired, connected, mirroring, controls, paused, feed, toolbar, ctrl_command, media_keys,
         release_blur, relative, sound, recording;
     bool share_checked, share_available, clipboard_available, modal;
+    ph_origin_start_status pairing_status;
     bool always_on_top, controls_connected, phone_controls_managed, phone_controls_allowed,
          phone_controls_verified,
         phone_controls_screen_only;

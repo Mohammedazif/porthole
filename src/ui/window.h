@@ -111,6 +111,7 @@ void ph_window_set_clipboard_available(ph_window *w, bool available);
 void ph_window_note_received(ph_window *w, unsigned files);
 void ph_window_open_received_history(ph_window *w);
 void ph_window_open_pairing(ph_window *w);
+void ph_window_set_pairing_status(ph_window *w, ph_origin_start_status status);
 void ph_window_set_history_profile(ph_window *w, const char *profile);
 
 /* F1 opens/closes local help. Picture coordinates are rejected while it is open. */

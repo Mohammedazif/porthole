@@ -478,7 +478,7 @@ static ph_origin *test_pairing(ph_origin *origin, const char *token, const char 
     reject_credential(second_key);
 
     ph_origin_stop(origin);
-    origin = ph_origin_start(hint, sizeof hint);
+    origin = ph_origin_start(hint, sizeof hint, NULL);
     CHECK(origin && !ph_origin_code_open(origin));
     ph_session_state state = {0};
     ph_origin_sessions(origin, &state);
@@ -530,13 +530,31 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
 #endif
     CHECK(ph_test_temp_dir(dir, sizeof dir));
+    char blocked[1200];
+    snprintf(blocked, sizeof blocked, "%s/blocked-app-data", dir);
+    FILE *file = ph_fopen(blocked, "wb");
+    CHECK(file && fclose(file) == 0);
+#ifdef _WIN32
+    _putenv_s("APPDATA", blocked);
+#else
+    setenv("XDG_CONFIG_HOME", blocked, 1);
+#endif
+    ph_origin_start_status status;
+    CHECK(!ph_origin_start(hint, sizeof hint, &status) && !hint[0] &&
+          status == PH_ORIGIN_START_IDENTITY);
+    CHECK(ph_remove(blocked) == 0);
 #ifdef _WIN32
     _putenv_s("APPDATA", dir);
 #else
     setenv("XDG_CONFIG_HOME", dir, 1);
 #endif
-    o = ph_origin_start(hint, sizeof hint);
-    CHECK(o);
+    int occupied = ph_sock_listen(PH_PULL_PORT, false, 1);
+    CHECK(occupied >= 0);
+    CHECK(!ph_origin_start(hint, sizeof hint, &status) && !hint[0] &&
+          status == PH_ORIGIN_START_LISTENER);
+    ph_sock_close(occupied);
+    o = ph_origin_start(hint, sizeof hint, &status);
+    CHECK(o && status == PH_ORIGIN_START_OK);
     CHECK(sscanf(hint, "%*s %15s", token) == 1 && strlen(token) == 8);
     CHECK(!ph_origin_put_file(o, "/does/not/exist"));
 

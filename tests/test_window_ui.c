@@ -398,6 +398,22 @@ static void windows_visual_review(ph_window *w, SDL_Window *native, const char *
         screenshot(w, dir, sizes_names[i]);
     }
     puts("Pairing window and accessible copy action passed");
+    SDL_SetWindowSize(native, 1024, 680);
+    ph_window_set_pairing_status(w, PH_ORIGIN_START_LISTENER);
+    ph_window_set_pull_hint(w, "");
+    int retry_x, retry_y;
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_RETRY_PAIRING, &retry_x, &retry_y));
+    screenshot(w, dir, "pairing-recovery");
+    ph_window_set_pairing_status(w, PH_ORIGIN_START_OK);
+    ph_window_set_pull_hint(w, "192.0.2.42:47731  SAMPLE42");
+    click_role(w, "Connection options");
+    CHECK(ph_workspace_current_section(workspace) == PH_SETTINGS_DEVICES);
+    screenshot(w, dir, "devices-first-pairing");
+    click_role(w, "Pair iPhone");
+    CHECK(ph_window_take_workspace_action(w, NULL) == PH_WORKSPACE_ADD_PHONE);
+    click_role(w, "About");
+    CHECK(ph_workspace_current_section(workspace) == PH_SETTINGS_ABOUT);
+    close_workspace_view(w);
 
     ph_window_set_code_open(w, false);
     ph_window_set_companion(w, true, false, 72);
@@ -692,6 +708,20 @@ int main(int argc, char **argv)
 
     int tx, ty;
     ph_workspace *workspace = ph_window_workspace(w);
+    ph_window_open_settings(w);
+    ph_workspace_open_section(workspace, PH_SETTINGS_DEVICES);
+    ph_window_redraw(w);
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_ADD_PHONE, &tx, &ty));
+    click_at(w, tx, ty);
+    CHECK(ph_window_take_workspace_action(w, NULL) == PH_WORKSPACE_ADD_PHONE);
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CLOSE, &tx, &ty));
+    click_at(w, tx, ty);
+    ph_window_set_pull_hint(w, "this-pc:47731  SAMPLE42");
+    CHECK(!ph_workspace_target(workspace, PH_WORKSPACE_COPY_CODE, &tx, &ty));
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_RETRY_PAIRING, &tx, &ty));
+    click_at(w, tx, ty);
+    CHECK(ph_window_take_workspace_action(w, NULL) == PH_WORKSPACE_RETRY_PAIRING);
+    ph_window_set_pull_hint(w, "192.0.2.42:47731  SAMPLE42");
     CHECK(ph_workspace_target(workspace, PH_WORKSPACE_SETUP, &tx, &ty));
     click_shortcut(w, tx, ty, SDL_SCANCODE_F2);
     SDL_Event copy;

@@ -24,9 +24,16 @@ typedef enum ph_origin_result {
     PH_ORIGIN_MISS
 } ph_origin_result;
 
-/* Listens on the LAN. hint receives "address:port code XXXXXXXX" for the help text.
- * NULL if the socket cannot be opened; dragging still saves the screen picture. */
-ph_origin *ph_origin_start(char *hint, size_t hint_len);
+typedef enum ph_origin_start_status {
+    PH_ORIGIN_START_OK,
+    PH_ORIGIN_START_IDENTITY,
+    PH_ORIGIN_START_LISTENER,
+    PH_ORIGIN_START_FAILED
+} ph_origin_start_status;
+
+/* Listens on the LAN. hint receives the address and any active pairing code.
+ * On failure returns NULL and optionally reports why. */
+ph_origin *ph_origin_start(char *hint, size_t hint_len, ph_origin_start_status *status);
 void ph_origin_stop(ph_origin *origin);
 
 /* Replaces the pairing code, drops the connected phone, and rewrites hint. */
