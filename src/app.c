@@ -389,6 +389,7 @@ static void screen_video(void *user, const uint8_t *annexb, size_t len, bool key
         ph_src_switch_broadcast_frame(&a->src, keyframe, ph_metrics_now_ms())) {
         if (before != PH_SRC_BROADCAST) {
             ph_decoder_reset(a->dec);
+            ph_audio_flush(a->audio);
             PH_LOGI("showing the broadcast screen");
         }
         ph_polish_on_video(a->polish, PH_SRC_BROADCAST, annexb, len, 0);
@@ -397,11 +398,22 @@ static void screen_video(void *user, const uint8_t *annexb, size_t len, bool key
     pthread_mutex_unlock(&a->src_lock);
 }
 
+static void screen_audio(void *user, const uint8_t *pcm, size_t len)
+{
+    app *a = user;
+    pthread_mutex_lock(&a->src_lock);
+    if (a->src.current == PH_SRC_BROADCAST && !atomic_load(&a->airplay_on))
+        ph_audio_push_broadcast(a->audio, pcm, len);
+    pthread_mutex_unlock(&a->src_lock);
+}
+
 static void screen_disconnected(void *user)
 {
     app *a = user;
 
     pthread_mutex_lock(&a->src_lock);
+    if (a->src.current == PH_SRC_BROADCAST)
+        ph_audio_flush(a->audio);
     atomic_store(&a->screen_on, false);
     ph_src next = ph_src_switch_broadcast_lost(&a->src, ph_metrics_now_ms());
     if (a->screen_dec)
@@ -3676,6 +3688,7 @@ int ph_app_run(const ph_app_options *opt)
             .allow = screen_allow,
             .connected = screen_connected,
             .video = screen_video,
+            .audio = screen_audio,
             .disconnected = screen_disconnected,
         };
         atomic_init(&a.screen_on, false);

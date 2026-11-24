@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(porthole
-    VERSION 0.1.2
+    VERSION 0.1.3
     DESCRIPTION "Share and control your iPhone screen from a PC"
     LANGUAGES C)
 

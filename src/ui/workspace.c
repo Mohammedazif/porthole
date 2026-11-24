@@ -2073,8 +2073,7 @@ static int screen_settings(ph_workspace *u, int x, int y, int width)
     char volume[16];
     snprintf(volume, sizeof volume, "%d%%", u->live.volume);
     setting_row audio[] = {
-        value_row("iPhone app broadcast", "Audio remains on your iPhone.", "On iPhone"),
-        toggle_row("PC audio", "Play Screen Mirroring audio on this PC.",
+        toggle_row("PC audio", "Play audio from screen sharing and Screen Mirroring on this PC.",
                    PH_WORKSPACE_SOUND, u->live.sound),
         {.title = "Output volume", .value = volume, .kind = SETTING_VOLUME}
     };

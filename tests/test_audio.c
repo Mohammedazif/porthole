@@ -322,6 +322,14 @@ int main(int argc, char **argv)
     encoded_tone(audio, AV_CODEC_ID_AAC, 4);
     settings_cover(audio);
     sync_queue(audio);
+    ph_audio_flush(audio);
+    uint8_t pcm[4096] = {1};
+    CHECK(ph_audio_push_broadcast(audio, pcm, 5) < 0);
+    CHECK(ph_audio_push_broadcast(audio, pcm, sizeof pcm) == 1024);
+    CHECK(ph_audio_queued_ms(audio) > 0);
+    ph_audio_set_muted(audio, true);
+    CHECK(ph_audio_push_broadcast(audio, pcm, sizeof pcm) == 0);
+    CHECK(ph_audio_queued_ms(audio) == 0);
     ph_audio_destroy(audio);
     ph_audio_destroy(NULL);
     if (failures)

@@ -3,7 +3,7 @@
 #define BuildDir "."
 #endif
 #ifndef PortholeVersion
-#define PortholeVersion "0.1.2"
+#define PortholeVersion "0.1.3"
 #endif
 
 [Setup]

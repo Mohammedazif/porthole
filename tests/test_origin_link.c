@@ -19,6 +19,7 @@
 #include "temp_path.h"
 
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #ifndef _WIN32
@@ -307,9 +308,18 @@ static bool verify_ticket(void *origin, const char *key)
     return ph_origin_authorize(origin, key);
 }
 
+static atomic_int screen_audio_frames;
+
+static void accept_screen_audio(void *user, const uint8_t *pcm, size_t len)
+{
+    (void)user;
+    if (len == 4 && memcmp(pcm, "TEST", 4) == 0)
+        atomic_fetch_add(&screen_audio_frames, 1);
+}
+
 static void test_screen_channel(ph_origin *origin)
 {
-    ph_screen_callbacks cb = {.user = origin, .authorize = verify_ticket};
+    ph_screen_callbacks cb = {.user = origin, .authorize = verify_ticket, .audio = accept_screen_audio};
     ph_screen *server = ph_screen_start(&cb);
     CHECK(server);
     int fd = open_channel(PH_SCREEN_PORT,
@@ -330,6 +340,18 @@ static void test_screen_channel(ph_origin *origin)
     int result = read_peer(fd, &ack, 1, 0);
     CHECK(result <= 0 && SSL_get_error(peer_ssl(fd), result) != SSL_ERROR_WANT_READ);
     CHECK(ph_metrics_now_ms() - started < 15500);
+    close_peer(fd);
+    fd = channel(PH_SCREEN_PORT);
+    say(fd, "PSCR 2\n");
+    const uint8_t audio[] = {0, 0, 0, 4, 3, 'T', 'E', 'S', 'T'};
+    CHECK(SSL_write(peer_ssl(fd), audio, sizeof audio) == sizeof audio);
+    CHECK(read_peer(fd, &ack, 1, 0) == 1 && ack == 'A');
+    CHECK(atomic_load(&screen_audio_frames) == 0);
+    CHECK(SSL_write(peer_ssl(fd), frame, sizeof frame) == sizeof frame);
+    CHECK(read_peer(fd, &ack, 1, 0) == 1 && ack == 'A');
+    CHECK(SSL_write(peer_ssl(fd), audio, sizeof audio) == sizeof audio);
+    CHECK(read_peer(fd, &ack, 1, 0) == 1 && ack == 'A');
+    CHECK(atomic_load(&screen_audio_frames) == 1);
     close_peer(fd);
     ph_screen_stop(server);
 }
@@ -668,6 +690,10 @@ int main(int argc, char **argv)
     CHECK(!ph_control_connection_wanted(policy, true, true, false));
     test_resume_send(o, path_b, key);
     phone = reconnect_phone(key);
+    char capability[16];
+    say(phone, "SCREEN?\n");
+    line(phone, capability, sizeof capability);
+    CHECK(!strcmp(capability, "SCREEN 2"));
     test_screen_channel(o);
     test_resume_receive(dir, o);
     test_chunked_send(o, phone, path_a);

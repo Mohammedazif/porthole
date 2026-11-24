@@ -16,7 +16,8 @@ uint32_t ph_screen_parse_header(const uint8_t header[5], uint32_t max_len, int *
     len = (uint32_t)header[0] << 24 | (uint32_t)header[1] << 16 | (uint32_t)header[2] << 8
           | header[3];
     *type = header[4];
-    if (len == 0 || len > max_len || (*type != 1 && *type != 2))
+    if (len == 0 || len > max_len || (*type != 1 && *type != 2 && *type != 3) ||
+        (*type == 3 && (len > PH_SCREEN_AUDIO_MAX || len % 4)))
         return 0;
     return len;
 }
@@ -65,7 +66,7 @@ static bool read_all(ph_screen *s, int fd, void *buf, size_t len, uint64_t deadl
     return true;
 }
 
-static bool read_hello(ph_screen *s, int fd)
+static int read_hello(ph_screen *s, int fd)
 {
     char line[32];
     size_t n = 0;
@@ -74,13 +75,13 @@ static bool read_hello(ph_screen *s, int fd)
     while (n + 1 < sizeof line) {
         char c;
         if (!read_all(s, fd, &c, 1, deadline))
-            return false;
+            return 0;
         if (c == '\n')
             break;
         line[n++] = c;
     }
     line[n] = 0;
-    return !strcmp(line, "PSCR 1");
+    return !strcmp(line, "PSCR 2") ? 2 : !strcmp(line, "PSCR 1") ? 1 : 0;
 }
 
 static void serve(ph_screen *s, int fd, const char *address)
@@ -93,7 +94,8 @@ static void serve(ph_screen *s, int fd, const char *address)
         return;
     ph_sock_nodelay(fd);
     ph_sock_keepalive(fd, 10, 3, 3);
-    if (!read_hello(s, fd)) {
+    int version = read_hello(s, fd);
+    if (!version) {
         PH_LOGW("screen broadcast: %s did not say hello", address);
         free(frame);
         return;
@@ -108,17 +110,21 @@ static void serve(ph_screen *s, int fd, const char *address)
         if (!read_all(s, fd, header, sizeof header, ph_metrics_now_ms() + frame_header_timeout_ms))
             break;
         len = ph_screen_parse_header(header, PH_SCREEN_FRAME_MAX, &type);
-        if (!len) {
+        if (!len || (type == 3 && version < 2)) {
             PH_LOGW("screen broadcast: bad frame header, closing");
             break;
         }
         if (!read_all(s, fd, frame, len, ph_metrics_now_ms() + 5000))
             break;
-        if (s->cb.video)
-            s->cb.video(s->cb.user, frame, len, type == 2);
-        frames++;
-        /* One byte per frame taken: the phone keeps at most a couple of frames
-         * unanswered and skips the rest, so Wi-Fi never queues seconds of video. */
+        if (type == 3) {
+            if (frames && s->cb.audio)
+                s->cb.audio(s->cb.user, frame, len);
+        } else {
+            if (s->cb.video)
+                s->cb.video(s->cb.user, frame, len, type == 2);
+            frames++;
+        }
+        /* The sender limits outstanding packets using these acknowledgements. */
         if (ph_tls_write(fd, "A", 1) != 1)
             break;
     }

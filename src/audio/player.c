@@ -68,11 +68,27 @@ struct ph_audio {
 static const char *format_name(unsigned char compression)
 {
     switch (compression) {
+    case 1: return "broadcast PCM";
     case 2: return "ALAC";
     case 4: return "AAC-LC";
     case 8: return "AAC-ELD";
     default: return "unsupported";
     }
+}
+
+static bool open_output(ph_audio *a)
+{
+    if (a->device)
+        return true;
+    SDL_AudioSpec wanted = {.freq = RATE, .format = AUDIO_F32SYS,
+                            .channels = CHANNELS, .samples = 512};
+    a->device = SDL_OpenAudioDevice(NULL, 0, &wanted, NULL, 0);
+    if (!a->device) {
+        PH_LOGW("couldn't open PC audio output: %s", SDL_GetError());
+        return false;
+    }
+    SDL_PauseAudioDevice(a->device, 0);
+    return true;
 }
 
 static void drop_oldest_hold(ph_audio *a)
@@ -156,16 +172,8 @@ static bool configure_locked(ph_audio *a, unsigned char compression, unsigned sh
     if (avcodec_open2(a->codec, decoder, NULL) < 0)
         goto fail;
 
-    if (!a->device) {
-        SDL_AudioSpec wanted = {.freq = RATE, .format = AUDIO_F32SYS,
-                                .channels = CHANNELS, .samples = 512};
-        a->device = SDL_OpenAudioDevice(NULL, 0, &wanted, NULL, 0);
-        if (!a->device) {
-            PH_LOGW("couldn't open PC audio output: %s", SDL_GetError());
-            goto fail;
-        }
-        SDL_PauseAudioDevice(a->device, 0);
-    }
+    if (!open_output(a))
+        goto fail;
     PH_LOGI("audio ready: %s, %u samples, PC speakers", format_name(compression), samples);
     return true;
 fail:
@@ -262,6 +270,37 @@ static int queue_pcm(ph_audio *a, uint8_t *pcm, int count, bool own)
     if (own)
         av_free(pcm);
     return count;
+}
+
+int ph_audio_push_broadcast(ph_audio *a, const uint8_t *pcm, size_t len)
+{
+    if (!a || !pcm || !len || len > 8192 || len % 4)
+        return -1;
+    int frames = (int)(len / 4);
+    float samples[4096];
+    SDL_LockMutex(a->lock);
+    if (a->muted || (!a->device && a->compression == 1 && a->warned)) {
+        SDL_UnlockMutex(a->lock);
+        return 0;
+    }
+    if (a->compression != 1) {
+        flush_locked(a);
+        avcodec_free_context(&a->codec);
+        a->compression = 1;
+        a->warned = false;
+    }
+    if (!open_output(a)) {
+        a->warned = true;
+        SDL_UnlockMutex(a->lock);
+        return -1;
+    }
+    for (int i = 0; i < frames * CHANNELS; i++) {
+        int value = pcm[2 * i] | (int)pcm[2 * i + 1] << 8;
+        samples[i] = (value < 32768 ? value : value - 65536) / 32768.0f;
+    }
+    int result = queue_pcm(a, (uint8_t *)samples, frames, false);
+    SDL_UnlockMutex(a->lock);
+    return result;
 }
 
 static int hold_pcm(ph_audio *a, uint8_t *pcm, int count, int hold_ms)

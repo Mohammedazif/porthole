@@ -529,6 +529,10 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
         *consumed = true;
         return send_all(fd, "INBOX 3\n", 8);
     }
+    if (!strcmp(line, "SCREEN?")) {
+        *consumed = true;
+        return send_all(fd, "SCREEN 2\n", 9);
+    }
     if (!strcmp(line, "FILES 3") || !strcmp(line, "FILES 2") || !strcmp(line, "FILES")) {
         pthread_mutex_lock(&o->lock);
         o->files_ok = true;

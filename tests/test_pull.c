@@ -108,10 +108,15 @@ static void test_screen_header(void)
     const uint8_t video[5] = {0, 0, 1, 0, 1}, key[5] = {0, 0, 0, 9, 2};
     const uint8_t empty[5] = {0, 0, 0, 0, 1}, odd[5] = {0, 0, 0, 9, 7};
     const uint8_t huge[5] = {0x7f, 0, 0, 0, 1};
+    const uint8_t audio[5] = {0, 0, 0x20, 0, 3}, short_audio[5] = {0, 0, 0, 3, 3};
+    const uint8_t oversized_audio[5] = {0, 0, 0x20, 4, 3};
     int type = 0;
 
     CHECK(ph_screen_parse_header(video, PH_SCREEN_FRAME_MAX, &type) == 256 && type == 1);
     CHECK(ph_screen_parse_header(key, PH_SCREEN_FRAME_MAX, &type) == 9 && type == 2);
+    CHECK(ph_screen_parse_header(audio, PH_SCREEN_FRAME_MAX, &type) == PH_SCREEN_AUDIO_MAX && type == 3);
+    CHECK(ph_screen_parse_header(short_audio, PH_SCREEN_FRAME_MAX, &type) == 0);
+    CHECK(ph_screen_parse_header(oversized_audio, PH_SCREEN_FRAME_MAX, &type) == 0);
     CHECK(ph_screen_parse_header(empty, PH_SCREEN_FRAME_MAX, &type) == 0);
     CHECK(ph_screen_parse_header(odd, PH_SCREEN_FRAME_MAX, &type) == 0);
     CHECK(ph_screen_parse_header(huge, PH_SCREEN_FRAME_MAX, &type) == 0);
