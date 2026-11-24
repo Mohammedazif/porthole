@@ -18,8 +18,6 @@ public static class SetupReview {
     public static extern int GetWindowText(IntPtr window, StringBuilder text, int capacity);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr capacity, StringBuilder text);
-    [DllImport("user32.dll", EntryPoint="SendMessageW")]
-    private static extern IntPtr SendValue(IntPtr window, uint message, IntPtr param, IntPtr value);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     public static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
     [DllImport("user32.dll")]
@@ -70,17 +68,8 @@ public static class SetupReview {
         return text.ToString();
     }
 
-    public static bool SelectOption(IntPtr list, int index) {
-        int top = 0;
-        for (int i = 0; i <= index; i++) {
-            int height = SendValue(list, 0x01A1, (IntPtr)i, IntPtr.Zero).ToInt32();
-            if (height < 1) return false;
-            if (i < index) top += height;
-            else top += height / 2;
-        }
-        var position = (IntPtr)((top << 16) | 16);
-        return PostMessage(list, 0x0201, (IntPtr)1, position) &&
-               PostMessage(list, 0x0202, IntPtr.Zero, position);
+    public static bool Click(IntPtr button) {
+        return PostMessage(button, 0x00F5, IntPtr.Zero, IntPtr.Zero);
     }
 }
 '@
@@ -119,13 +108,23 @@ try {
     Save-WizardImage $wizard (Join-Path $OutputDirectory 'setup-destination.png')
     [void][SetupReview]::SetForegroundWindow($wizard)
     for ($page = 0; $page -lt 3; $page++) {
-        $options = [SetupReview]::FindVisible($wizard, 'TNewCheckListBox', $null)
-        if ($options -ne [IntPtr]::Zero) {
+        $network = [SetupReview]::FindVisible($wizard, 'TBitmapButton', 'Allow connections on private networks')
+        if ($network -ne [IntPtr]::Zero) {
+            $startup = [SetupReview]::FindVisible($wizard, 'TBitmapButton', 'Start Porthole at sign-in for all users')
+            if ($startup -eq [IntPtr]::Zero) { throw 'The startup switch is missing' }
+            if (![SetupReview]::ReadText($network).EndsWith(': On') -or
+                ![SetupReview]::ReadText($startup).EndsWith(': Off')) {
+                throw 'Incorrect initial installer options'
+            }
             Save-WizardImage $wizard (Join-Path $OutputDirectory 'setup-options.png')
-            if (![SetupReview]::SelectOption($options, 0) -or ![SetupReview]::SelectOption($options, 1)) {
+            if (![SetupReview]::Click($network) -or ![SetupReview]::Click($startup)) {
                 throw 'Could not toggle the installer options'
             }
             Start-Sleep -Milliseconds 300
+            if (![SetupReview]::ReadText($network).EndsWith(': Off') -or
+                ![SetupReview]::ReadText($startup).EndsWith(': On')) {
+                throw 'The installer switches did not update'
+            }
             Save-WizardImage $wizard (Join-Path $OutputDirectory 'setup-options-selected.png')
             $next = [SetupReview]::FindVisible($wizard, 'TNewButton', 'Next')
             if ($next -eq [IntPtr]::Zero) { throw 'Cannot review the selected options' }
@@ -134,9 +133,9 @@ try {
             $ready = [SetupReview]::FindVisible($wizard, 'TNewMemo', $null)
             if ($ready -eq [IntPtr]::Zero) { throw 'Cannot read the install summary' }
             $summary = [SetupReview]::ReadText($ready)
-            if ($summary -notmatch 'Allow connections on private networks' -or
+            if ($summary -match 'Allow connections on private networks' -or
                 $summary -notmatch 'Start Porthole at sign-in for all users') {
-                throw 'The install summary did not show both selected options'
+                throw 'The install summary did not match the selected options'
             }
             Save-WizardImage $wizard (Join-Path $OutputDirectory 'setup-ready.png')
             return
