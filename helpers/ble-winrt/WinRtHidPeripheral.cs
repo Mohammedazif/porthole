@@ -361,7 +361,8 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
             DropPeerLocked();
             if (pipeLifetime.RestartRequired) return;
             activePeer = gate.Connect(id);
-            _ = ReportPeerNameAsync(activePeer.Value);
+            if (activePeer is PeerSession connected)
+                _ = ReportPeerNameAsync(connected);
             ClearValuesLocked();
         }
         if (activePeer is not PeerSession peer) return;
