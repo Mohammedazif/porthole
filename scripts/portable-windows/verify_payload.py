@@ -184,7 +184,6 @@ def verify_helper(path: Path | str) -> dict:
 
     bundle_id = binary_string()
     deps_offset, deps_size, config_offset, config_size, flags = pe.unpack("<qqqqQ", cursor); cursor += 40
-    require(flags & 1, "Helper must extract all bundled files before managed/WinRT loading")
     entries, configurations, names = [], {}, set()
     for _ in range(count):
         offset, length, compressed, kind = pe.unpack("<qqqB", cursor); cursor += 25
@@ -231,7 +230,7 @@ def verify_helper(path: Path | str) -> dict:
     require(not any(imported in {"hostfxr.dll", "hostpolicy.dll", "coreclr.dll", "clrjit.dll"} for imported in pe.imports()),
             "Single-file helper imports an adjacent runtime DLL")
     return {"path": str(path), "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
-            "bundle_version": f"{major}.{minor}", "bundle_id": bundle_id, "extract_all": True,
+            "bundle_version": f"{major}.{minor}", "bundle_id": bundle_id, "extract_all": bool(flags & 1),
             "runtime": config["includedFrameworks"], "dependency_target": target,
             "static_runtime_exports": sorted(STATIC_HOST_EXPORTS), "entries": entries}
 

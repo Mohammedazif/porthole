@@ -21,11 +21,11 @@ jobs:
     name: Linux (full build)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: '10.0.x'
 
@@ -52,7 +52,7 @@ jobs:
           test -x /usr/libexec/porthole/porthole_ble.py
           test -f /usr/share/applications/porthole.desktop
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: porthole-ubuntu-24.04-mint-22-amd64
           path: out/linux/*.deb
@@ -72,7 +72,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
 
@@ -89,7 +89,7 @@ jobs:
           test -x /usr/libexec/porthole/porthole_ble.py
           test -f /usr/share/applications/porthole.desktop
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: porthole-debian-13-amd64
           path: out/linux/*.deb
@@ -109,11 +109,11 @@ jobs:
         shell: pwsh
         run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: '10.0.x'
 
@@ -158,6 +158,29 @@ jobs:
       - name: Build
         run: cmake --build --preset windows-release
 
+      - name: Check the published Windows Bluetooth helper
+        shell: pwsh
+        timeout-minutes: 1
+        run: |
+          $helper = 'build/windows-release/src/ble-winrt/porthole-ble-winrt.exe'
+          $descriptor = & $helper --descriptor
+          if ($LASTEXITCODE -ne 0 -or $descriptor -cnotmatch '^(?:[0-9a-f]{2}){50,}$') {
+            throw 'The bundled Bluetooth helper did not return its HID descriptor'
+          }
+          $status = Join-Path $env:RUNNER_TEMP 'porthole-ble-probe-status.txt'
+          $detail = Join-Path $env:RUNNER_TEMP 'porthole-ble-probe-detail.txt'
+          $probe = Start-Process $helper -ArgumentList '--probe' -Wait -PassThru `
+            -RedirectStandardOutput $status -RedirectStandardError $detail
+          $result = (Get-Content $status -Raw).Trim()
+          Get-Content $detail
+          Write-Output $result
+          if ($probe.ExitCode -eq 0 -and $result -eq 'probe ok peripheral=true hid_service=1812') {
+            exit 0
+          }
+          if ($probe.ExitCode -ne 1 -or $result -notmatch '^error No Windows Bluetooth adapter was found\.') {
+            throw "WinRT Bluetooth probe failed unexpectedly ($($probe.ExitCode))"
+          }
+
       - name: Test
         run: ctest --preset windows-release
 
@@ -175,7 +198,7 @@ jobs:
 
       - name: Upload Windows visual review
         if: ${{ always() && github.event_name == 'workflow_dispatch' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: porthole-native-windows-review
           path: out/windows-ui-review/
@@ -187,18 +210,19 @@ jobs:
 
       - name: Verify the packaged Windows runtime
         if: ${{ !inputs.windows_ui_only }}
-        run: >-
-          python scripts/portable-windows/verify_payload.py out/porthole-windows-x64
-          --report out/porthole-windows-x64-verification.json
+        run: |
+          python scripts/portable-windows/verify_payload.py out/porthole-windows-x64 \
+            --report out/porthole-windows-x64-verification.json
+          python -c 'import json; assert json.load(open("out/porthole-windows-x64-verification.json"))["helper"]["extract_all"] is False'
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !inputs.windows_ui_only }}
         with:
           name: porthole-windows-x64
           path: out/porthole-windows-x64/
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !inputs.windows_ui_only }}
         with:
           name: porthole-windows-x64-sources
@@ -215,7 +239,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Validate the selected payload run
         if: ${{ inputs.windows_payload_run }}
@@ -229,7 +253,7 @@ jobs:
             throw 'Select a payload run from this repository and branch'
           }
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: porthole-windows-x64
           path: out/porthole-windows-x64
@@ -273,7 +297,7 @@ jobs:
             }
           }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: porthole-windows-setup-review
           path: out/windows-setup-review/**/*.png
@@ -346,7 +370,7 @@ jobs:
             }
           }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: porthole-windows-x64-setup
           path: out/windows-installer/*-Setup.exe
@@ -361,7 +385,7 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
       - uses: msys2/setup-msys2@v2

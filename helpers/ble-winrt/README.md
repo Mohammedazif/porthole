@@ -55,8 +55,9 @@ The `sync` reply confirms dispatch completion, not phone rendering.
 Use the .NET 10 SDK to create the Windows x64 single-file helper. The executable
 contains the .NET runtime, WinRT assemblies, helper assemblies and runtime
 configuration; running it does not require a separate .NET installation or
-adjacent runtime DLLs. Native and managed contents extract automatically into
-the current user's `%TEMP%\.net` cache when the executable starts. Trimming is
+adjacent runtime DLLs. The helper loads managed assemblies directly from the bundle.
+The runtime extracts any bundled native libraries that require a file into the
+current user's `%TEMP%\.net` cache. Trimming is
 disabled to preserve the WinRT projections.
 
 ```powershell
