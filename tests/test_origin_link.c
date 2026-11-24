@@ -691,9 +691,11 @@ int main(int argc, char **argv)
     test_resume_send(o, path_b, key);
     phone = reconnect_phone(key);
     char capability[16];
-    say(phone, "SCREEN?\n");
+    say(phone, "SCREEN?\nSCREEN? 2\nIV?\n");
     line(phone, capability, sizeof capability);
     CHECK(!strcmp(capability, "SCREEN 2"));
+    line(phone, capability, sizeof capability);
+    CHECK(!strcmp(capability, "IV READY"));
     test_screen_channel(o);
     test_resume_receive(dir, o);
     test_chunked_send(o, phone, path_a);

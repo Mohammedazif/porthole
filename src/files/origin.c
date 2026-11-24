@@ -529,7 +529,8 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
         *consumed = true;
         return send_all(fd, "INBOX 3\n", 8);
     }
-    if (!strcmp(line, "SCREEN?")) {
+    /* This request identifies the phone builds with an audio opt-in. */
+    if (!strcmp(line, "SCREEN? 2")) {
         *consumed = true;
         return send_all(fd, "SCREEN 2\n", 9);
     }
