@@ -577,6 +577,8 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
     }
     if (strncmp(line, "NAME ", 5) == 0) {
         const char *raw = line + 5;
+        /* An extra separator marks a user-chosen name. Older PCs trim it as usual. */
+        bool chosen = *raw == ' ';
         char clean[64];
         size_t n = 0;
         while (*raw == ' ')
@@ -587,19 +589,17 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
             n--;
         clean[n] = 0;
         pthread_mutex_lock(&o->lock);
-        if (clean[0]) {
-            if (o->phones.selected < 0) {
-                snprintf(o->phone_name, sizeof o->phone_name, "%s", clean);
-            } else {
-                ph_paired_phone *phone = &o->phones.items[o->phones.selected];
-                for (char *c = clean; *c; c++)
-                    if (*c == '\t')
-                        *c = ' ';
-                if (strcmp(phone->remote, clean)) {
-                    snprintf(phone->remote, sizeof phone->remote, "%s", clean);
-                    ph_paired_phones_save(&o->phones);
+        if (clean[0] && paired_client(o)) {
+            const ph_paired_phone *phone = ph_paired_phones_selected(&o->phones);
+            if (phone && (chosen || !phone->remote[0] || strcmp(clean, "iPhone")) &&
+                strcmp(phone->remote, clean)) {
+                ph_paired_phones next = o->phones;
+                ph_paired_phone *updated = &next.items[next.selected];
+                snprintf(updated->remote, sizeof updated->remote, "%s", clean);
+                if (ph_paired_phones_save(&next)) {
+                    o->phones = next;
+                    use_selected_phone(o);
                 }
-                use_selected_phone(o);
             }
         }
         pthread_mutex_unlock(&o->lock);

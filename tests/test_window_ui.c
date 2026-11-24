@@ -236,7 +236,7 @@ static int section_y(int index)
 static void capture_settings_pages(ph_window *w, const char *dir, const char *prefix)
 {
     const char *names[] = {"appearance", "screen-and-audio", "controls", "transfers",
-                          "notifications", "help", "connection-statistics", "about", "devices"};
+                          "notifications", "help", "connection-statistics", "devices", "about"};
     SDL_Window *native = SDL_GetWindowFromID(ph_window_id(w));
     ph_workspace *workspace = ph_window_workspace(w);
     SDL_SetWindowSize(native, 1280, 800);
@@ -548,7 +548,7 @@ static void windows_visual_review(ph_window *w, SDL_Window *native, const char *
     ph_window_redraw(w);
     click_role(w, "Settings menu");
     click_role(w, "Devices");
-    CHECK(ph_workspace_current_section(workspace) == 8);
+    CHECK(ph_workspace_current_section(workspace) == 7);
     screenshot(w, dir, "devices-compact");
     SDL_SetWindowSize(native, 1280, 800);
     ph_window_redraw(w);
@@ -577,7 +577,7 @@ static void windows_visual_review(ph_window *w, SDL_Window *native, const char *
     screenshot(w, dir, "sharing");
     ph_window_open_settings(w);
     click_role(w, "Devices");
-    CHECK(ph_workspace_current_section(workspace) == 8);
+    CHECK(ph_workspace_current_section(workspace) == 7);
     screenshot(w, dir, "sharing-devices");
     ph_workspace_open_section(workspace, 0);
     ph_window_redraw(w);
@@ -817,7 +817,7 @@ int main(int argc, char **argv)
     screenshot(w, dir, "15-connected-dark");
     CHECK(ph_workspace_target(workspace, PH_WORKSPACE_SETTINGS_OPEN, &tx, &ty));
     click_at(w, tx, ty);
-    ph_workspace_open_section(workspace, 8);
+    ph_workspace_open_section(workspace, 7);
     ph_session_state devices = {
         .count = 2,
         .devices = {

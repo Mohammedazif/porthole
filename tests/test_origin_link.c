@@ -569,21 +569,27 @@ int main(int argc, char **argv)
     say(phone, reply);
     line(phone, reply, sizeof reply);
     CHECK(!strcmp(reply, "PAIRED") && !ph_origin_code_open(o));
+    say(phone, "NAME Zoë’s iPhone\nNAME iPhone\n");
     CHECK(!ph_origin_put_clip(o, 'T', "disabled", 8));
     const char *request = "1eecc050-8818-4079-9fb0-2e0143e55d96";
     snprintf(reply, sizeof reply, "SYNC %s 1\nFILES\n", request);
     say(phone, reply);
     line(phone, reply, sizeof reply);
     CHECK(!strcmp(reply, "SYNC OK 1eecc050-8818-4079-9fb0-2e0143e55d96 1"));
+    char device_name[64];
+    ph_origin_phone_name(o, device_name, sizeof device_name);
+    CHECK(!strcmp(device_name, "Zoë’s iPhone"));
     nap(400);
     CHECK(ph_origin_clip_flags(o) & PH_ORIGIN_CLIP_READY);
     CHECK(ph_origin_clip_flags(o) & PH_ORIGIN_CLIP_READY);
 
     /* Authenticated input preferences are acknowledged and can change live. */
-    say(phone, "CLIP T 5\nphone");
+    say(phone, "NAME  iPhone\nCLIP T 5\nphone");
     say(phone, "INPUT 00000000-0000-0000-0000-000000000001 1 1\n");
     line(phone, reply, sizeof reply);
     CHECK(!strcmp(reply, "INPUT OK 00000000-0000-0000-0000-000000000001 1 1"));
+    ph_origin_phone_name(o, device_name, sizeof device_name);
+    CHECK(!strcmp(device_name, "iPhone"));
     unsigned clipboard_flags = ph_origin_clip_flags(o);
     CHECK((clipboard_flags & (PH_ORIGIN_CLIP_READY | PH_ORIGIN_CLIP_GOT)) ==
           (PH_ORIGIN_CLIP_READY | PH_ORIGIN_CLIP_GOT));
@@ -643,15 +649,19 @@ int main(int argc, char **argv)
     CHECK(!strcmp(reply, "SYNC OK 1eecc050-8818-4079-9fb0-2e0143e55d96 0"));
     CHECK(!(ph_origin_clip_flags(o) & PH_ORIGIN_CLIP_READY));
     CHECK(!ph_origin_put_clip(o, 'T', "disabled", 8));
-    say(phone, "SYNC 1eecc050-8818-4079-9fb0-2e0143e55d96 1\n");
+    say(phone, "NAME  Zoë’s iPhone\nSYNC 1eecc050-8818-4079-9fb0-2e0143e55d96 1\n");
     line(phone, reply, sizeof reply);
     CHECK(!strcmp(reply, "SYNC OK 1eecc050-8818-4079-9fb0-2e0143e55d96 1"));
     CHECK(ph_origin_clip_flags(o) & PH_ORIGIN_CLIP_READY);
+    ph_origin_phone_name(o, device_name, sizeof device_name);
+    CHECK(!strcmp(device_name, "Zoë’s iPhone"));
 
     /* The phone leaving fails anything still queued instead of showing it forever. */
     close_peer(phone);
     nap(400);
     CHECK(!(ph_origin_clip_flags(o) & PH_ORIGIN_CLIP_READY));
+    ph_origin_phone_name(o, device_name, sizeof device_name);
+    CHECK(!strcmp(device_name, "Zoë’s iPhone"));
     policy = ph_origin_control_policy(o);
     CHECK(policy.managed && !policy.connected);
     CHECK(!ph_control_connection_wanted(policy, true, true, false));

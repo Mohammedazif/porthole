@@ -17,7 +17,11 @@ DisableProgramGroupPage=yes
 OutputBaseFilename=Porthole-{#PortholeVersion}-Windows-x64-Setup
 SetupIconFile=..\..\branding\porthole\app-icons\dark\porthole.ico
 UninstallDisplayIcon={app}\porthole.exe
-WizardStyle=modern
+WizardStyle=modern dynamic windows11
+WizardSmallImageFile=..\..\branding\porthole\png\on-light\porthole-icon-64.png, ..\..\branding\porthole\png\on-light\porthole-icon-128.png, ..\..\branding\porthole\png\on-light\porthole-icon-256.png
+WizardSmallImageFileDynamicDark=..\..\branding\porthole\png\on-dark\porthole-icon-64.png, ..\..\branding\porthole\png\on-dark\porthole-icon-128.png, ..\..\branding\porthole\png\on-dark\porthole-icon-256.png
+WizardImageFile=wizard-light.png
+WizardImageFileDynamicDark=wizard-dark.png
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64os
@@ -38,8 +42,16 @@ Name: "{group}\Uninstall Porthole"; Filename: "{uninstallexe}"
 Name: "{commonstartup}\Porthole"; Filename: "{app}\porthole.exe"; WorkingDir: "{app}"; Tasks: startwithwindows
 
 [Tasks]
-Name: "startwithwindows"; Description: "Start with Windows for all users"; GroupDescription: "Additional tasks:"; Flags: unchecked
-Name: "localnetwork"; Description: "Allow Porthole on Private networks"; GroupDescription: "Local network:"; Flags: unchecked
+Name: "localnetwork"; Description: "Allow connections on private networks"; Flags: unchecked
+Name: "startwithwindows"; Description: "Start Porthole at sign-in for all users"; Flags: unchecked
+
+[Messages]
+WizardSelectTasks=Installation options
+SelectTasksDesc=Choose your connection and startup preferences.
+SelectTasksLabel2=Private network access lets your iPhone connect over the local network.
+ReadyMemoTasks=Installation options
+FinishedHeadingLabel=Porthole is installed
+FinishedLabel=Open Porthole to pair your iPhone.
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "Porthole"; Flags: dontcreatekey uninsdeletevalue
@@ -54,3 +66,10 @@ Filename: "{app}\porthole.exe"; WorkingDir: "{app}"; Description: "Open Porthole
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Porthole Installed TCP"" program=""{app}\porthole.exe"""; Flags: runhidden; RunOnceId: "removeTcpFirewall"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Porthole Installed UDP"" program=""{app}\porthole.exe"""; Flags: runhidden; RunOnceId: "removeUdpFirewall"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Porthole Installed mDNS"" program=""{sys}\svchost.exe"" service=Dnscache"; Flags: runhidden; RunOnceId: "removeMdnsFirewall"
+
+[Code]
+procedure InitializeWizard;
+begin
+  WizardForm.TasksList.MinItemHeight := ScaleY(32);
+  WizardForm.RunList.MinItemHeight := ScaleY(32);
+end;

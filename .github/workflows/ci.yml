@@ -252,15 +252,41 @@ jobs:
           & $compiler "/DBuildDir=$payload" "/DPortholeVersion=$version" "/O$destination" 'packaging\windows\porthole.iss'
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed: $LASTEXITCODE" }
 
+      - name: Capture the installer wizard
+        shell: powershell
+        timeout-minutes: 2
+        continue-on-error: true
+        run: |
+          $installer = Get-Item 'out\windows-installer\*-Setup.exe'
+          .\tests\windows-setup-review.ps1 -Installer $installer.FullName -OutputDirectory 'out\windows-setup-review'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porthole-windows-setup-review
+          path: out/windows-setup-review/*.png
+          if-no-files-found: ignore
+
       - name: Check installation and removal
         shell: pwsh
         run: |
           $installer = Get-Item 'out\windows-installer\*-Setup.exe'
           $destination = Join-Path $env:RUNNER_TEMP 'Porthole installer test'
+          $startupShortcut = Join-Path ([Environment]::GetFolderPath('CommonStartup')) 'Porthole.lnk'
+          $firewallRules = @('Porthole Installed TCP', 'Porthole Installed UDP', 'Porthole Installed mDNS')
           $installed = Start-Process -FilePath $installer.FullName -ArgumentList @(
-            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/DIR="{0}"' -f $destination)
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/TASKS=localnetwork,startwithwindows',
+            ('/DIR="{0}"' -f $destination)
           ) -Wait -PassThru
           if ($installed.ExitCode -ne 0) { throw "Installation failed: $($installed.ExitCode)" }
+          if (!(Test-Path $startupShortcut)) { throw 'The sign-in option did not install its shortcut' }
+          foreach ($name in $firewallRules) {
+            $rule = Get-NetFirewallRule -DisplayName $name -ErrorAction Stop
+            if ($rule.Profile -ne 'Private') { throw "Unexpected network profile for $name" }
+            $scope = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule
+            if (@($scope.RemoteAddress) -notcontains 'LocalSubnet') {
+              throw "Unexpected remote address scope for $name"
+            }
+          }
           $payload = Get-Content 'out\porthole-windows-x64-verification.json' -Raw | ConvertFrom-Json
           foreach ($file in $payload.files | Where-Object { $_.path -match '\.(exe|dll)$' }) {
             $hash = (Get-FileHash -LiteralPath (Join-Path $destination $file.path)).Hash
@@ -277,6 +303,12 @@ jobs:
           $removed = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
           if ($removed.ExitCode -ne 0 -or (Test-Path (Join-Path $destination 'porthole.exe'))) {
             throw "Uninstallation failed: $($removed.ExitCode)"
+          }
+          if (Test-Path $startupShortcut) { throw 'Uninstall left the startup shortcut installed' }
+          foreach ($name in $firewallRules) {
+            if (Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue) {
+              throw "Uninstall left the firewall rule installed: $name"
+            }
           }
 
       - uses: actions/upload-artifact@v4

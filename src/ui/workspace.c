@@ -1184,7 +1184,7 @@ static void pairing_actions(ph_workspace *u, int x, int y, int width)
     int small = width < 350 ? 74 : 104;
     int guide = SDL_min(150, width - 2 * small - 12);
     button(u, (SDL_Rect){x, y, guide, 34}, "Set up controls", PH_WORKSPACE_SETUP, 0, false, true);
-    button(u, (SDL_Rect){x + guide + 6, y, small, 34}, "Devices", UI_SECTION + 8, 0, false, true);
+    button(u, (SDL_Rect){x + guide + 6, y, small, 34}, "Devices", UI_SECTION + 7, 0, false, true);
     button(u, (SDL_Rect){x + guide + small + 12, y, small, 34}, "Settings",
            PH_WORKSPACE_SETTINGS_OPEN, 0, false, true);
 }
@@ -1314,7 +1314,7 @@ static void wide_pairing(ph_workspace *u, int x, int y, int width, bool spacious
     action_button(u, (SDL_Rect){x, footer, 158, 34}, "Certificate fingerprint", UI_FINGERPRINT,
                   0, false, true, false, -1);
     action_button(u, (SDL_Rect){x + width - 272, footer, 148, 34}, "Connection options",
-                  UI_SECTION + 8, 0, false, true, false, PH_ICON_SLIDERS);
+                  UI_SECTION + 7, 0, false, true, false, PH_ICON_SLIDERS);
     action_button(u, (SDL_Rect){x + width - 110, footer, 110, 34}, "Settings",
                   PH_WORKSPACE_SETTINGS_OPEN, 0, false, true, !spacious,
                   spacious ? -1 : PH_ICON_GEAR);
@@ -1499,7 +1499,7 @@ static void home(ph_workspace *u)
         text(u, "Wi-Fi", x + 154, y + 38, 55, 12, false, u->muted);
     int button_y = y + (width < 550 ? 65 : 10);
     action_button(u, (SDL_Rect){x + width - 272, button_y, 148, 34}, "Connection options",
-                  UI_SECTION + 8, 0, false, true, false, PH_ICON_SLIDERS);
+                  UI_SECTION + 7, 0, false, true, false, PH_ICON_SLIDERS);
     action_button(u, (SDL_Rect){x + width - 110, button_y, 110, 34}, "Settings",
                   PH_WORKSPACE_SETTINGS_OPEN, 0, false, true, true, PH_ICON_GEAR);
     y += width < 550 ? 115 : 78;
@@ -2217,14 +2217,14 @@ static int statistics_settings(ph_workspace *u, int x, int y, int width)
 
 static const char *const setting_sections[] = {
     "General", "Screen and audio", "Controls", "Transfers", "Notifications",
-    "Help and shortcuts", "Connection statistics", "About", "Devices"
+    "Help and shortcuts", "Connection statistics", "Devices", "About"
 };
 
 static void settings_navigation(ph_workspace *u, SDL_Rect box, bool compact, bool menu)
 {
     const ph_control_icon icons[] = {PH_ICON_SUN, PH_ICON_PHONE, PH_ICON_MOUSE, PH_ICON_ARROWS,
-                                     PH_ICON_BELL, PH_ICON_HELP, PH_ICON_STATS, PH_ICON_INFO,
-                                     PH_ICON_DEVICES};
+                                     PH_ICON_BELL, PH_ICON_HELP, PH_ICON_STATS, PH_ICON_DEVICES,
+                                     PH_ICON_INFO};
     rect(u, box, u->surface);
     int pad = compact ? 10 : 15, top = box.y + (compact ? 15 : 18);
     bool footer = !menu && box.h > 400;
@@ -2314,11 +2314,11 @@ static void settings(ph_workspace *u)
         int y = top + (inline_settings ? 22 : 30) - u->scroll;
         const char *titles[] = {"General", "Screen and audio", "Mouse and keyboard", "Transfers",
                                 "Notifications", "Help and shortcuts", "Connection statistics",
-                                "About Porthole", "Devices"};
+                                "Devices", "About Porthole"};
         const char *subtitles[] = {"Application preferences", "Screen-sharing preferences", NULL,
                                    "File storage and clipboard preferences", "Porthole alerts on this PC",
                                    "Guides for connecting, sharing, and controlling your iPhone.",
-                                   "Current connection details", "Connect your iPhone and PC.", NULL};
+                                   "Current connection details", NULL, "Version and license"};
         int section = SDL_clamp(u->section, 0, 8);
         y = settings_heading(u, x, y, width, inline_settings, titles[section], subtitles[section]);
         switch (section) {
@@ -2333,13 +2333,13 @@ static void settings(ph_workspace *u)
         case 4: y = notification_settings(u, x, y, width); break;
         case 5: y = help_settings(u, x, y - 1, width); break;
         case 6: y = statistics_settings(u, x, y, width); break;
-        case 7: {
+        case 7: y = device_settings(u, x, y, width); break;
+        case 8: {
             setting_row about[] = {value_row("Porthole", NULL, PORTHOLE_VERSION),
                                    value_row("License", NULL, "GPL-3.0")};
             y = setting_group(u, x, y, width, "APPLICATION", about, SDL_arraysize(about));
             break;
         }
-        case 8: y = device_settings(u, x, y, width); break;
         }
         SDL_RenderSetClipRect(u->renderer, NULL);
         int visible = bottom - top;
