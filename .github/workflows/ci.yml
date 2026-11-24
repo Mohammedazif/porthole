@@ -303,7 +303,7 @@ jobs:
           path: out/windows-setup-review/**/*.png
           if-no-files-found: error
 
-      - name: Check installation and removal
+      - name: Check installation, upgrade, and removal
         shell: pwsh
         run: |
           $installer = Get-Item 'out\windows-installer\*-Setup.exe'
@@ -354,6 +354,16 @@ jobs:
               throw 'Fresh installation did not start the LAN pairing service'
             }
             Write-Output 'Fresh installation started the LAN pairing service'
+            $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList @(
+              '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/RESTARTEXITCODE=3010',
+              '/CLOSEAPPLICATIONS', '/NOFORCECLOSEAPPLICATIONS', '/NORESTARTAPPLICATIONS',
+              '/TASKS=startwithwindows', ('/DIR="{0}"' -f $destination)
+            ) -Wait -PassThru
+            if ($upgrade.ExitCode -ne 0) { throw "Upgrade failed: $($upgrade.ExitCode)" }
+            if (!$app.WaitForExit(5000) -or $app.ExitCode -ne 0) {
+              throw 'Porthole did not shut down cleanly during the upgrade'
+            }
+            Write-Output 'Upgrade closed the running Porthole process without force'
           } finally {
             if (!$app.HasExited) { Stop-Process -Id $app.Id -Force }
             $app.WaitForExit()

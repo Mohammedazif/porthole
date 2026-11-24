@@ -20,6 +20,7 @@ struct ph_wintray {
     NOTIFYICONDATAW icon;
     UINT taskbar_created;
     bool feed, paused, sound_on, can_copy;
+    bool quit_requested;
     ph_wintray_command pending;
 };
 
@@ -61,6 +62,12 @@ static LRESULT CALLBACK tray_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     ph_wintray *t = (ph_wintray *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
 
+    /* Keep the tray window alive until the app has finished shutting down. */
+    if (t && (msg == WM_CLOSE || (msg == WM_ENDSESSION && wp))) {
+        t->quit_requested = true;
+        EndMenu();
+        return 0;
+    }
     if (t && msg == TRAY_CALLBACK) {
         UINT event = LOWORD(lp);
         if (event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK || event == NIN_SELECT
@@ -179,7 +186,8 @@ ph_wintray_command ph_wintray_take(ph_wintray *t)
 
     if (!t)
         return PH_WINTRAY_NONE;
-    c = t->pending;
+    c = t->quit_requested ? PH_WINTRAY_QUIT : t->pending;
+    t->quit_requested = false;
     t->pending = PH_WINTRAY_NONE;
     return c;
 }

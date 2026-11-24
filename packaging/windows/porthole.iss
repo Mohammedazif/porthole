@@ -3,7 +3,7 @@
 #define BuildDir "."
 #endif
 #ifndef PortholeVersion
-#define PortholeVersion "0.1.3"
+#define PortholeVersion "0.1.4"
 #endif
 
 [Setup]
@@ -28,6 +28,10 @@ ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
 MinVersion=10.0.18362
 PrivilegesRequired=admin
+; Older releases may ignore the graceful shutdown request. Scope the fallback
+; to Porthole's installed executables so Setup can upgrade those releases.
+CloseApplications=force
+CloseApplicationsFilter=porthole.exe,porthole-ble-winrt.exe
 
 [Files]
 Source: "switch-*.png"; Flags: dontcopy

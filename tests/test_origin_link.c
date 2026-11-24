@@ -308,6 +308,11 @@ static bool verify_ticket(void *origin, const char *key)
     return ph_origin_authorize(origin, key);
 }
 
+static bool verify_broadcast_key(void *origin, const char *key)
+{
+    return ph_origin_generation(origin, key) != 0;
+}
+
 static atomic_int screen_audio_frames;
 
 static void accept_screen_audio(void *user, const uint8_t *pcm, size_t len)
@@ -439,14 +444,57 @@ static void test_resume_receive(const char *dir, ph_origin *origin)
     ph_inbox_stop(inbox);
 }
 
-static void reject_credential(const char *credential)
+static void expect_rejected_credential(const char *credential, const char *reason)
 {
-    char hello[64], byte;
+    char hello[64], reply[32];
     int fd = dial(PH_PULL_PORT);
     snprintf(hello, sizeof hello, "HELLO %s\n", credential);
     say(fd, hello);
-    CHECK(read_peer(fd, &byte, 1, 0) <= 0);
+    line(fd, reply, sizeof reply);
+    CHECK(!strncmp(reply, "PAIR ", 5));
+    CHECK(!reason || !strcmp(reply + 5, reason));
     close_peer(fd);
+}
+
+static void reject_credential(const char *credential)
+{
+    expect_rejected_credential(credential, NULL);
+}
+
+static void test_extension_keys(ph_origin *origin, const char *key)
+{
+    char reply[96], screen[65], share[65], profile[65];
+    int phone = reconnect_phone(key);
+    say(phone, "SCREEN? 2\nSHARE?\n");
+    line(phone, reply, sizeof reply);
+    CHECK(!strcmp(reply, "SCREEN 2"));
+    line(phone, reply, sizeof reply);
+    CHECK(sscanf(reply, "SCREENKEY %64[0-9a-f]", screen) == 1 && strlen(screen) == 64);
+    line(phone, reply, sizeof reply);
+    CHECK(sscanf(reply, "SHAREKEY %64[0-9a-f]", share) == 1 && strlen(share) == 64);
+    CHECK(strcmp(screen, share) && strcmp(screen, ticket) && strcmp(share, ticket));
+    close_peer(phone);
+    for (int attempt = 0; attempt < 100 && ph_origin_authorize(origin, ticket); attempt++)
+        nap(10);
+    CHECK(!ph_origin_authorize(origin, ticket));
+    CHECK(ph_origin_generation(origin, screen));
+    CHECK(ph_origin_receive_profile(origin, share, profile));
+    CHECK(!ph_origin_generation(origin, share) && !ph_origin_receive_profile(origin, screen, profile));
+    ph_screen_callbacks callbacks = {.user = origin, .authorize = verify_broadcast_key};
+    ph_screen *server = ph_screen_start(&callbacks);
+    CHECK(server);
+    int fd = open_channel(PH_SCREEN_PORT, screen);
+    line(fd, reply, sizeof reply);
+    CHECK(!strcmp(reply, "OK"));
+    say(fd, "PSCR 2\n");
+    const unsigned char frame[] = {0, 0, 0, 2, 2, 0x65, 0x07};
+    CHECK(SSL_write(peer_ssl(fd), frame, sizeof frame) == sizeof frame);
+    CHECK(read_peer(fd, reply, 1, 0) == 1 && reply[0] == 'A');
+    ph_origin_forget(origin);
+    CHECK(!ph_origin_generation(origin, screen) && !ph_origin_receive_profile(origin, share, profile));
+    CHECK(read_peer(fd, reply, 1, 0) <= 0);
+    close_peer(fd);
+    ph_screen_stop(server);
 }
 
 static ph_origin *test_pairing(ph_origin *origin, const char *token, const char *key)
@@ -458,6 +506,7 @@ static ph_origin *test_pairing(ph_origin *origin, const char *token, const char 
     line(fd, response, sizeof response);
     CHECK(!strcmp(response, "PAIRED") && !ph_origin_code_open(origin));
     close_peer(fd);
+    test_extension_keys(origin, key);
     reject_credential(token);
 
     char first_id[65], next_id[65], second_code[16];
@@ -509,8 +558,14 @@ static ph_origin *test_pairing(ph_origin *origin, const char *token, const char 
     fd = reconnect_phone(key);
     CHECK(ph_origin_renew(origin, hint, sizeof hint) && ph_origin_code_open(origin));
     close_peer(fd);
-    reject_credential(key);
-    reject_credential(token);
+    for (int attempt = 0; attempt < 6; attempt++)
+        expect_rejected_credential(key, "REVOKED");
+    CHECK(sscanf(hint, "%*s %15s", second_code) == 1 && strlen(second_code) == 8);
+    const char *wrong_code = strcmp(second_code, "00000000") ? "00000000" : "11111111";
+    for (int attempt = 0; attempt < 5; attempt++)
+        expect_rejected_credential(wrong_code, "CODE");
+    expect_rejected_credential(second_code, "LOCKED");
+    CHECK(ph_origin_renew(origin, hint, sizeof hint) && ph_origin_code_open(origin));
     CHECK(sscanf(hint, "%*s %15s", second_code) == 1 && strlen(second_code) == 8);
     fd = reconnect_phone(second_code);
     snprintf(response, sizeof response, "PAIR %s\n", key);
@@ -565,8 +620,9 @@ int main(int argc, char **argv)
 
     /* A wrong code is turned away; the right one is welcomed with OK and SYNC. */
     phone = dial(PH_PULL_PORT);
-    say(phone, "HELLO 00000000\n");
-    CHECK(read_peer(phone, reply, 1, 0) <= 0);
+    say(phone, strcmp(token, "00000000") ? "HELLO 00000000\n" : "HELLO 11111111\n");
+    line(phone, reply, sizeof reply);
+    CHECK(!strcmp(reply, "PAIR CODE"));
     close_peer(phone);
 
     /* Losing the connection after OK must leave the advertised code usable. */

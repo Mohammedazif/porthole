@@ -37,6 +37,8 @@
 #include "files/places.h"
 #include "core/upath.h"
 #ifdef _WIN32
+#include <SDL_syswm.h>
+#include <commctrl.h>
 /* windows.h (via upath.h) defines these as old segment keywords. */
 #undef near
 #undef far
@@ -71,6 +73,40 @@ static void request_stop(int sig)
     (void)sig;
     stop_requested = 1;
 }
+
+#ifdef _WIN32
+static LRESULT CALLBACK windows_shutdown(HWND window, UINT message, WPARAM wp, LPARAM lp,
+                                         UINT_PTR id, DWORD_PTR context)
+{
+    (void)context;
+    /* Restart Manager asks first, then confirms shutdown. Its fallback is WM_CLOSE. */
+    switch (message) {
+    case WM_QUERYENDSESSION:
+        return TRUE;
+    case WM_ENDSESSION:
+        if (!wp)
+            return 0;
+        /* fall through */
+    case WM_CLOSE:
+        request_stop(0);
+        EndMenu();
+        return 0;
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(window, windows_shutdown, id);
+        break;
+    }
+    return DefSubclassProc(window, message, wp, lp);
+}
+
+static void watch_windows_shutdown(SDL_Window *window)
+{
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (!SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_WINDOWS ||
+        !SetWindowSubclass(info.info.win.window, windows_shutdown, 1, 0))
+        PH_LOGW("could not attach the Windows shutdown handler");
+}
+#endif
 
 enum {
     EV_FRAME,
@@ -311,17 +347,20 @@ static void on_disconnected(void *user)
     push_event(user, EV_DISCONNECTED, NULL);
 }
 
-static bool screen_allow(void *user, const char *address)
-{
-    app *a = user;
-    char phone[64];
-    return ph_origin_peer(a->origin, phone, sizeof phone) && strcmp(phone, address) == 0;
-}
-
 static bool authorize_channel(void *user, const char *ticket)
 {
     app *a = user;
     unsigned epoch = ph_origin_generation(a->origin, ticket);
+    if (!epoch)
+        return false;
+    channel_epoch = epoch;
+    return true;
+}
+
+static bool authorize_inbox(void *user, const char *ticket)
+{
+    app *a = user;
+    unsigned epoch = ph_origin_inbox_generation(a->origin, ticket);
     if (!epoch)
         return false;
     channel_epoch = epoch;
@@ -376,6 +415,8 @@ static void screen_connected(void *user, const char *address)
         atomic_store(&a->screen_on, true);
     bool announce = started && a->src.current != PH_SRC_USB && !atomic_load(&a->airplay_on);
     pthread_mutex_unlock(&a->src_lock);
+    if (started)
+        ph_origin_screen_live(a->origin, channel_epoch, true);
     if (announce)
         push_event(user, EV_CONNECTED, strdup("Connected"));
 }
@@ -411,6 +452,7 @@ static void screen_disconnected(void *user)
 {
     app *a = user;
 
+    ph_origin_screen_live(a->origin, channel_epoch, false);
     pthread_mutex_lock(&a->src_lock);
     if (a->src.current == PH_SRC_BROADCAST)
         ph_audio_flush(a->audio);
@@ -2588,7 +2630,7 @@ static void start_bluetooth(app *a)
 
 static bool controls_wanted(app *a)
 {
-    ph_control_policy policy = ph_origin_control_policy(a->origin);
+    ph_control_policy policy = ph_origin_broadcast_control_policy(a->origin);
     pthread_mutex_lock(&a->src_lock);
     ph_src selected = a->src.current;
     pthread_mutex_unlock(&a->src_lock);
@@ -2610,7 +2652,7 @@ static bool may_forward_controls(app *a)
 {
     if (!a->link || a->link_stopping || strcmp(a->ble_status, "on") || !controls_wanted(a))
         return false;
-    ph_control_policy policy = ph_origin_control_policy(a->origin);
+    ph_control_policy policy = ph_origin_broadcast_control_policy(a->origin);
     return !policy.managed ||
            (policy.verified && (!policy.screen_only || atomic_load(&a->screen_on)));
 }
@@ -3556,7 +3598,7 @@ static void follow_tray(app *a, bool *running)
         break;
     case PH_WINTRAY_QUIT:
         *running = false;
-        break;
+        return;
     }
     if (a->audio && ph_audio_settings(a->audio, &settings))
         sound_on = !settings.muted;
@@ -3664,6 +3706,9 @@ int ph_app_run(const ph_app_options *opt)
     if (a.ev_base == (Uint32)-1 || !frame || !a.view_frame || !a.pointer_baseline || !a.pointer_reference || !a.pointer_after
         || !a.win || !a.dec)
         goto done;
+#ifdef _WIN32
+    watch_windows_shutdown(SDL_GetWindowFromID(ph_window_id(a.win)));
+#endif
     ph_hostclip_init();
     ph_place_install_send_to();
     a.tray = ph_wintray_create();
@@ -3685,7 +3730,6 @@ int ph_app_run(const ph_app_options *opt)
         ph_screen_callbacks screen_cb = {
             .user = &a,
             .authorize = authorize_channel,
-            .allow = screen_allow,
             .connected = screen_connected,
             .video = screen_video,
             .audio = screen_audio,
@@ -3699,8 +3743,7 @@ int ph_app_run(const ph_app_options *opt)
     if (ensure_pull_dir(&a)) {
         ph_inbox_callbacks inbox_cb = {
             .user = &a,
-            .authorize = authorize_channel,
-            .allow = screen_allow, /* only the phone whose photo link gave the code */
+            .authorize = authorize_inbox,
             .progress = inbox_progress,
             .profile = inbox_profile,
             .item = inbox_item,
@@ -3750,8 +3793,10 @@ int ph_app_run(const ph_app_options *opt)
                 apply_window_action(&a, &running);
                 if (!modal && ph_window_help_visible(a.win))
                     release_everything(&a);
-            } while (SDL_PollEvent(&e));
+            } while (running && !stop_requested && SDL_PollEvent(&e));
         }
+        if (!running || stop_requested)
+            break;
         if (SDL_GetTicks64() - a.session_poll >= 250) {
             ph_session_state state;
             ph_polish_sessions(a.polish, &state);
@@ -3788,6 +3833,8 @@ int ph_app_run(const ph_app_options *opt)
         sync_pairing_history(&a);
         apply_window_action(&a, &running);
         follow_tray(&a, &running);
+        if (!running || stop_requested)
+            break;
 #ifdef _WIN32
         /* A release Windows gave to another window must still lift the phone's
          * button and end a photo drag. Shortcut gestures hold buttons without the

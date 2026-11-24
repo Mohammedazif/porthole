@@ -14,6 +14,7 @@
 #include <ctype.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+#include <openssl/hmac.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +55,8 @@ struct ph_origin {
     pthread_cond_t cond;
     atomic_bool stop;
     bool have_client, disconnect_requested;
+    bool channels_paused;
+    bool screen_live;
     unsigned pairing_generation, client_generation;
     time_t code_expiry;
     struct {
@@ -81,6 +84,7 @@ struct ph_origin {
     char dir[512];
     char path[768];
     char token[16], reconnect_key[33], channel_ticket[65];
+    char screen_key[65], share_key[65];
     ph_paired_phones phones;
     int push_fd;
     ph_origin_send push_queue[PH_PUSH_QUEUE]; /* files waiting, oldest first */
@@ -337,10 +341,27 @@ static bool request_id(const char *s)
     return true;
 }
 
+static void hex_string(const unsigned char *bytes, size_t n, char *out);
+
+static void derive_channel_key(const ph_paired_phone *phone, const char *purpose, char out[65])
+{
+    OPENSSL_cleanse(out, 65);
+    if (phone) {
+        unsigned char digest[32];
+        unsigned int size = 0;
+        if (HMAC(EVP_sha256(), phone->key, 32, (const unsigned char *)purpose, strlen(purpose),
+                 digest, &size) && size == sizeof digest)
+            hex_string(digest, sizeof digest, out);
+        OPENSSL_cleanse(digest, sizeof digest);
+    }
+}
+
 static void use_selected_phone(ph_origin *o)
 {
     const ph_paired_phone *phone = ph_paired_phones_selected(&o->phones);
     snprintf(o->reconnect_key, sizeof o->reconnect_key, "%s", phone ? phone->key : "");
+    derive_channel_key(phone, "Porthole screen broadcast v1", o->screen_key);
+    derive_channel_key(phone, "Porthole file inbox v1", o->share_key);
     if (phone) {
         snprintf(o->token, sizeof o->token, "%s", phone->seed);
         snprintf(o->phone_name, sizeof o->phone_name, "%s",
@@ -529,10 +550,22 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
         *consumed = true;
         return send_all(fd, "INBOX 3\n", 8);
     }
-    /* This request identifies the phone builds with an audio opt-in. */
-    if (!strcmp(line, "SCREEN? 2")) {
+    if (!strcmp(line, "SHARE?") || !strcmp(line, "SCREEN? 2")) {
+        bool sharing = !strcmp(line, "SCREEN? 2");
+        char reply[90];
         *consumed = true;
-        return send_all(fd, "SCREEN 2\n", 9);
+        if (sharing && !send_all(fd, "SCREEN 2\n", 9))
+            return false;
+        pthread_mutex_lock(&o->lock);
+        const char *key = sharing ? o->screen_key : o->share_key;
+        if (paired_client(o) && !o->channels_paused && *key)
+            snprintf(reply, sizeof reply, "%s %s\n", sharing ? "SCREENKEY" : "SHAREKEY", key);
+        else
+            reply[0] = 0;
+        pthread_mutex_unlock(&o->lock);
+        bool sent = !reply[0] || send_all(fd, reply, strlen(reply));
+        OPENSSL_cleanse(reply, sizeof reply);
+        return sent;
     }
     if (!strcmp(line, "FILES 3") || !strcmp(line, "FILES 2") || !strcmp(line, "FILES")) {
         pthread_mutex_lock(&o->lock);
@@ -1113,11 +1146,14 @@ static void serve_client(ph_origin *o, int fd)
         o->failures[slot].since = now;
         o->failures[slot].attempts = 0;
     }
-    bool accepted = o->failures[slot].attempts < 5 &&
-                    (*o->reconnect_key || (o->code_open && now < o->code_expiry)) &&
+    bool has_key = *o->reconnect_key != 0;
+    bool code_open = o->code_open && now < o->code_expiry;
+    bool code_attempt = !strncmp(line, "HELLO ", 6) && strlen(line + 6) == 8;
+    bool locked = !has_key && code_open && code_attempt && o->failures[slot].attempts >= 5;
+    bool accepted = !locked && (has_key || code_open) &&
                     !strncmp(line, "HELLO ", 6) && strlen(line + 6) == strlen(credential) &&
                     !CRYPTO_memcmp(line + 6, credential, strlen(credential));
-    if (!accepted && o->failures[slot].attempts < 5)
+    if (!accepted && !locked && !has_key && code_open && code_attempt)
         o->failures[slot].attempts++;
     if (accepted)
         o->failures[slot].attempts = 0;
@@ -1127,14 +1163,23 @@ static void serve_client(ph_origin *o, int fd)
     if (accepted && !disconnected) {
         memcpy(o->channel_ticket, ticket, sizeof ticket);
         o->have_client = true;
+        o->channels_paused = false;
         o->client_generation = o->pairing_generation;
-        o->control = (ph_control_policy){.managed = true, .connected = true, .screen_only = true};
+        if (!o->screen_live)
+            o->control = (ph_control_policy){.managed = true, .screen_only = true};
+        o->control.connected = true;
         snprintf(o->known, sizeof o->known, "%s", o->peer);
     }
     pthread_mutex_unlock(&o->lock);
     if (!accepted || disconnected) {
         if (disconnected)
             send_all(fd, "DISCONNECTED\n", 13);
+        else {
+            const char *reply = locked ? "PAIR LOCKED\n" : has_key && code_attempt ? "PAIR SAVED\n" :
+                                !code_attempt ? "PAIR REVOKED\n" :
+                                code_open ? "PAIR CODE\n" : "PAIR CLOSED\n";
+            send_all(fd, reply, strlen(reply));
+        }
         goto done;
     }
     char hostname[64], encoded[96], welcome[196];
@@ -1303,7 +1348,8 @@ done:
     o->channel_ticket[0] = 0;
     o->have_client = false;
     o->control.connected = false;
-    clear_verification(o, false);
+    if (!o->screen_live || !o->controls_verified)
+        clear_verification(o, false);
     o->verification_reset = false;
     o->files_ok = false;
     o->resumable = false;
@@ -1542,6 +1588,10 @@ void ph_origin_forget(ph_origin *o)
         return;
     pthread_mutex_lock(&o->lock);
     o->disconnect_requested = o->have_client && o->reconnect_key[0];
+    o->channels_paused = true;
+    o->pairing_generation++;
+    o->screen_live = false;
+    clear_verification(o, false);
     o->channel_ticket[0] = 0;
     o->known[0] = 0;
     client = o->client_fd;
@@ -1692,6 +1742,8 @@ bool ph_origin_refresh_address(ph_origin *o, char *hint, size_t hint_len)
 static void invalidate_session(ph_origin *o)
 {
     o->disconnect_requested = false;
+    o->channels_paused = false;
+    o->screen_live = false;
     o->channel_ticket[0] = 0;
     o->known[0] = 0;
     o->pairing_generation++;
@@ -1756,6 +1808,7 @@ static bool open_pairing_code(ph_origin *o, bool replace, char *hint, size_t hin
     invalidate_session(o);
     use_selected_phone(o);
     snprintf(o->token, sizeof o->token, "%s", token);
+    memset(o->failures, 0, sizeof o->failures);
     o->code_open = true;
     o->code_expiry = time(NULL) + 600;
     pthread_mutex_unlock(&o->lock);
@@ -1853,16 +1906,45 @@ void ph_origin_sessions(ph_origin *o, ph_session_state *state)
     pthread_mutex_unlock(&o->lock);
 }
 
+static bool channel_authorized(const ph_origin *o, const char *ticket, const char *key)
+{
+    return !o->channels_paused && o->reconnect_key[0] &&
+           ((key[0] && !CRYPTO_memcmp(key, ticket, 64)) ||
+            (paired_client(o) && o->channel_ticket[0] && !CRYPTO_memcmp(o->channel_ticket, ticket, 64)));
+}
+
 unsigned ph_origin_generation(ph_origin *o, const char *ticket)
 {
     if (!o || (ticket && strlen(ticket) != 64))
         return 0;
     pthread_mutex_lock(&o->lock);
-    unsigned generation = (!ticket || (o->have_client && o->channel_ticket[0] &&
-                           !CRYPTO_memcmp(o->channel_ticket, ticket, 64)))
+    unsigned generation = (!ticket || channel_authorized(o, ticket, o->screen_key))
                               ? o->pairing_generation : 0;
     pthread_mutex_unlock(&o->lock);
     return generation;
+}
+
+unsigned ph_origin_inbox_generation(ph_origin *o, const char *ticket)
+{
+    if (!o || !ticket || strlen(ticket) != 64)
+        return 0;
+    pthread_mutex_lock(&o->lock);
+    unsigned generation = channel_authorized(o, ticket, o->share_key) ? o->pairing_generation : 0;
+    pthread_mutex_unlock(&o->lock);
+    return generation;
+}
+
+void ph_origin_screen_live(ph_origin *o, unsigned generation, bool live)
+{
+    if (!o || !generation)
+        return;
+    pthread_mutex_lock(&o->lock);
+    if (generation == o->pairing_generation) {
+        o->screen_live = live;
+        if (!live && !o->control.connected)
+            clear_verification(o, false);
+    }
+    pthread_mutex_unlock(&o->lock);
 }
 
 bool ph_origin_selected_id(ph_origin *o, char id[65])
@@ -2130,6 +2212,18 @@ ph_control_policy ph_origin_control_policy(ph_origin *o)
     return policy;
 }
 
+ph_control_policy ph_origin_broadcast_control_policy(ph_origin *o)
+{
+    if (!o)
+        return (ph_control_policy){0};
+    pthread_mutex_lock(&o->lock);
+    ph_control_policy policy = o->control;
+    policy.connected |= o->screen_live && o->controls_verified;
+    policy.verified = policy.connected && o->controls_verified;
+    pthread_mutex_unlock(&o->lock);
+    return policy;
+}
+
 bool ph_origin_verifying_controls(ph_origin *o)
 {
     if (!o)
@@ -2204,8 +2298,7 @@ bool ph_origin_receive_profile(ph_origin *o, const char *ticket, char out[65])
     unsigned char digest[32];
     unsigned n = 0;
     pthread_mutex_lock(&o->lock);
-    bool allowed = o->have_client && o->channel_ticket[0] && o->reconnect_key[0] &&
-                   !CRYPTO_memcmp(o->channel_ticket, ticket, 64);
+    bool allowed = channel_authorized(o, ticket, o->share_key);
     bool ok = allowed && EVP_Digest(o->reconnect_key, 32, digest, &n, EVP_sha256(), NULL) == 1 &&
               n == sizeof digest;
     pthread_mutex_unlock(&o->lock);

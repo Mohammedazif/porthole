@@ -43,6 +43,8 @@ bool ph_origin_rename_phone(ph_origin *origin, const char *id, const char *name)
 bool ph_origin_remove_saved_phone(ph_origin *origin, const char *id);
 bool ph_origin_selected_id(ph_origin *origin, char id[65]);
 unsigned ph_origin_generation(ph_origin *origin, const char *ticket);
+unsigned ph_origin_inbox_generation(ph_origin *origin, const char *ticket);
+void ph_origin_screen_live(ph_origin *origin, unsigned generation, bool live);
 struct ph_session_state;
 void ph_origin_sessions(ph_origin *origin, struct ph_session_state *state);
 
@@ -145,5 +147,6 @@ bool ph_origin_clip_waiting(ph_origin *origin);
 
 /* Phone preferences negotiated over the authenticated photo/file connection. */
 ph_control_policy ph_origin_control_policy(ph_origin *origin);
+ph_control_policy ph_origin_broadcast_control_policy(ph_origin *origin);
 
 #endif
