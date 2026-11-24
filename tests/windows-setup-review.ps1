@@ -17,6 +17,8 @@ public static class SetupReview {
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     public static extern int GetWindowText(IntPtr window, StringBuilder text, int capacity);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+    public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr capacity, StringBuilder text);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     public static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
     [DllImport("user32.dll")]
     public static extern bool EnumChildWindows(IntPtr window, ChildVisitor visitor, IntPtr context);
@@ -35,6 +37,14 @@ public static class SetupReview {
     [StructLayout(LayoutKind.Sequential)]
     public struct Rect { public int Left, Top, Right, Bottom; }
 
+    public static IntPtr FindWizard() {
+        IntPtr window = FindWindow("TWizardForm", null);
+        if (window == IntPtr.Zero) return window;
+        var title = new StringBuilder(256);
+        GetWindowText(window, title, title.Capacity);
+        return title.ToString().StartsWith("Setup - Porthole") ? window : IntPtr.Zero;
+    }
+
     public static IntPtr FindVisible(IntPtr parent, string className, string caption) {
         IntPtr match = IntPtr.Zero;
         EnumChildWindows(parent, (window, _) => {
@@ -42,9 +52,10 @@ public static class SetupReview {
             var text = new StringBuilder(256);
             GetClassName(window, text, text.Capacity);
             if (text.ToString() != className) return true;
-            GetWindowText(window, text, text.Capacity);
-            if (caption != null && !text.ToString().Replace("&","").StartsWith(caption))
-                return true;
+            if (caption != null) {
+                SendMessage(window, 0x000D, (IntPtr)text.Capacity, text);
+                if (!text.ToString().Replace("&","").StartsWith(caption)) return true;
+            }
             match = window;
             return false;
         }, IntPtr.Zero);
@@ -79,7 +90,7 @@ try {
     $wizard = [IntPtr]::Zero
     for ($attempt = 0; $attempt -lt 100 -and $wizard -eq [IntPtr]::Zero; $attempt++) {
         Start-Sleep -Milliseconds 100
-        $wizard = [SetupReview]::FindWindow('TWizardForm', 'Setup - Porthole')
+        $wizard = [SetupReview]::FindWizard()
     }
     if ($wizard -eq [IntPtr]::Zero) { throw 'The Windows runner did not expose the Setup window' }
     [void][SetupReview]::GetWindowThreadProcessId($wizard, [ref]$wizardProcess)
