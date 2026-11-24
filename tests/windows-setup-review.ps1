@@ -5,7 +5,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
-Add-Type @'
+if (!('SetupReview' -as [type])) {
+    Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -73,6 +74,7 @@ public static class SetupReview {
     }
 }
 '@
+}
 
 function Save-WizardImage([IntPtr] $Window, [string] $File) {
     $rect = [SetupReview+Rect]::new()

@@ -258,8 +258,8 @@ jobs:
         run: |
           $installer = Get-Item 'out\windows-installer\*-Setup.exe'
           $personalize = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
-          New-Item $personalize -Force | Out-Null
-          $original = Get-ItemPropertyValue $personalize AppsUseLightTheme -ErrorAction SilentlyContinue
+          if (!(Test-Path $personalize)) { New-Item $personalize -Force | Out-Null }
+          $original = (Get-Item $personalize).GetValue('AppsUseLightTheme')
           try {
             Set-ItemProperty $personalize AppsUseLightTheme 1 -Type DWord
             .\tests\windows-setup-review.ps1 -Installer $installer.FullName -OutputDirectory 'out\windows-setup-review\light'
