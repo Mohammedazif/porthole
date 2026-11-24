@@ -183,6 +183,7 @@ typedef struct app {
     ph_decoder *screen_dec; /* its own decoder, so AirPlay's keeps its place underneath */
     uint64_t screen_seq;
     atomic_bool screen_on, airplay_on;
+    uint64_t last_airplay_audio_ms; /* protected by src_lock */
     /* A press on one photo is held back from the phone. A quick move is replayed
      * as a swipe when the button comes up. Held still, then dragged, it lifts
      * that photo onto the PC. The finger stays up until then, so Photos cannot
@@ -312,8 +313,10 @@ static void on_audio(void *user, unsigned char compression, const uint8_t *data,
                      uint64_t timestamp_ns)
 {
     app *a = user;
-    if (a->audio)
-        ph_audio_push_timed(a->audio, compression, data, len, timestamp_ns);
+    pthread_mutex_lock(&a->src_lock);
+    if (a->audio && ph_audio_push_timed(a->audio, compression, data, len, timestamp_ns) >= 0)
+        a->last_airplay_audio_ms = ph_metrics_now_ms();
+    pthread_mutex_unlock(&a->src_lock);
 }
 
 static void on_audio_format(void *user, unsigned char compression, unsigned short samples)
@@ -340,6 +343,7 @@ static void on_disconnected(void *user)
     on_audio_flush(user);
     atomic_store(&a->airplay_on, false);
     pthread_mutex_lock(&a->src_lock);
+    a->last_airplay_audio_ms = 0;
     a->airplay_selected = false;
     ph_src_switch_wifi_lost(&a->src, ph_metrics_now_ms());
     pthread_mutex_unlock(&a->src_lock);
@@ -417,8 +421,11 @@ static void screen_connected(void *user, const char *address)
     pthread_mutex_unlock(&a->src_lock);
     if (started)
         ph_origin_screen_live(a->origin, channel_epoch, true);
-    if (announce)
-        push_event(user, EV_CONNECTED, strdup("Connected"));
+    if (announce) {
+        char name[64];
+        ph_origin_phone_name(a->origin, name, sizeof name);
+        push_event(user, EV_CONNECTED, strdup(name[0] ? name : "iPhone"));
+    }
 }
 
 static void screen_video(void *user, const uint8_t *annexb, size_t len, bool keyframe)
@@ -443,7 +450,8 @@ static void screen_audio(void *user, const uint8_t *pcm, size_t len)
 {
     app *a = user;
     pthread_mutex_lock(&a->src_lock);
-    if (a->src.current == PH_SRC_BROADCAST && !atomic_load(&a->airplay_on))
+    if (a->src.current == PH_SRC_BROADCAST &&
+        (!a->last_airplay_audio_ms || ph_metrics_now_ms() - a->last_airplay_audio_ms >= 750))
         ph_audio_push_broadcast(a->audio, pcm, len);
     pthread_mutex_unlock(&a->src_lock);
 }
@@ -555,6 +563,13 @@ static bool start_control_gesture(app *a, ph_gesture_kind kind,
 
 static void handle_ble_status(app *a, const char *line)
 {
+    if (!strncmp(line, "peer-name ", 10)) {
+        if (!a->link_stopping)
+            ph_window_set_bluetooth_peer(a->win, line + 10);
+        return;
+    }
+    if (!strcmp(line, "disconnected") || !strcmp(line, "exited"))
+        ph_window_set_bluetooth_peer(a->win, "");
     const char *state = NULL;
     bool was_on = !strcmp(a->ble_status, "on");
 
@@ -2829,6 +2844,14 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
         if (e->type == SDL_MOUSEBUTTONDOWN)
             a->paste_when_ready = false;
         if (e->button.windowID == win_id) {
+            /* Deliver the release to the phone when its press crossed into a side panel. */
+            if (e->type == SDL_MOUSEBUTTONUP && !a->setup.visible &&
+                ((ph_mouse_input_button(e->button.button) &
+                  (a->mouse_abs_down | a->pointer.buttons | a->pointer.requested_buttons)) ||
+                 (e->button.button == SDL_BUTTON_LEFT && (a->pull.armed || a->pull.pulling)))) {
+                mouse_button(a, &e->button);
+                break;
+            }
             if (ph_window_chrome_event(a->win, e))
                 break;
             if (a->setup.visible) {

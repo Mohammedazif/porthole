@@ -295,14 +295,15 @@ static int open_channel(int port, const char *credential)
     say(fd, linebuf);
     return fd;
 }
-static int channel(int port)
+static int authenticated_channel(int port, const char *credential)
 {
     char answer[6];
-    int fd = open_channel(port, ticket);
+    int fd = open_channel(port, credential);
     line(fd, answer, sizeof answer);
     CHECK(!strcmp(answer, "OK"));
     return fd;
 }
+static int channel(int port) { return authenticated_channel(port, ticket); }
 static bool verify_ticket(void *origin, const char *key)
 {
     return ph_origin_authorize(origin, key);
@@ -402,24 +403,29 @@ static bool receive_profile(void *user, const char *credential, char out[65])
     return ph_origin_receive_profile(user, credential, out);
 }
 
-static void test_resume_receive(const char *dir, ph_origin *origin)
+static bool verify_inbox_key(void *origin, const char *key)
+{
+    return ph_origin_inbox_generation(origin, key) != 0;
+}
+
+static void test_resume_receive(const char *dir, ph_origin *origin, const char *key)
 {
     const char *header =
         "PSHR 3 1\nITEM 0123456789abcdef0123456789abcdef "
         "72399361da6a7754fec986dca5b7cbaf1c810a28ded4abaf56b2106d06cb78b0 10 inbox.txt\n";
     CHECK(ph_place_set_save_dir(dir));
     ph_inbox_callbacks callbacks = {
-        .user = origin, .authorize = verify_ticket, .profile = receive_profile};
+        .user = origin, .authorize = verify_inbox_key, .profile = receive_profile};
     ph_inbox *inbox = ph_inbox_start(dir, &callbacks);
     CHECK(inbox);
     char response[100], path[1200];
-    int fd = channel(PH_INBOX_PORT);
+    int fd = authenticated_channel(PH_INBOX_PORT, key);
     say(fd, header);
     line(fd, response, sizeof response);
     CHECK(!strcmp(response, "OFFSET 0"));
     say(fd, "abc");
     close_peer(fd);
-    fd = channel(PH_INBOX_PORT);
+    fd = authenticated_channel(PH_INBOX_PORT, key);
     say(fd, header);
     line(fd, response, sizeof response);
     CHECK(!strcmp(response, "OFFSET 3"));
@@ -427,7 +433,7 @@ static void test_resume_receive(const char *dir, ph_origin *origin)
     line(fd, response, sizeof response);
     CHECK(!strcmp(response, "OK"));
     close_peer(fd);
-    fd = channel(PH_INBOX_PORT);
+    fd = authenticated_channel(PH_INBOX_PORT, key);
     say(fd, header);
     line(fd, response, sizeof response);
     CHECK(!strcmp(response, "SAVED"));
@@ -461,7 +467,7 @@ static void reject_credential(const char *credential)
     expect_rejected_credential(credential, NULL);
 }
 
-static void test_extension_keys(ph_origin *origin, const char *key)
+static void test_extension_keys(const char *dir, ph_origin *origin, const char *key)
 {
     char reply[96], screen[65], share[65], profile[65];
     int phone = reconnect_phone(key);
@@ -480,6 +486,7 @@ static void test_extension_keys(ph_origin *origin, const char *key)
     CHECK(ph_origin_generation(origin, screen));
     CHECK(ph_origin_receive_profile(origin, share, profile));
     CHECK(!ph_origin_generation(origin, share) && !ph_origin_receive_profile(origin, screen, profile));
+    test_resume_receive(dir, origin, share);
     ph_screen_callbacks callbacks = {.user = origin, .authorize = verify_broadcast_key};
     ph_screen *server = ph_screen_start(&callbacks);
     CHECK(server);
@@ -497,7 +504,7 @@ static void test_extension_keys(ph_origin *origin, const char *key)
     ph_screen_stop(server);
 }
 
-static ph_origin *test_pairing(ph_origin *origin, const char *token, const char *key)
+static ph_origin *test_pairing(const char *dir, ph_origin *origin, const char *token, const char *key)
 {
     char response[128], hint[96];
     int fd = reconnect_phone(key);
@@ -506,7 +513,7 @@ static ph_origin *test_pairing(ph_origin *origin, const char *token, const char 
     line(fd, response, sizeof response);
     CHECK(!strcmp(response, "PAIRED") && !ph_origin_code_open(origin));
     close_peer(fd);
-    test_extension_keys(origin, key);
+    test_extension_keys(dir, origin, key);
     reject_credential(token);
 
     char first_id[65], next_id[65], second_code[16];
@@ -755,7 +762,6 @@ int main(int argc, char **argv)
     line(phone, capability, sizeof capability);
     CHECK(!strcmp(capability, "IV READY"));
     test_screen_channel(o);
-    test_resume_receive(dir, o);
     test_chunked_send(o, phone, path_a);
     CHECK(ph_origin_ask(o, 0x1234, 1.0, NULL, NULL, NULL, dir));
     char original[256];
@@ -774,7 +780,7 @@ int main(int argc, char **argv)
     CHECK(!strcmp(original, "CANCEL PULL"));
     say(phone, "MISS cancelled\n");
     close_peer(phone);
-    o = test_pairing(o, token, key);
+    o = test_pairing(dir, o, token, key);
     ph_origin_stop(o);
     ph_remove(path_a);
     ph_remove(path_b);

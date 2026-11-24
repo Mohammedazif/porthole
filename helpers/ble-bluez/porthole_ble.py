@@ -708,6 +708,12 @@ def main():
             connection_generation[0] += 1
             connected_path[0] = None
             emit("disconnected")
+        if path == connected_path[0] and any(key in changed for key in ("Alias", "Name", "Connected")):
+            device_name = str(properties.get("Alias") or properties.get("Name") or "")
+            mac = str(properties.get("Address", "")).lower().replace(":", "-")
+            device_name = " ".join(device_name.split())[:63]
+            if device_name and device_name.lower().replace(":", "-") != mac:
+                emit(f"peer-name {device_name}")
         if changed.get("Paired") and not paired_before and path == connected_path[0]:
             # The system pairing agent owns approval and trust. Give newly
             # paired devices a full discovery grace without changing their trust.

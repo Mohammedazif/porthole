@@ -63,6 +63,7 @@ struct ph_window {
     Uint64 pending_since;
     bool mirroring, control_ready, help_visible;
     bool bluetooth_ready;
+    char bluetooth_peer[128];
     ph_control_policy input_policy;
     char control_detail[96];
     ph_setup setup;
@@ -3071,6 +3072,14 @@ ph_workspace_action ph_window_take_workspace_action(ph_window *w, uint64_t *item
     return a;
 }
 
+void ph_window_set_bluetooth_peer(ph_window *w, const char *name)
+{
+    if (!strcmp(w->bluetooth_peer, name))
+        return;
+    snprintf(w->bluetooth_peer, sizeof w->bluetooth_peer, "%s", name);
+    ph_window_redraw(w);
+}
+
 static void draw_workspace(ph_window *w, SDL_Rect area, ph_workspace_view page)
 {
     ph_workspace_live live = {.paired = !w->code_open,
@@ -3105,6 +3114,8 @@ static void draw_workspace(ph_window *w, SDL_Rect area, ph_workspace_view page)
                               .receiving_done = w->receiving_done,
                               .receiving_total = w->receiving_total};
     char second[40] = "", third[40] = "";
+    if (w->input_policy.verified)
+        snprintf(live.bluetooth_peer, sizeof live.bluetooth_peer, "%s", w->bluetooth_peer);
     if (sscanf(w->pull_hint, "%95s %39s %39s", live.address, second, third) >= 2)
         snprintf(live.code, sizeof live.code, "%s", strcmp(second, "code") == 0 ? third : second);
     if (!strncmp(live.address, "this-pc:", sizeof "this-pc:" - 1)) {
@@ -3205,19 +3216,21 @@ void ph_window_clear(ph_window *w)
     ph_window_redraw(w);
 }
 
-bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy)
+static bool settings_preview(const ph_window *w)
 {
-    if (!w->control_ready)
-        return false;
-    return ph_window_picture_point(w, x, y, vx, vy);
+    return w->settings_visible && w->page == PH_WORKSPACE_HOME && !w->help_visible &&
+           !w->diagnostics_visible && !w->pairing_visible &&
+           ph_workspace_current_section(w->workspace) != PH_SETTINGS_HELP;
 }
 
-bool ph_window_picture_point(const ph_window *w, int x, int y, double *vx, double *vy)
+static bool picture_point(const ph_window *w, int x, int y, double *vx, double *vy,
+                          bool allow_settings_preview)
 {
     int win_w, win_h;
     SDL_Rect r;
 
-    if (!w->has_picture || ph_window_help_visible(w) || w->setup.visible)
+    if (!w->has_picture || w->setup.visible ||
+        (ph_window_help_visible(w) && !(allow_settings_preview && settings_preview(w))))
         return false;
     if (y < PH_WINDOW_BAR_PX)
         return false;
@@ -3232,6 +3245,16 @@ bool ph_window_picture_point(const ph_window *w, int x, int y, double *vx, doubl
     *vx = (x - r.x + 0.5) / r.w;
     *vy = (y - r.y + 0.5) / r.h;
     return true;
+}
+
+bool ph_window_to_video(const ph_window *w, int x, int y, double *vx, double *vy)
+{
+    return w->control_ready && picture_point(w, x, y, vx, vy, true);
+}
+
+bool ph_window_picture_point(const ph_window *w, int x, int y, double *vx, double *vy)
+{
+    return picture_point(w, x, y, vx, vy, false);
 }
 
 void ph_window_video_size(const ph_window *w, int *width, int *height)
@@ -3348,7 +3371,8 @@ bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
             ph_window_redraw(w);
         return true;
     }
-    if ((w->help_visible || w->setup.visible || w->settings_visible) && event->type == SDL_MOUSEWHEEL) {
+    if ((w->help_visible || w->setup.visible || (w->settings_visible && !w->workspace)) &&
+        event->type == SDL_MOUSEWHEEL) {
         double amount = event->wheel.y;
 #if SDL_VERSION_ATLEAST(2, 0, 18)
         if (event->wheel.preciseY != 0) amount = event->wheel.preciseY;

@@ -1528,12 +1528,8 @@ static void home(ph_workspace *u)
     paired_features(u, (SDL_Rect){x, y, width, 52});
     y += 74;
     if (!u->live.connected) {
-        char instructions[160];
-        snprintf(instructions, sizeof instructions, "Open Porthole on your iPhone and select %s to reconnect.",
-                 pc_name(u));
-        y = text(u, instructions, x, y, width, 14, false,
-                 u->muted) +
-            18;
+        y = text(u, "To send files from your iPhone, choose Porthole in Photos or Files under Share.",
+                 x, y, width, 14, false, u->muted) + 18;
         char history_name[32];
         button(u, (SDL_Rect){x, y, 130, 34}, history_button_label(u, history_name), UI_HISTORY, 0,
                false, true);
@@ -1998,11 +1994,17 @@ static int device_row(ph_workspace *u, int x, int y, int width, int index)
     bool companion = !d || d->companion;
     const char *name = d ? d->name : u->live.phone;
     bool connected = d ? d->connected : u->live.connected;
+    const char *bluetooth_name = companion && (!d || d->active) && u->live.bluetooth_peer[0]
+                                 ? u->live.bluetooth_peer : NULL;
+    char connection[160];
+    if (bluetooth_name)
+        snprintf(connection, sizeof connection, "Bluetooth · %s", bluetooth_name);
     int h = width < 420 ? 148 : 126;
     card(u, (SDL_Rect){x, y, width, h});
     text(u, *name ? name : "iPhone", x + 14, y + 10, width - 28, 15, true, u->ink);
     text(u,
-         companion ? "Porthole companion · Files and clipboard"
+         bluetooth_name ? connection
+         : companion ? "Porthole companion · Files and clipboard"
          : d->usb  ? "USB · Screen only"
                    : "AirPlay · Screen only",
          x + 14, y + 35, width - 28, 12, false, u->muted);
@@ -2101,7 +2103,7 @@ static const char *controls_status(const ph_workspace *u)
     if (u->live.phone_controls_managed && !u->live.phone_controls_allowed)
         return "Disabled on your iPhone";
     if (u->live.controls)
-        return u->live.mirroring ? "Ready · Close Settings to control your iPhone"
+        return u->live.mirroring ? "Ready · Move the mouse over your iPhone preview"
                                  : "Mouse and keyboard enabled";
     if (verification_required(u))
         return "Verification required · Tap Verify Bluetooth on your iPhone";
@@ -2122,9 +2124,12 @@ static int control_settings(ph_workspace *u, int x, int y, int width)
                    PH_WORKSPACE_CONTROLS, !u->live.paused),
         value_row("Activation", "Managed under Mouse and keyboard in the iPhone app.", activation),
         button_row("Bluetooth and pointer setup", "Pair over Bluetooth and check pointer alignment.",
-                   "Set up controls", PH_WORKSPACE_SETUP, true)
+                   "Set up controls", PH_WORKSPACE_SETUP, true),
+        value_row("Bluetooth device", NULL, u->live.bluetooth_peer[0] ? u->live.bluetooth_peer
+                                                                       : "Name unavailable")
     };
-    y = setting_group(u, x, y, width, "CONNECTION", connection, SDL_arraysize(connection));
+    y = setting_group(u, x, y, width, "CONNECTION", connection,
+                      SDL_arraysize(connection) - !u->live.phone_controls_verified);
     if (u->live.mirroring) {
         setting_row sharing = toggle_row("Show control toolbar",
                                          "Display navigation and volume buttons beside your iPhone.",
@@ -2356,14 +2361,14 @@ static void settings(ph_workspace *u)
         switch (section) {
         case 0: y = general_settings(u, x, y, width, inline_settings); break;
         case 1: y = screen_settings(u, x, y, width); break;
-        case 2:
+        case PH_SETTINGS_CONTROLS:
             status_dot(u, x, y - 17, u->live.controls);
             text(u, controls_status(u), x + 14, y - 22, width - 14, 12, false, u->muted);
             y = control_settings(u, x, y + 16, width);
             break;
         case 3: y = transfer_settings(u, x, y, width); break;
         case 4: y = notification_settings(u, x, y, width); break;
-        case 5: y = help_settings(u, x, y - 1, width); break;
+        case PH_SETTINGS_HELP: y = help_settings(u, x, y - 1, width); break;
         case 6: y = statistics_settings(u, x, y, width); break;
         case PH_SETTINGS_DEVICES: y = device_settings(u, x, y, width); break;
         case PH_SETTINGS_ABOUT: {
@@ -2389,7 +2394,9 @@ static void settings(ph_workspace *u)
         fitted_label(u, "Screen sharing continues", b.x + 30, bottom + 10, b.w / 2 - 30,
                      10, false, u->muted);
         const char *controls = verification_required(u) ? "Bluetooth verification required"
-                               : u->live.controls ? "PC controls paused in Settings"
+                               : u->live.controls && u->section == PH_SETTINGS_HELP
+                                   ? "PC controls paused in Help"
+                               : u->live.controls ? "Mouse active over iPhone preview"
                                : u->live.paused ? "PC controls disabled"
                                                 : "PC controls inactive";
         int controls_width = ph_text_width(controls, PH_TEXT(10, PH_FONT_REGULAR));
@@ -2963,7 +2970,12 @@ bool ph_workspace_event(ph_workspace *u, const SDL_Event *event)
     }
     int x = 0, y = 0;
     if (event->type == SDL_MOUSEWHEEL) {
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+        x = event->wheel.mouseX;
+        y = event->wheel.mouseY;
+#else
         SDL_GetMouseState(&x, &y);
+#endif
         if (!SDL_PointInRect(&(SDL_Point){x, y}, &u->rect))
             return false;
         int amount = SDL_clamp(event->wheel.y, -20, 20);

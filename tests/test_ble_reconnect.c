@@ -120,6 +120,7 @@ void ph_window_set_phone_name(ph_window *w, const char *name) { (void)w; (void)n
 void ph_window_set_code_open(ph_window *w, bool open) { (void)w; (void)open; }
 bool ph_window_has_pairing(const ph_window *w) { (void)w; return false; }
 void ph_window_open_settings(ph_window *w) { (void)w; }
+void ph_window_set_bluetooth_peer(ph_window *w, const char *name) { (void)w; (void)name; }
 void ph_window_set_transfer_percent(ph_window *w, int percent) { (void)w; (void)percent; }
 bool ph_window_set_active_transfer(ph_window *w, const char *line)
 { (void)w; (void)line; return false; }

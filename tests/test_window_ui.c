@@ -1013,6 +1013,15 @@ int main(int argc, char **argv)
     CHECK(ph_window_to_video(w, 230, 386, &vx, &vy));
     CHECK(vx > .49 && vx < .51 && vy > .49 && vy < .51);
     CHECK(!ph_window_to_video(w, 230, 16, &vx, &vy));
+    ph_workspace_open_section(workspace, PH_SETTINGS_CONTROLS);
+    ph_window_open_settings(w);
+    CHECK(ph_window_help_visible(w));
+    int settings_width, settings_height;
+    SDL_GetWindowSize(native, &settings_width, &settings_height);
+    CHECK(ph_window_to_video(w, 180, settings_height / 2, &vx, &vy));
+    CHECK(!ph_window_to_video(w, settings_width - 32, settings_height / 2, &vx, &vy));
+    CHECK(!ph_window_picture_point(w, 180, settings_height / 2, &vx, &vy));
+    click_workspace(w, PH_WORKSPACE_CLOSE);
     ph_window_open_pairing(w);
     CHECK(ph_workspace_target(workspace, PH_WORKSPACE_COPY_ADDRESS, &tx, &ty));
     CHECK(!ph_window_picture_point(w, 230, 390, &vx, &vy));

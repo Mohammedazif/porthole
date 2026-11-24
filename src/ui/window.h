@@ -118,6 +118,7 @@ void ph_window_set_history_profile(ph_window *w, const char *profile);
 void ph_window_toggle_help(ph_window *w);
 void ph_window_toggle_statistics(ph_window *w);
 void ph_window_set_input_policy(ph_window *w, bool bluetooth_ready, ph_control_policy policy);
+void ph_window_set_bluetooth_peer(ph_window *w, const char *name);
 bool ph_window_help_visible(const ph_window *w);
 
 /* F2 guided setup is local and consumes input while visible. */

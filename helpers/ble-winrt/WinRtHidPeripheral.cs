@@ -361,6 +361,7 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
             DropPeerLocked();
             if (pipeLifetime.RestartRequired) return;
             activePeer = gate.Connect(id);
+            _ = ReportPeerNameAsync(activePeer.Value);
             ClearValuesLocked();
         }
         if (activePeer is not PeerSession peer) return;
@@ -392,6 +393,20 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
             targets.ContainsKey(ReportKind.Consumer));
         if (gate.Epoch != previousEpoch) ClearValuesLocked();
         CheckPipeLifetimeLocked();
+    }
+
+    private async Task ReportPeerNameAsync(PeerSession peer)
+    {
+        try
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            DeviceInformation? device = await DeviceInformation.CreateFromIdAsync(peer.ClientId).AsTask(deadline.Token);
+            string name = Program.SingleLine(device?.Name ?? "");
+            if (string.IsNullOrWhiteSpace(name)) return;
+            lock (stateLock)
+                if (!disposed && activePeer == peer) status("peer-name " + name);
+        }
+        catch (Exception e) { log("Bluetooth device name unavailable: " + e.Message); }
     }
 
     private void CheckPipeLifetimeLocked()

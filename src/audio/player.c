@@ -36,6 +36,7 @@ struct ph_held_pcm {
 struct ph_audio {
     SDL_mutex *lock;
     SDL_AudioDeviceID device;
+    uint64_t retry_output_at;
     AVCodecContext *codec;
     AVPacket *packet;
     AVFrame *frame;
@@ -80,11 +81,15 @@ static bool open_output(ph_audio *a)
 {
     if (a->device)
         return true;
+    uint64_t now = ph_metrics_now_ms();
+    if (now < a->retry_output_at)
+        return false;
     SDL_AudioSpec wanted = {.freq = RATE, .format = AUDIO_F32SYS,
                             .channels = CHANNELS, .samples = 512};
     a->device = SDL_OpenAudioDevice(NULL, 0, &wanted, NULL, 0);
     if (!a->device) {
         PH_LOGW("couldn't open PC audio output: %s", SDL_GetError());
+        a->retry_output_at = now + 2000;
         return false;
     }
     SDL_PauseAudioDevice(a->device, 0);
@@ -279,7 +284,7 @@ int ph_audio_push_broadcast(ph_audio *a, const uint8_t *pcm, size_t len)
     int frames = (int)(len / 4);
     float samples[4096];
     SDL_LockMutex(a->lock);
-    if (a->muted || (!a->device && a->compression == 1 && a->warned)) {
+    if (a->muted) {
         SDL_UnlockMutex(a->lock);
         return 0;
     }
@@ -289,11 +294,14 @@ int ph_audio_push_broadcast(ph_audio *a, const uint8_t *pcm, size_t len)
         a->compression = 1;
         a->warned = false;
     }
+    bool had_output = a->device != 0;
     if (!open_output(a)) {
         a->warned = true;
         SDL_UnlockMutex(a->lock);
         return -1;
     }
+    if (!had_output || !a->playing)
+        PH_LOGI("audio ready: broadcast PCM, PC speakers");
     for (int i = 0; i < frames * CHANNELS; i++) {
         int value = pcm[2 * i] | (int)pcm[2 * i + 1] << 8;
         samples[i] = (value < 32768 ? value : value - 65536) / 32768.0f;

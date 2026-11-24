@@ -15,7 +15,8 @@ typedef enum ph_workspace_view {
     PH_WORKSPACE_CLIPBOARD,
     PH_WORKSPACE_FILES
 } ph_workspace_view;
-enum { PH_SETTINGS_DEVICES = 7, PH_SETTINGS_ABOUT, PH_SETTINGS_COUNT };
+enum { PH_SETTINGS_CONTROLS = 2, PH_SETTINGS_HELP = 5, PH_SETTINGS_DEVICES = 7,
+       PH_SETTINGS_ABOUT, PH_SETTINGS_COUNT };
 typedef enum ph_workspace_action {
     PH_WORKSPACE_NONE,
     PH_WORKSPACE_CLOSE,
@@ -67,6 +68,7 @@ typedef enum ph_workspace_action {
     PH_WORKSPACE_ALWAYS_ON_TOP
 } ph_workspace_action;
 typedef struct ph_workspace_live {
+    char bluetooth_peer[128];
     bool paired, connected, mirroring, controls, paused, feed, toolbar, ctrl_command, media_keys,
         release_blur, relative, sound, recording;
     bool share_checked, share_available, clipboard_available, modal;
