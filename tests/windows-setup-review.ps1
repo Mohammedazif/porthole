@@ -18,6 +18,8 @@ public static class SetupReview {
     public static extern int GetWindowText(IntPtr window, StringBuilder text, int capacity);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr capacity, StringBuilder text);
+    [DllImport("user32.dll", EntryPoint="SendMessageW")]
+    private static extern IntPtr SendValue(IntPtr window, uint message, IntPtr param, IntPtr value);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     public static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
     [DllImport("user32.dll")]
@@ -61,6 +63,25 @@ public static class SetupReview {
         }, IntPtr.Zero);
         return match;
     }
+
+    public static string ReadText(IntPtr window) {
+        var text = new StringBuilder(4096);
+        SendMessage(window, 0x000D, (IntPtr)text.Capacity, text);
+        return text.ToString();
+    }
+
+    public static bool SelectOption(IntPtr list, int index) {
+        int top = 0;
+        for (int i = 0; i <= index; i++) {
+            int height = SendValue(list, 0x01A1, (IntPtr)i, IntPtr.Zero).ToInt32();
+            if (height < 1) return false;
+            if (i < index) top += height;
+            else top += height / 2;
+        }
+        var position = (IntPtr)((top << 16) | 16);
+        return PostMessage(list, 0x0201, (IntPtr)1, position) &&
+               PostMessage(list, 0x0202, IntPtr.Zero, position);
+    }
 }
 '@
 
@@ -94,12 +115,30 @@ try {
     }
     if ($wizard -eq [IntPtr]::Zero) { throw 'The Windows runner did not expose the Setup window' }
     [void][SetupReview]::GetWindowThreadProcessId($wizard, [ref]$wizardProcess)
+    Start-Sleep -Milliseconds 300
     Save-WizardImage $wizard (Join-Path $OutputDirectory 'setup-destination.png')
     [void][SetupReview]::SetForegroundWindow($wizard)
     for ($page = 0; $page -lt 3; $page++) {
         $options = [SetupReview]::FindVisible($wizard, 'TNewCheckListBox', $null)
         if ($options -ne [IntPtr]::Zero) {
             Save-WizardImage $wizard (Join-Path $OutputDirectory 'setup-options.png')
+            if (![SetupReview]::SelectOption($options, 0) -or ![SetupReview]::SelectOption($options, 1)) {
+                throw 'Could not toggle the installer options'
+            }
+            Start-Sleep -Milliseconds 300
+            Save-WizardImage $wizard (Join-Path $OutputDirectory 'setup-options-selected.png')
+            $next = [SetupReview]::FindVisible($wizard, 'TNewButton', 'Next')
+            if ($next -eq [IntPtr]::Zero) { throw 'Cannot review the selected options' }
+            [void][SetupReview]::PostMessage($next, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
+            Start-Sleep -Milliseconds 650
+            $ready = [SetupReview]::FindVisible($wizard, 'TNewMemo', $null)
+            if ($ready -eq [IntPtr]::Zero) { throw 'Cannot read the install summary' }
+            $summary = [SetupReview]::ReadText($ready)
+            if ($summary -notmatch 'Allow connections on private networks' -or
+                $summary -notmatch 'Start Porthole at sign-in for all users') {
+                throw 'The install summary did not show both selected options'
+            }
+            Save-WizardImage $wizard (Join-Path $OutputDirectory 'setup-ready.png')
             return
         }
         $next = [SetupReview]::FindVisible($wizard, 'TNewButton', 'Next')
