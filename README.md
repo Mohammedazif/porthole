@@ -9,11 +9,10 @@ Free and open source (GPL-3.0). The current sharing flow uses the companion iPho
 The older AirPlay Screen Mirroring path remains available as a compatibility feature.
 
 **Windows and Linux:** the companion link (pairing, clipboard text and pictures, files both
-ways) and the ReplayKit screen receiver share one implementation on both systems. On
-Windows the PC advertises itself with the system DNS-SD (Windows 10 1809 or later), adds
-**Send to › iPhone (Porthole)** to Explorer, takes files copied in Explorer with Ctrl+V, saves
-shares in the user's Downloads folder, and shows a notification-area menu. Run the bundled
-`windows-firewall.ps1` once if Windows blocks TCP 47731-47733 on a Private network.
+ways) and the ReplayKit screen receiver share one implementation on both systems. The
+iPhone app connects directly to the PC address from the QR code, manual entry, or Saved PC.
+On Windows, Porthole adds **Send to › iPhone (Porthole)** to Explorer, takes files copied in
+Explorer with Ctrl+V, saves incoming files to Downloads, and shows a notification-area menu.
 `porthole --send FILE...` hands files to the running window from a terminal.
 
 **Desktop workspace.** Open Porthole on the iPhone and scan the PC’s QR code. Manual
@@ -21,7 +20,7 @@ pairing uses the address, connection code and SHA-256 certificate fingerprint.
 The matching companion uses TLS 1.3 for pairing, clipboard, file transfers and screen sharing.
 Unused codes expire after ten minutes. After pairing, the iPhone reconnects with a separate
 saved credential. **New code** replaces the selected pairing. Use **Add iPhone** to save
-another pairing, then choose **Use for files** to switch the active companion. Each
+another pairing, then choose **Select iPhone** to switch the active companion. Each
 pairing keeps its own transfer and clipboard history.
 
 Drop files onto the connected device or select **Send files**. Incoming transfers show the
@@ -70,8 +69,8 @@ license (SIL OFL 1.1) is in `src/ui/fonts/LICENSE`. Re-embed them with
 | Screen (iPhone → PC) | ReplayKit from the Porthole iPhone app (Linux); legacy AirPlay receiver compatibility | Apple's USB screen-capture protocol |
 | Control (PC → iPhone) | PC acts as a Bluetooth mouse + keyboard; AssistiveTouch shows a pointer | same |
 
-To share the screen, put both devices on the same Wi-Fi. Open Porthole on the PC,
-enter its displayed address and code in the iPhone app, and tap **Connect**. Then tap
+To share the screen, put both devices on the same local network. Open Porthole on the PC,
+then scan its QR code or enter its pairing details in the iPhone app. Then tap
 **Share screen**, choose Porthole in the iOS dialog, and confirm **Start Broadcast**.
 Bluetooth controls are optional and have a separate **Set up controls** guide.
 
@@ -89,9 +88,10 @@ and choose the artifact for your OS. Extract the artifact download to get the in
 | OS | Artifact | Install |
 |---|---|---|
 | Windows x64 | `porthole-windows-x64-setup` | Open the Setup EXE. Find Porthole in Start or remove it through Installed apps. |
-| Ubuntu 24.04 and Linux Mint 22, amd64 | `porthole-ubuntu-24.04-mint-22-amd64` | Open the `.deb` in your package manager or run `sudo apt install ./porthole_0.1.0_amd64.deb`. |
+| Ubuntu 24.04 and Linux Mint 22, amd64 | `porthole-ubuntu-24.04-mint-22-amd64` | Open the `.deb` in your package manager. |
 | Debian 13, amd64 | `porthole-debian-13-amd64` | Install the Debian build of the `.deb`. |
 
+When Windows Firewall prompts after Porthole opens, allow access on private networks.
 On Linux, the package adds Porthole to the application menu and installs the Bluetooth
 helper with its dependencies. Build on the target distribution when you need a package for
 a different Linux release.
