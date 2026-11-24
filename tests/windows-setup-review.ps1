@@ -96,7 +96,10 @@ function Save-WizardImage([IntPtr] $Window, [string] $File) {
 }
 
 $OutputDirectory = (New-Item -ItemType Directory -Force $OutputDirectory).FullName
-$process = Start-Process -FilePath (Resolve-Path $Installer).Path -ArgumentList '/NORESTART' -PassThru
+$destination = Join-Path $env:RUNNER_TEMP ('Porthole wizard ' + [Guid]::NewGuid())
+$process = Start-Process -FilePath (Resolve-Path $Installer).Path -ArgumentList @(
+    '/NORESTART', ('/DIR="{0}"' -f $destination)
+) -PassThru
 [uint32] $wizardProcess = 0
 try {
     $wizard = [IntPtr]::Zero
@@ -110,21 +113,18 @@ try {
     Save-WizardImage $wizard (Join-Path $OutputDirectory 'setup-destination.png')
     [void][SetupReview]::SetForegroundWindow($wizard)
     for ($page = 0; $page -lt 3; $page++) {
-        $network = [SetupReview]::FindVisible($wizard, 'TBitmapButton', 'Allow connections on private networks')
-        if ($network -ne [IntPtr]::Zero) {
-            $startup = [SetupReview]::FindVisible($wizard, 'TBitmapButton', 'Start Porthole at sign-in for all users')
-            if ($startup -eq [IntPtr]::Zero) { throw 'The startup switch is missing' }
-            if (![SetupReview]::ReadText($network).EndsWith(': On') -or
-                ![SetupReview]::ReadText($startup).EndsWith(': Off')) {
+        $startup = [SetupReview]::FindVisible($wizard, 'TBitmapButton', 'Start Porthole at sign-in for all users')
+        if ($startup -ne [IntPtr]::Zero) {
+            if (![SetupReview]::ReadText($startup).EndsWith(': Off') -or
+                [SetupReview]::FindVisible($wizard, 'TBitmapButton', 'Allow connections on private networks') -ne [IntPtr]::Zero) {
                 throw 'Incorrect initial installer options'
             }
             Save-WizardImage $wizard (Join-Path $OutputDirectory 'setup-options.png')
-            if (![SetupReview]::Click($network) -or ![SetupReview]::Click($startup)) {
+            if (![SetupReview]::Click($startup)) {
                 throw 'Could not toggle the installer options'
             }
             Start-Sleep -Milliseconds 300
-            if (![SetupReview]::ReadText($network).EndsWith(': Off') -or
-                ![SetupReview]::ReadText($startup).EndsWith(': On')) {
+            if (![SetupReview]::ReadText($startup).EndsWith(': On')) {
                 throw 'The installer switches did not update'
             }
             Save-WizardImage $wizard (Join-Path $OutputDirectory 'setup-options-selected.png')
@@ -140,6 +140,32 @@ try {
                 throw 'The install summary did not match the selected options'
             }
             Save-WizardImage $wizard (Join-Path $OutputDirectory 'setup-ready.png')
+            $install = [SetupReview]::FindVisible($wizard, 'TNewButton', 'Install')
+            if ($install -eq [IntPtr]::Zero -or ![SetupReview]::Click($install)) {
+                throw 'Could not start the wizard installation'
+            }
+            $launch = [IntPtr]::Zero
+            for ($attempt = 0; $attempt -lt 120 -and $launch -eq [IntPtr]::Zero; $attempt++) {
+                Start-Sleep -Milliseconds 250
+                $launch = [SetupReview]::FindVisible($wizard, 'TBitmapButton', 'Open Porthole')
+            }
+            if ($launch -eq [IntPtr]::Zero -or ![SetupReview]::ReadText($launch).EndsWith(': On')) {
+                throw 'Finish did not show the launch switch with the correct default'
+            }
+            Save-WizardImage $wizard (Join-Path $OutputDirectory 'setup-finished.png')
+            if (![SetupReview]::Click($launch)) { throw 'Could not toggle the launch switch' }
+            Start-Sleep -Milliseconds 300
+            if (![SetupReview]::ReadText($launch).EndsWith(': Off')) {
+                throw 'Finish did not update the launch switch'
+            }
+            Save-WizardImage $wizard (Join-Path $OutputDirectory 'setup-finished-launch-off.png')
+            $finish = [SetupReview]::FindVisible($wizard, 'TNewButton', 'Finish')
+            if ($finish -eq [IntPtr]::Zero -or ![SetupReview]::Click($finish) -or !$process.WaitForExit(10000)) {
+                throw 'Setup did not exit after Finish'
+            }
+            if ($process.ExitCode -ne 0 -or (Get-Process porthole -ErrorAction SilentlyContinue)) {
+                throw 'Setup failed or opened Porthole despite the switch being off'
+            }
             return
         }
         $next = [SetupReview]::FindVisible($wizard, 'TNewButton', 'Next')
@@ -153,4 +179,9 @@ try {
         Stop-Process -Id $wizardProcess -Force -ErrorAction SilentlyContinue
     }
     Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    $uninstaller = Get-ChildItem -LiteralPath $destination -Filter 'unins*.exe' -ErrorAction SilentlyContinue
+    if ($uninstaller) {
+        $removed = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -PassThru -Wait
+        if ($removed.ExitCode -ne 0) { throw 'Could not uninstall the visual review installation' }
+    }
 }

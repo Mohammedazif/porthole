@@ -3,7 +3,7 @@
 #define BuildDir "."
 #endif
 #ifndef PortholeVersion
-#define PortholeVersion "0.1.1"
+#define PortholeVersion "0.1.2"
 #endif
 
 [Setup]
@@ -43,15 +43,14 @@ Name: "{group}\Uninstall Porthole"; Filename: "{uninstallexe}"
 Name: "{commonstartup}\Porthole"; Filename: "{app}\porthole.exe"; WorkingDir: "{app}"; Tasks: startwithwindows
 
 [Tasks]
-Name: "localnetwork"; Description: "Allow connections on private networks"
 Name: "startwithwindows"; Description: "Start Porthole at sign-in for all users"; Flags: unchecked
 
 [Messages]
 WizardSelectTasks=Installation options
-SelectTasksDesc=Choose how Porthole connects and starts.
+SelectTasksDesc=Choose whether to open Porthole automatically at sign-in.
 ReadyMemoTasks=Installation options
 FinishedHeadingLabel=Porthole is installed
-FinishedLabel=Open Porthole to pair your iPhone.
+FinishedLabel=Porthole is ready to pair with your iPhone.
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "Porthole"; Flags: dontcreatekey uninsdeletevalue
@@ -60,12 +59,6 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: 
 Type: files; Name: "{commonstartup}\Porthole.lnk"; Tasks: not startwithwindows
 
 [Run]
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Porthole Installed TCP"" program=""{app}\porthole.exe"""; Flags: runhidden
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Porthole Installed UDP"" program=""{app}\porthole.exe"""; Flags: runhidden
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Porthole Installed mDNS"" program=""{sys}\svchost.exe"" service=Dnscache"; Flags: runhidden
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Porthole Installed TCP"" dir=in action=allow program=""{app}\porthole.exe"" protocol=TCP localport=7000,7001,7100,47731,47732,47733 profile=private remoteip=localsubnet"; Tasks: localnetwork; Flags: runhidden
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Porthole Installed UDP"" dir=in action=allow program=""{app}\porthole.exe"" protocol=UDP localport=6000,6001,7011 profile=private remoteip=localsubnet"; Tasks: localnetwork; Flags: runhidden
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Porthole Installed mDNS"" dir=in action=allow program=""{sys}\svchost.exe"" service=Dnscache protocol=UDP localport=5353 profile=private remoteip=localsubnet"; Tasks: localnetwork; Flags: runhidden
 Filename: "{app}\porthole.exe"; WorkingDir: "{app}"; Description: "Open Porthole"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [UninstallRun]
@@ -75,16 +68,16 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=
 
 [Code]
 const
-  NetworkTitle = 'Allow connections on private networks';
   StartupTitle = 'Start Porthole at sign-in for all users';
+  LaunchTitle = 'Open Porthole';
 
 var
-  NetworkSwitch, StartupSwitch: TBitmapButton;
+  StartupSwitch, LaunchSwitch: TBitmapButton;
   SwitchOn, SwitchOff: TPngImage;
 
-procedure UpdateSwitch(Button: TBitmapButton; const Task, Title: String);
+procedure UpdateSwitch(Button: TBitmapButton; const Title: String; Enabled: Boolean);
 begin
-  if WizardIsTaskSelected(Task) then begin
+  if Enabled then begin
     Button.PngImage.Assign(SwitchOn);
     Button.Caption := Title + ': On';
   end else begin
@@ -94,22 +87,29 @@ begin
 end;
 
 procedure OptionClick(Sender: TObject);
-var
-  Task, Title: String;
 begin
-  if Sender = NetworkSwitch then begin
-    Task := 'localnetwork';
-    Title := NetworkTitle;
-  end else begin
-    Task := 'startwithwindows';
-    Title := StartupTitle;
-  end;
-
-  if WizardIsTaskSelected(Task) then
-    WizardSelectTasks('!' + Task)
+  if WizardIsTaskSelected('startwithwindows') then
+    WizardSelectTasks('!startwithwindows')
   else
-    WizardSelectTasks(Task);
-  UpdateSwitch(TBitmapButton(Sender), Task, Title);
+    WizardSelectTasks('startwithwindows');
+  UpdateSwitch(StartupSwitch, StartupTitle, WizardIsTaskSelected('startwithwindows'));
+end;
+
+procedure LaunchClick(Sender: TObject);
+begin
+  WizardForm.RunList.Checked[0] := not WizardForm.RunList.Checked[0];
+  UpdateSwitch(LaunchSwitch, LaunchTitle, WizardForm.RunList.Checked[0]);
+end;
+
+function AddSwitch(Parent: TWinControl; Left, Top: Integer): TBitmapButton;
+begin
+  Result := TBitmapButton.Create(WizardForm);
+  Result.Parent := Parent;
+  Result.SetBounds(Left, Top, ScaleX(54), ScaleY(32));
+  Result.Anchors := [akTop, akRight];
+  Result.Stretch := True;
+  Result.TabStop := True;
+  Result.Cursor := crHand;
 end;
 
 function AddOption(const Title, Description: String; Top: Integer): TBitmapButton;
@@ -118,13 +118,7 @@ var
   Page: TNewNotebookPage;
 begin
   Page := WizardForm.SelectTasksPage;
-  Result := TBitmapButton.Create(WizardForm);
-  Result.Parent := Page;
-  Result.SetBounds(Page.ClientWidth - ScaleX(54), Top + ScaleY(3), ScaleX(54), ScaleY(32));
-  Result.Anchors := [akTop, akRight];
-  Result.Stretch := True;
-  Result.TabStop := True;
-  Result.Cursor := crHand;
+  Result := AddSwitch(Page, Page.ClientWidth - ScaleX(54), Top + ScaleY(3));
   Result.OnClick := @OptionClick;
 
   Heading := TNewStaticText.Create(WizardForm);
@@ -164,17 +158,31 @@ begin
   SwitchOff.LoadFromFile(ExpandConstant('{tmp}\switch-' + Theme + '-off.png'));
   WizardForm.TasksList.Visible := False;
   WizardForm.SelectTasksLabel.Visible := False;
-  NetworkSwitch := AddOption(NetworkTitle,
-    'Lets your iPhone connect over Wi-Fi or Ethernet on a private Windows network.', ScaleY(14));
   StartupSwitch := AddOption(StartupTitle,
-    'Opens Porthole automatically when anyone signs in to this PC.', ScaleY(90));
+    'Opens Porthole automatically when anyone signs in to this PC.', ScaleY(14));
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
+var
+  LaunchLabel: TNewStaticText;
 begin
-  if (CurPageID = wpSelectTasks) and Assigned(NetworkSwitch) then begin
-    UpdateSwitch(NetworkSwitch, 'localnetwork', NetworkTitle);
-    UpdateSwitch(StartupSwitch, 'startwithwindows', StartupTitle);
+  if not Assigned(StartupSwitch) then
+    Exit;
+  if CurPageID = wpSelectTasks then
+    UpdateSwitch(StartupSwitch, StartupTitle, WizardIsTaskSelected('startwithwindows'));
+  if (CurPageID = wpFinished) and (WizardForm.RunList.Items.Count = 1) then begin
+    WizardForm.RunList.Visible := False;
+    LaunchSwitch := AddSwitch(WizardForm.RunList.Parent,
+      WizardForm.RunList.Left + WizardForm.RunList.Width - ScaleX(54),
+      WizardForm.RunList.Top);
+    LaunchSwitch.OnClick := @LaunchClick;
+    LaunchLabel := TNewStaticText.Create(WizardForm);
+    LaunchLabel.Parent := LaunchSwitch.Parent;
+    LaunchLabel.Left := WizardForm.RunList.Left;
+    LaunchLabel.Top := LaunchSwitch.Top + ScaleY(7);
+    LaunchLabel.Caption := LaunchTitle;
+    LaunchLabel.FocusControl := LaunchSwitch;
+    UpdateSwitch(LaunchSwitch, LaunchTitle, WizardForm.RunList.Checked[0]);
   end;
 end;
 

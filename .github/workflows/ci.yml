@@ -287,17 +287,14 @@ jobs:
           $startupShortcut = Join-Path ([Environment]::GetFolderPath('CommonStartup')) 'Porthole.lnk'
           $firewallRules = @('Porthole Installed TCP', 'Porthole Installed UDP', 'Porthole Installed mDNS')
           $installed = Start-Process -FilePath $installer.FullName -ArgumentList @(
-            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/TASKS=localnetwork,startwithwindows',
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/TASKS=startwithwindows',
             ('/DIR="{0}"' -f $destination)
           ) -Wait -PassThru
           if ($installed.ExitCode -ne 0) { throw "Installation failed: $($installed.ExitCode)" }
           if (!(Test-Path $startupShortcut)) { throw 'The sign-in option did not install its shortcut' }
           foreach ($name in $firewallRules) {
-            $rule = Get-NetFirewallRule -DisplayName $name -ErrorAction Stop
-            if ($rule.Profile -ne 'Private') { throw "Unexpected network profile for $name" }
-            $scope = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule
-            if (@($scope.RemoteAddress) -notcontains 'LocalSubnet') {
-              throw "Unexpected remote address scope for $name"
+            if (Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue) {
+              throw "Setup created a firewall rule: $name"
             }
           }
           $payload = Get-Content 'out\porthole-windows-x64-verification.json' -Raw | ConvertFrom-Json
