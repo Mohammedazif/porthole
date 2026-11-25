@@ -728,8 +728,13 @@ static void handle_ble_status(app *a, const char *line)
     if (!strncmp(line, "phone-audio ", 12)) {
         PH_LOGI("Bluetooth: %s", line);
         if (!strcmp(line + 12, "unpaired") && atomic_load(&a->sound_mode) == PH_SOUND_PC)
+#ifdef _WIN32
             ph_window_set_detail(a->win, "To play iPhone sound here, pair the iPhone in "
                                          "Windows Settings › Bluetooth & devices");
+#else
+            ph_window_set_detail(a->win, "To play iPhone sound here, forget this PC in the "
+                                         "iPhone's Bluetooth settings, then pair again");
+#endif
         return;
     }
     if (!strncmp(line, "peer-name ", 10)) {

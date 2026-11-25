@@ -737,6 +737,8 @@ def main():
             device_name = " ".join(device_name.split())[:63]
             if device_name and device_name.lower().replace(":", "-") != mac:
                 emit(f"peer-name {device_name}")
+        if "Paired" in changed:
+            audio_refused.discard(path)
         if changed.get("Paired") and not paired_before and path == connected_path[0]:
             # The system pairing agent owns approval and trust. Give newly
             # paired devices a full discovery grace without changing their trust.
@@ -760,6 +762,7 @@ def main():
     # ---- the phone's sound through this PC (BlueZ with PipeWire plays it) ----
     phone_audio = [None]  # None until Porthole says; then True (play here) or False
     transports = set()  # the phone's audio streams to this PC (MediaTransport1 paths)
+    audio_refused = set()  # phones that refused the Classic link; cleared on new pairing
 
     def audio_phone_path():
         """A paired phone that can send audio here, the connected one first.
@@ -777,7 +780,7 @@ def main():
 
     def apply_phone_audio():
         wanted, path = phone_audio[0], audio_phone_path()
-        if wanted is None or path is None:
+        if wanted is None or path is None or (wanted and path in audio_refused):
             return False
         if wanted and any(t.startswith(path + "/") for t in transports):
             return False  # already playing here; another request only disturbs the links
@@ -786,10 +789,17 @@ def main():
 
         def failed(error):
             name = error.get_dbus_name() if hasattr(error, "get_dbus_name") else str(error)
+            detail = error.get_dbus_message() if hasattr(error, "get_dbus_message") else ""
             if not name.endswith(("AlreadyConnected", "NotConnected", "InProgress")):
-                detail = error.get_dbus_message() if hasattr(error, "get_dbus_message") else ""
                 log(f"phone audio {action}: {name}" + (f" ({detail})" if detail else ""))
-            if wanted:
+            if wanted and detail == "br-connection-unknown":
+                # The iPhone refused this PC's Classic link outright (a key it
+                # doesn't share). Asking again makes the iPhone drop the mouse
+                # and keyboard too, so stop until it brings its sound here
+                # itself, is paired again, or the next share starts the helper.
+                audio_refused.add(path)
+                emit("phone-audio unpaired")
+            elif wanted:
                 retry_phone_audio()
 
         call = device.ConnectProfile if wanted else device.DisconnectProfile
@@ -840,6 +850,7 @@ def main():
         # keep it on the phone unless Porthole chose this PC.
         if MEDIA_TRANSPORT_IFACE in interfaces and selected_adapter(path):
             transports.add(str(path))
+            audio_refused.difference_update(d for d in list(audio_refused) if str(path).startswith(d + "/"))
             reset_phone_audio_retry()
             if phone_audio[0] is False:
                 GLib.timeout_add(500, apply_phone_audio)
