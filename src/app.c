@@ -112,6 +112,7 @@ enum {
     EV_FRAME,
     EV_CONNECTED,
     EV_DISCONNECTED,
+    EV_END_BROADCAST_AIRPLAY,
     EV_BLE,
     EV_INBOX_NOTE,
     EV_INBOX_SAVED,
@@ -185,6 +186,7 @@ typedef struct app {
     uint64_t screen_seq;
     atomic_bool screen_on, airplay_on;
     uint64_t last_airplay_audio_ms; /* protected by src_lock */
+    bool broadcast_airplay_audio, stopping_broadcast_airplay; /* protected by src_lock */
     /* A press on one photo is held back from the phone. A quick move is replayed
      * as a swipe when the button comes up. Held still, then dragged, it lifts
      * that photo onto the PC. The finger stays up until then, so Photos cannot
@@ -306,7 +308,11 @@ static void on_connected(void *user, const char *name, const char *model)
 {
     app *a = user;
     (void)model;
+    pthread_mutex_lock(&a->src_lock);
     atomic_store(&a->airplay_on, true);
+    if (atomic_load(&a->screen_on))
+        a->broadcast_airplay_audio = true;
+    pthread_mutex_unlock(&a->src_lock);
     if (!atomic_load(&a->screen_on))
         push_event(user, EV_CONNECTED, strdup(name && *name ? name : "iPhone"));
 }
@@ -316,8 +322,12 @@ static void on_audio(void *user, unsigned char compression, const uint8_t *data,
 {
     app *a = user;
     pthread_mutex_lock(&a->src_lock);
-    if (a->audio && ph_audio_push_timed(a->audio, compression, data, len, timestamp_ns) > 0)
-        a->last_airplay_audio_ms = ph_metrics_now_ms();
+    if (!a->stopping_broadcast_airplay) {
+        if (atomic_load(&a->screen_on) && !a->src.have_wifi)
+            a->broadcast_airplay_audio = true;
+        if (a->audio && ph_audio_push_timed(a->audio, compression, data, len, timestamp_ns) > 0)
+            a->last_airplay_audio_ms = ph_metrics_now_ms();
+    }
     pthread_mutex_unlock(&a->src_lock);
 }
 
@@ -346,6 +356,8 @@ static void on_disconnected(void *user)
     pthread_mutex_lock(&a->src_lock);
     atomic_store(&a->airplay_on, false);
     a->last_airplay_audio_ms = 0;
+    a->broadcast_airplay_audio = false;
+    a->stopping_broadcast_airplay = false;
     ph_audio_set_airplay_format(a->audio, 0, 0);
     ph_audio_set_airplay_volume(a->audio, 0);
     a->airplay_selected = false;
@@ -458,6 +470,21 @@ static void screen_audio(void *user, const uint8_t *pcm, size_t len, uint64_t pt
     if (a->src.current == PH_SRC_BROADCAST &&
         (!a->last_airplay_audio_ms || ph_metrics_now_ms() - a->last_airplay_audio_ms >= 2500))
         ph_audio_push_broadcast_timed(a->audio, pcm, len, pts_ns);
+    pthread_mutex_unlock(&a->src_lock);
+}
+
+static void screen_ended(void *user)
+{
+    app *a = user;
+    pthread_mutex_lock(&a->src_lock);
+    /* Leave an independent AirPlay picture active. Only close audio carried
+     * by this receiver during the broadcast the iPhone explicitly ended. */
+    if (a->broadcast_airplay_audio && !a->src.have_wifi && atomic_load(&a->airplay_on)) {
+        a->stopping_broadcast_airplay = true;
+        ph_audio_flush_airplay(a->audio);
+        push_event(a, EV_END_BROADCAST_AIRPLAY, NULL);
+    }
+    a->broadcast_airplay_audio = false;
     pthread_mutex_unlock(&a->src_lock);
 }
 
@@ -2527,6 +2554,14 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
         update_title(a);
         break;
     }
+    case EV_END_BROADCAST_AIRPLAY:
+        pthread_mutex_lock(&a->src_lock);
+        if (a->stopping_broadcast_airplay && !a->src.have_wifi)
+            ph_receiver_disconnect(a->rx);
+        else
+            a->stopping_broadcast_airplay = false;
+        pthread_mutex_unlock(&a->src_lock);
+        break;
     case EV_BLE:
         handle_ble_status(a, (const char *)e->user.data1);
         free(e->user.data1);
@@ -3772,6 +3807,7 @@ int ph_app_run(const ph_app_options *opt)
             .connected = screen_connected,
             .video = screen_video,
             .audio = screen_audio,
+            .ended = screen_ended,
             .disconnected = screen_disconnected,
         };
         atomic_init(&a.screen_on, false);

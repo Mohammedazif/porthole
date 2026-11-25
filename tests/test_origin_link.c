@@ -315,6 +315,7 @@ static bool verify_broadcast_key(void *origin, const char *key)
 }
 
 static atomic_int screen_audio_frames;
+static atomic_int screen_end_notices;
 static _Atomic uint64_t screen_audio_time, screen_video_time;
 
 static void accept_screen_video(void *user, const uint8_t *video, size_t len, bool keyframe, uint64_t pts_ns)
@@ -333,10 +334,17 @@ static void accept_screen_audio(void *user, const uint8_t *pcm, size_t len, uint
     }
 }
 
+static void accept_screen_end(void *user)
+{
+    (void)user;
+    atomic_fetch_add(&screen_end_notices, 1);
+}
+
 static void test_screen_channel(ph_origin *origin)
 {
     ph_screen_callbacks cb = {.user = origin, .authorize = verify_ticket,
-                              .video = accept_screen_video, .audio = accept_screen_audio};
+                              .video = accept_screen_video, .audio = accept_screen_audio,
+                              .ended = accept_screen_end};
     ph_screen *server = ph_screen_start(&cb);
     CHECK(server);
     int fd = open_channel(PH_SCREEN_PORT,
@@ -380,6 +388,11 @@ static void test_screen_channel(ph_origin *origin)
     CHECK(SSL_write(peer_ssl(fd), timed_audio, sizeof timed_audio) == sizeof timed_audio);
     CHECK(read_peer(fd, &ack, 1, 0) == 1 && ack == 'A');
     CHECK(atomic_load(&screen_audio_frames) == 2 && atomic_load(&screen_audio_time) == 0x188654321ULL);
+    CHECK(atomic_load(&screen_end_notices) == 0);
+    const uint8_t end[] = {0, 0, 0, 0, 4};
+    CHECK(SSL_write(peer_ssl(fd), end, sizeof end) == sizeof end);
+    CHECK(read_peer(fd, &ack, 1, 0) == 1 && ack == 'E');
+    CHECK(atomic_load(&screen_end_notices) == 1);
     close_peer(fd);
     ph_screen_stop(server);
 }

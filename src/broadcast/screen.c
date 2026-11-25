@@ -109,6 +109,13 @@ static void serve(ph_screen *s, int fd, const char *address)
 
         if (!read_all(s, fd, header, sizeof header, ph_metrics_now_ms() + frame_header_timeout_ms))
             break;
+        if (version == 3 && header[4] == 4 &&
+            header[0] == 0 && header[1] == 0 && header[2] == 0 && header[3] == 0) {
+            if (s->cb.ended)
+                s->cb.ended(s->cb.user);
+            ph_tls_write(fd, "E", 1);
+            break;
+        }
         len = ph_screen_parse_header(header, PH_SCREEN_FRAME_MAX, &type);
         if (!len || (type == 3 && version < 2)) {
             PH_LOGW("screen broadcast: bad frame header, closing");
