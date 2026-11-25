@@ -40,7 +40,10 @@ void ph_host_name(char *out, size_t len)
         if (GetComputerNameExW(formats[i], name, &count) && copy_windows_name(name, out, len))
             return;
     }
-    DWORD count = GetEnvironmentVariableW(L"COMPUTERNAME", name, (DWORD)(sizeof name / sizeof name[0]));
+    DWORD count = (DWORD)(sizeof name / sizeof name[0]);
+    if (GetComputerNameW(name, &count) && copy_windows_name(name, out, len))
+        return;
+    count = GetEnvironmentVariableW(L"COMPUTERNAME", name, (DWORD)(sizeof name / sizeof name[0]));
     if (count && count < sizeof name / sizeof name[0] && copy_windows_name(name, out, len))
         return;
 #endif

@@ -400,12 +400,47 @@ static void close_workspace_view(ph_window *w)
     click_workspace(w, PH_WORKSPACE_CLOSE);
 }
 
+static void set_clipboard_format(UINT format, const void *contents, size_t len)
+{
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, len);
+    CHECK(memory);
+    void *target = GlobalLock(memory);
+    CHECK(target);
+    memcpy(target, contents, len);
+    GlobalUnlock(memory);
+    CHECK(SetClipboardData(format, memory));
+}
+
+static void test_multiformat_clipboard(HWND window)
+{
+    const wchar_t text[] = L"Image caption";
+    UINT png = RegisterClipboardFormatW(L"PNG");
+    CHECK(png);
+    CHECK(OpenClipboard(window));
+    CHECK(EmptyClipboard());
+    set_clipboard_format(CF_UNICODETEXT, text, sizeof text);
+    set_clipboard_format(png, clipboard_image, sizeof clipboard_image);
+    CHECK(CloseClipboard());
+
+    ph_hostclip_init();
+    char kind;
+    void *data;
+    size_t len;
+    CHECK(ph_hostclip_changed(&kind, &data, &len) && kind == 'T');
+    free(data);
+    CHECK(ph_hostclip_changed(&kind, &data, &len) && kind == 'P');
+    free(data);
+    CHECK(!ph_hostclip_changed(&kind, &data, &len));
+    ph_hostclip_shutdown();
+}
+
 static void windows_visual_review(ph_window *w, SDL_Window *native, const char *dir)
 {
     test_windows_accessibility(w, native);
     SDL_SysWMinfo info;
     SDL_VERSION(&info.version);
     CHECK(SDL_GetWindowWMInfo(native, &info) && info.subsystem == SDL_SYSWM_WINDOWS);
+    test_multiformat_clipboard(info.info.win.window);
     SDL_RendererInfo renderer;
     CHECK(SDL_GetRendererInfo(SDL_GetRenderer(native), &renderer) == 0);
     printf("Windows native SDL backend: %s, renderer: %s, window DPI: %u\n",

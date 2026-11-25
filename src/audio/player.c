@@ -137,6 +137,21 @@ static void flush_locked(ph_audio *a)
     a->clock_valid = false;
 }
 
+void ph_audio_output_removed(ph_audio *a, uint32_t device)
+{
+    if (!a || !device)
+        return;
+    SDL_LockMutex(a->lock);
+    if (a->device == device) {
+        SDL_CloseAudioDevice(a->device);
+        a->device = 0;
+        a->retry_output_at = 0;
+        flush_locked(a);
+        PH_LOGI("PC audio output disconnected; will reopen the default device");
+    }
+    SDL_UnlockMutex(a->lock);
+}
+
 static bool configure_locked(ph_audio *a, unsigned char compression, unsigned short samples)
 {
     if (a->codec && compression == a->compression && samples == a->samples)
@@ -469,6 +484,8 @@ static int push_locked(ph_audio *a, unsigned char compression, const uint8_t *da
                             : compression == 2 ? 352 : compression == 8 ? 480 : 1024;
     if ((!a->codec || compression != a->compression || (negotiated && packet_samples != a->samples))
         && !configure_locked(a, compression, packet_samples))
+        goto done;
+    if (!open_output(a))
         goto done;
     if (timed) {
         action = ph_sync_audio_at(a->sync, pts_ns, 0, ph_metrics_now_ms());

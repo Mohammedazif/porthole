@@ -399,9 +399,22 @@ static void close_clipboard(void) {}
 
 #endif
 
-static char seen_kind, applied_kind;
-static uint8_t *seen, *applied;
-static size_t seen_len, applied_len;
+/* One clipboard item can expose text and PNG concurrently. */
+typedef struct clip_snapshot {
+    char kind;
+    uint8_t *data;
+    size_t len;
+} clip_snapshot;
+
+static clip_snapshot seen_text, seen_png;
+static char applied_kind;
+static uint8_t *applied;
+static size_t applied_len;
+
+static clip_snapshot *seen_for_kind(char kind)
+{
+    return kind == 'P' ? &seen_png : &seen_text;
+}
 
 static void remember(char kind, const void *data, size_t len, char *slot_kind, uint8_t **slot,
                      size_t *slot_len)
@@ -423,12 +436,19 @@ static bool same(char kind, const void *data, size_t len, char slot_kind, const 
     return slot_kind == kind && slot_len == len && slot && memcmp(slot, data, len) == 0;
 }
 
+static void remember_seen(char kind, const void *data, size_t len)
+{
+    clip_snapshot *seen = seen_for_kind(kind);
+    remember(kind, data, len, &seen->kind, &seen->data, &seen->len);
+}
+
 static bool already(char kind, const void *data, size_t len)
 {
-    if (same(kind, data, len, seen_kind, seen, seen_len))
+    const clip_snapshot *seen = seen_for_kind(kind);
+    if (same(kind, data, len, seen->kind, seen->data, seen->len))
         return true;
     if (same(kind, data, len, applied_kind, applied, applied_len)) {
-        remember(kind, data, len, &seen_kind, &seen, &seen_len);
+        remember_seen(kind, data, len);
         return true;
     }
     return false;
@@ -518,7 +538,7 @@ static int finish_clip_image(void)
         return 0;
     int result = ph_winclip_publish_image(job->image, job->clipboard_sequence);
     if (result > 0) {
-        remember('P', job->data, job->len, &seen_kind, &seen, &seen_len);
+        remember_seen('P', job->data, job->len);
         remember('P', job->data, job->len, &applied_kind, &applied, &applied_len);
     }
     free_image_job(job);
@@ -584,11 +604,14 @@ void ph_hostclip_shutdown(void)
     ph_winclip_shutdown();
 #endif
     close_clipboard();
-    free(seen);
+    free(seen_text.data);
+    free(seen_png.data);
+    seen_text = (clip_snapshot){0};
+    seen_png = (clip_snapshot){0};
     free(applied);
-    seen = applied = NULL;
-    seen_len = applied_len = 0;
-    seen_kind = applied_kind = 0;
+    applied = NULL;
+    applied_len = 0;
+    applied_kind = 0;
 }
 
 int ph_hostclip_pump(void)
@@ -638,7 +661,7 @@ bool ph_hostclip_changed(char *kind, void **data, size_t *len)
         memcpy(*data, text, n);
         *len = n;
         *kind = 'T';
-        remember('T', text, n, &seen_kind, &seen, &seen_len);
+        remember_seen('T', text, n);
 #if defined(_WIN32)
         free(text);
 #else
@@ -660,7 +683,7 @@ bool ph_hostclip_changed(char *kind, void **data, size_t *len)
             *data = png;
             *len = png_len;
             *kind = 'P';
-            remember('P', png, png_len, &seen_kind, &seen, &seen_len);
+            remember_seen('P', png, png_len);
             return true;
         }
         free(png);
@@ -674,7 +697,7 @@ bool ph_hostclip_changed(char *kind, void **data, size_t *len)
             *data = png;
             *len = png_len;
             *kind = 'P';
-            remember('P', png, png_len, &seen_kind, &seen, &seen_len);
+            remember_seen('P', png, png_len);
             return true;
         }
         free(png);
@@ -723,7 +746,7 @@ bool ph_hostclip_apply(char kind, const void *data, size_t len)
     } else {
         return false;
     }
-    remember(kind, data, len, &seen_kind, &seen, &seen_len);
+    remember_seen(kind, data, len);
     remember(kind, data, len, &applied_kind, &applied, &applied_len);
     return true;
 }

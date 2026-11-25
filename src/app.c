@@ -185,7 +185,7 @@ typedef struct app {
     ph_decoder *screen_dec; /* its own decoder, so AirPlay's keeps its place underneath */
     uint64_t screen_seq;
     atomic_bool screen_on, airplay_on;
-    uint64_t last_airplay_audio_ms; /* protected by src_lock */
+    uint64_t last_airplay_audio_ms; /* Last accepted packet, protected by src_lock. */
     bool broadcast_airplay_audio, stopping_broadcast_airplay; /* protected by src_lock */
     /* A press on one photo is held back from the phone. A quick move is replayed
      * as a swipe when the button comes up. Held still, then dragged, it lifts
@@ -325,7 +325,13 @@ static void on_audio(void *user, unsigned char compression, const uint8_t *data,
     if (!a->stopping_broadcast_airplay) {
         if (atomic_load(&a->screen_on) && !a->src.have_wifi)
             a->broadcast_airplay_audio = true;
-        if (a->audio && ph_audio_push_timed(a->audio, compression, data, len, timestamp_ns) > 0)
+        /* A separate AirPlay audio route has its own clock. Use the AirPlay
+         * video clock only when the receiver is providing the picture too. */
+        int result = a->src.have_wifi
+            ? ph_audio_push_timed(a->audio, compression, data, len, timestamp_ns)
+            : ph_audio_push(a->audio, compression, data, len);
+        /* The decoder may accept packets before producing its first PCM. */
+        if (result >= 0)
             a->last_airplay_audio_ms = ph_metrics_now_ms();
     }
     pthread_mutex_unlock(&a->src_lock);
@@ -468,7 +474,7 @@ static void screen_audio(void *user, const uint8_t *pcm, size_t len, uint64_t pt
     app *a = user;
     pthread_mutex_lock(&a->src_lock);
     if (a->src.current == PH_SRC_BROADCAST &&
-        (!a->last_airplay_audio_ms || ph_metrics_now_ms() - a->last_airplay_audio_ms >= 2500))
+        (!a->last_airplay_audio_ms || ph_metrics_now_ms() - a->last_airplay_audio_ms >= 1000))
         ph_audio_push_broadcast_timed(a->audio, pcm, len, pts_ns);
     pthread_mutex_unlock(&a->src_lock);
 }
@@ -2827,6 +2833,10 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
         return true;
 
     switch (e->type) {
+    case SDL_AUDIODEVICEREMOVED:
+        if (!e->adevice.iscapture)
+            ph_audio_output_removed(a->audio, e->adevice.which);
+        break;
     case SDL_QUIT:
         ph_xdnd_cancel();
         return false;
@@ -3142,8 +3152,6 @@ static void sync_clipboard(app *a)
         a->paste_when_ready = false;
         ph_window_set_detail(a->win, "The iPhone copy did not arrive");
     }
-    if (flags & PH_ORIGIN_CLIP_SENT)
-        ph_window_set_detail(a->win, "On the iPhone, paste with Ctrl+V");
     if (applied && !a->remote_clipboard_pending && (flags & PH_ORIGIN_CLIP_GOT)) {
         char pc[64], message[128];
         ph_origin_pc_name(pc, sizeof pc);

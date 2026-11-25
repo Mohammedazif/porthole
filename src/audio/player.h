@@ -10,6 +10,7 @@ typedef struct ph_audio ph_audio;
 /* AirPlay audio -> FFmpeg -> bounded SDL playback queue. Callbacks may arrive
  * on different network threads; the player serializes decoder/device access. */
 ph_audio *ph_audio_create(void);
+void ph_audio_output_removed(ph_audio *audio, uint32_t device);
 void ph_audio_set_airplay_format(ph_audio *audio, unsigned char compression, unsigned short samples);
 void ph_audio_set_airplay_volume(ph_audio *audio, float decibels);
 void ph_audio_flush_airplay(ph_audio *audio);
