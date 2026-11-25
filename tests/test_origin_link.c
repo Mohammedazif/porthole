@@ -174,6 +174,8 @@ static int reconnect_phone(const char *token)
     CHECK(!strcmp(response, "SYNC READY"));
     line(fd, response, sizeof response);
     CHECK(!strcmp(response, "INPUT READY"));
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "AUDIO READY"));
     say(fd, "FILES 2\nRESUME?\n");
     line(fd, response, sizeof response);
     CHECK(!strcmp(response, "RESUME 2"));
@@ -685,6 +687,8 @@ int main(int argc, char **argv)
     CHECK(!strcmp(reply, "SYNC READY"));
     line(phone, reply, sizeof reply);
     CHECK(!strcmp(reply, "INPUT READY"));
+    line(phone, reply, sizeof reply);
+    CHECK(!strcmp(reply, "AUDIO READY"));
     const char *key = "9b60dadcd5a15f46fd9183e0b144db65";
     snprintf(reply, sizeof reply, "PAIR %s\n", key);
     say(phone, reply);
@@ -697,6 +701,32 @@ int main(int argc, char **argv)
     say(phone, reply);
     line(phone, reply, sizeof reply);
     CHECK(!strcmp(reply, "SYNC OK 1eecc050-8818-4079-9fb0-2e0143e55d96 1"));
+    /* The phone's "Include app audio" reaches the PC, which confirms it. */
+    CHECK(ph_origin_phone_audio(o) == -1);
+    snprintf(reply, sizeof reply, "AUDIO %s 0\n", request);
+    say(phone, reply);
+    line(phone, reply, sizeof reply);
+    CHECK(!strcmp(reply, "AUDIO OK 1eecc050-8818-4079-9fb0-2e0143e55d96 0"));
+    CHECK(ph_origin_phone_audio(o) == 0);
+    snprintf(reply, sizeof reply, "AUDIO %s 1\n", request);
+    say(phone, reply);
+    line(phone, reply, sizeof reply);
+    CHECK(!strcmp(reply, "AUDIO OK 1eecc050-8818-4079-9fb0-2e0143e55d96 1"));
+    CHECK(ph_origin_phone_audio(o) == 1);
+    unsigned serial = ph_origin_phone_audio_serial(o);
+    /* Turning sound off on the PC turns it off on the phone. */
+    ph_origin_set_phone_audio(o, false);
+    line(phone, reply, sizeof reply);
+    CHECK(!strcmp(reply, "AUDIO SET 0"));
+    CHECK(ph_origin_phone_audio(o) == 0 && ph_origin_phone_audio_serial(o) == serial);
+    snprintf(reply, sizeof reply, "AUDIO %s 1\n", request);
+    say(phone, reply);
+    line(phone, reply, sizeof reply);
+    CHECK(!strcmp(reply, "AUDIO OK 1eecc050-8818-4079-9fb0-2e0143e55d96 1"));
+    CHECK(ph_origin_phone_audio(o) == 1 && ph_origin_phone_audio_serial(o) == serial + 1);
+    CHECK(ph_origin_phone_audio(NULL) == -1);
+    CHECK(ph_origin_phone_audio_serial(NULL) == 0);
+    ph_origin_set_phone_audio(NULL, true);
     char device_name[64];
     ph_origin_phone_name(o, device_name, sizeof device_name);
     CHECK(!strcmp(device_name, "Zoë’s iPhone"));

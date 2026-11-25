@@ -16,7 +16,7 @@
 #include <time.h>
 #endif
 
-uint64_t ph_metrics_now_ms(void)
+uint64_t ph_metrics_now_us(void)
 {
 #ifdef _WIN32
     LARGE_INTEGER ticks, frequency;
@@ -24,13 +24,18 @@ uint64_t ph_metrics_now_ms(void)
         || ticks.QuadPart < 0 || frequency.QuadPart <= 0)
         return 0;
     uint64_t counter = (uint64_t)ticks.QuadPart, rate = (uint64_t)frequency.QuadPart;
-    return counter / rate * 1000 + counter % rate * 1000 / rate;
+    return counter / rate * 1000000 + counter % rate * 1000000 / rate;
 #else
     struct timespec now;
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
         return 0;
-    return (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+    return (uint64_t)now.tv_sec * 1000000 + (uint64_t)now.tv_nsec / 1000;
 #endif
+}
+
+uint64_t ph_metrics_now_ms(void)
+{
+    return ph_metrics_now_us() / 1000;
 }
 
 void ph_metrics_reset(ph_metrics *m)

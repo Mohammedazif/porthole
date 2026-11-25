@@ -18,10 +18,19 @@ bool ph_audio_configure(ph_audio *audio, unsigned char compression, unsigned sho
 /* Compression: 2 ALAC, 4 AAC-LC, 8 AAC-ELD. Returns decoded sample frames, or -1
  * on error. The input is copied and is only needed for the duration of this call. */
 int ph_audio_push(ph_audio *audio, unsigned char compression, const uint8_t *data, size_t len);
-/* 44.1 kHz stereo signed 16-bit little-endian ReplayKit application audio. */
+/* AirPlay audio without an AirPlay picture: due_in_us is how long until the
+ * iPhone expects it heard (when it shows the matching picture itself). While
+ * the shared screen is drawn, the sound also waits for that picture's delay.
+ * Out-of-range values play on arrival. */
+int ph_audio_push_scheduled(ph_audio *audio, unsigned char compression, const uint8_t *data,
+                            size_t len, int64_t due_in_us);
+/* 44.1 kHz stereo signed 16-bit little-endian ReplayKit application audio.
+ * With a capture time, it is heard when a frame captured then is drawn. */
 int ph_audio_push_broadcast(ph_audio *audio, const uint8_t *pcm, size_t len);
 int ph_audio_push_broadcast_timed(ph_audio *audio, const uint8_t *pcm, size_t len, uint64_t pts_ns);
+/* A shared-screen frame with this capture time arrived from the network. */
 void ph_audio_note_broadcast_video_received(ph_audio *audio, uint64_t pts_ns);
+/* A shared-screen frame was drawn. Zero ends the broadcast timing. */
 void ph_audio_note_broadcast_video(ph_audio *audio, uint64_t pts_ns);
 void ph_audio_set_volume(ph_audio *audio, float decibels);
 void ph_audio_flush(ph_audio *audio);

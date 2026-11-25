@@ -186,6 +186,9 @@ typedef struct app {
     uint64_t screen_seq;
     atomic_bool screen_on, airplay_on;
     uint64_t last_airplay_audio_ms; /* Last accepted packet, protected by src_lock. */
+    /* The PC sound switch and the iPhone's "Include app audio" follow each other. */
+    unsigned phone_audio_serial;
+    bool pc_muted_seen;
     bool broadcast_airplay_audio, stopping_broadcast_airplay; /* protected by src_lock */
     /* A press on one photo is held back from the phone. A quick move is replayed
      * as a swipe when the button comes up. Held still, then dragged, it lifts
@@ -318,18 +321,30 @@ static void on_connected(void *user, const char *name, const char *model)
 }
 
 static void on_audio(void *user, unsigned char compression, const uint8_t *data, size_t len,
-                     uint64_t timestamp_ns)
+                     uint64_t timestamp_ns, int64_t due_in_us)
 {
     app *a = user;
+    bool phone_audio_off = ph_origin_phone_audio(a->origin) == 0;
     pthread_mutex_lock(&a->src_lock);
+    /* "Include app audio" is off on the iPhone, but its output is this PC.
+     * Close the AirPlay audio so iOS plays the sound on the phone again. */
+    if (phone_audio_off && atomic_load(&a->screen_on) && !a->src.have_wifi &&
+        !a->stopping_broadcast_airplay && atomic_load(&a->airplay_on)) {
+        PH_LOGI("iPhone app audio is off; returning AirPlay sound to the iPhone");
+        a->stopping_broadcast_airplay = true;
+        ph_audio_flush_airplay(a->audio);
+        push_event(a, EV_END_BROADCAST_AIRPLAY, NULL);
+    }
     if (!a->stopping_broadcast_airplay) {
         if (atomic_load(&a->screen_on) && !a->src.have_wifi)
             a->broadcast_airplay_audio = true;
-        /* A separate AirPlay audio route has its own clock. Use the AirPlay
-         * video clock only when the receiver is providing the picture too. */
+        /* With the AirPlay picture, match the sound to its video timestamps.
+         * As an audio route the iPhone holds its own picture back about two
+         * seconds for the speaker, so the sound waits for its due time (and for
+         * the shared screen's delay, when that is the picture shown). */
         int result = a->src.have_wifi
             ? ph_audio_push_timed(a->audio, compression, data, len, timestamp_ns)
-            : ph_audio_push(a->audio, compression, data, len);
+            : ph_audio_push_scheduled(a->audio, compression, data, len, due_in_us);
         /* The decoder may accept packets before producing its first PCM. */
         if (result >= 0)
             a->last_airplay_audio_ms = ph_metrics_now_ms();
@@ -352,6 +367,7 @@ static void on_audio_volume(void *user, float decibels)
 static void on_audio_flush(void *user)
 {
     app *a = user;
+    PH_LOGD("AirPlay audio flush (pause, seek or a new item)");
     ph_audio_flush_airplay(a->audio);
 }
 
@@ -472,9 +488,13 @@ static void screen_video(void *user, const uint8_t *annexb, size_t len, bool key
 static void screen_audio(void *user, const uint8_t *pcm, size_t len, uint64_t pts_ns)
 {
     app *a = user;
+    if (ph_origin_phone_audio(a->origin) == 0)
+        return; /* "Include app audio" is off on the iPhone */
     pthread_mutex_lock(&a->src_lock);
+    /* The AirPlay route carries the same sound. It arrives about two seconds
+     * before it is due, so let it finish before ReplayKit's copy takes over. */
     if (a->src.current == PH_SRC_BROADCAST &&
-        (!a->last_airplay_audio_ms || ph_metrics_now_ms() - a->last_airplay_audio_ms >= 1000))
+        (!a->last_airplay_audio_ms || ph_metrics_now_ms() - a->last_airplay_audio_ms >= 3000))
         ph_audio_push_broadcast_timed(a->audio, pcm, len, pts_ns);
     pthread_mutex_unlock(&a->src_lock);
 }
@@ -537,6 +557,31 @@ static void sync_window_state(app *a)
     ph_window_set_companion(a->win, a->companion_connected, ph_polish_recording(a->polish),
                             (int)lroundf(100 * powf(10, sound.volume_db / 20)));
     ph_window_set_live_state(a->win, a->feed_mode, a->controls_paused, sound_on);
+}
+
+/* Turning sound off on either the PC or the iPhone turns it off on both. */
+static void sync_phone_audio(app *a)
+{
+    struct ph_audio_settings sound;
+
+    if (!a->audio || !a->origin || !ph_audio_settings(a->audio, &sound))
+        return;
+    unsigned serial = ph_origin_phone_audio_serial(a->origin);
+    if (serial != a->phone_audio_serial) {
+        a->phone_audio_serial = serial;
+        int phone = ph_origin_phone_audio(a->origin);
+        if (phone >= 0 && sound.muted != (phone == 0)) {
+            ph_audio_set_muted(a->audio, phone == 0);
+            ph_window_set_detail(a->win, phone ? "Sound turned on from the iPhone"
+                                               : "Sound turned off from the iPhone");
+        }
+        a->pc_muted_seen = phone >= 0 ? phone == 0 : sound.muted;
+        return;
+    }
+    if (sound.muted != a->pc_muted_seen) {
+        a->pc_muted_seen = sound.muted;
+        ph_origin_set_phone_audio(a->origin, !sound.muted);
+    }
 }
 
 static void update_title(app *a)
@@ -3972,6 +4017,7 @@ int ph_app_run(const ph_app_options *opt)
                 finish_pull(&a);
         }
 #endif
+        sync_phone_audio(&a);
         sync_window_state(&a);
         if (ph_window_take_cancel(a.win) && a.origin)
             ph_origin_cancel_push(a.origin);

@@ -52,6 +52,8 @@ typedef struct ph_metrics_snapshot {
 } ph_metrics_snapshot;
 
 uint64_t ph_metrics_now_ms(void);
+/* The same monotonic clock in microseconds. */
+uint64_t ph_metrics_now_us(void);
 void ph_metrics_reset(ph_metrics *metrics);
 void ph_metrics_frame(ph_metrics *metrics, uint64_t received_ms, uint64_t decoded_ms,
                        uint64_t presented_ms);

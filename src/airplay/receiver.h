@@ -15,9 +15,11 @@ typedef struct ph_receiver_callbacks {
     /* One H.264 access unit in Annex-B format (start codes; SPS/PPS precede keyframes).
      * Called on a network thread; `data` is only valid during the call. */
     void (*video)(void *user, const uint8_t *data, size_t len, uint64_t timestamp_ns);
-    /* Decrypted compressed audio and its negotiated format, on network threads. */
+    /* Decrypted compressed audio and its negotiated format, on network threads.
+     * timestamp_ns is the iPhone's clock. due_in_us is how long from now until
+     * the iPhone expects it heard, or INT64_MIN before the clocks are synced. */
     void (*audio)(void *user, unsigned char compression, const uint8_t *data, size_t len,
-                  uint64_t timestamp_ns);
+                  uint64_t timestamp_ns, int64_t due_in_us);
     void (*audio_format)(void *user, unsigned char compression, unsigned short samples);
     void (*audio_volume)(void *user, float decibels);
     void (*audio_flush)(void *user);

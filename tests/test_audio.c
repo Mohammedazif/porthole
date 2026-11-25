@@ -304,6 +304,66 @@ static void sync_queue(ph_audio *audio)
     av_packet_free(&packet);
 }
 
+/* AirPlay sound beside the shared screen waits for the moment the iPhone
+ * expects it heard; the device queue stays short; late sound is skipped. */
+static void scheduled_queue(ph_audio *audio)
+{
+    unsigned short samples = 0;
+    AVPacket *packet = one_aac_packet(&samples);
+    struct ph_audio_settings settings;
+
+    CHECK(packet && samples);
+    if (!packet)
+        return;
+    const uint8_t *data = packet->data;
+    size_t size = (size_t)packet->size;
+    ph_audio_set_airplay_format(audio, 4, samples);
+    ph_audio_set_sync_offset_ms(audio, 0);
+    ph_audio_set_muted(audio, false);
+    ph_audio_note_broadcast_video(audio, 0);
+    ph_audio_flush(audio);
+
+    CHECK(ph_audio_push_scheduled(audio, 4, data, size, 2000000) > 0);
+    CHECK(ph_audio_queued_ms(audio) == 0);
+    CHECK(ph_audio_settings(audio, &settings) && settings.queued_ms >= 20);
+    ph_audio_pump(audio, 0);
+    CHECK(ph_audio_queued_ms(audio) == 0);
+
+    /* Nearly due: a little silence, then the sound. */
+    ph_audio_flush(audio);
+    CHECK(ph_audio_push_scheduled(audio, 4, data, size, 40000) > 0);
+    CHECK(ph_audio_queued_ms(audio) >= 20);
+
+    /* Half a second late: skipped rather than played behind the picture. */
+    ph_audio_flush(audio);
+    CHECK(ph_audio_push_scheduled(audio, 4, data, size, -500000) > 0);
+    CHECK(ph_audio_settings(audio, &settings) && settings.queued_ms == 0);
+
+    /* Before the AirPlay clocks are synced the sound plays as it arrives. */
+    ph_audio_flush(audio);
+    CHECK(ph_audio_push_scheduled(audio, 4, data, size, INT64_MIN) > 0);
+    CHECK(ph_audio_queued_ms(audio) > 0);
+
+    /* A second of contiguous sound: only about 80 ms reaches the device. */
+    ph_audio_flush(audio);
+    for (int i = 0; i < 44; i++)
+        CHECK(ph_audio_push_scheduled(audio, 4, data, size,
+                                      (int64_t)i * samples * 1000000 / 44100) > 0);
+    CHECK(ph_audio_queued_ms(audio) > 0 && ph_audio_queued_ms(audio) <= 80 + 30);
+    CHECK(ph_audio_settings(audio, &settings) && settings.queued_ms >= 800);
+
+    ph_audio_flush(audio);
+    ph_audio_set_muted(audio, true);
+    CHECK(ph_audio_push_scheduled(audio, 4, data, size, 40000) > 0);
+    CHECK(ph_audio_settings(audio, &settings) && settings.queued_ms == 0);
+    ph_audio_set_muted(audio, false);
+    CHECK(ph_audio_push_scheduled(NULL, 4, data, size, 0) == -1);
+    CHECK(ph_audio_push_scheduled(audio, 4, NULL, 0, 0) == -1);
+    ph_audio_set_airplay_format(audio, 0, 0);
+    ph_audio_flush(audio);
+    av_packet_free(&packet);
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
@@ -324,17 +384,29 @@ int main(int argc, char **argv)
     sync_queue(audio);
     ph_audio_flush(audio);
     uint8_t pcm[4096] = {1};
-    const uint64_t first_picture = 1000000000ULL;
+    const uint64_t capture = 1000000000ULL;
+    struct ph_audio_settings settings;
+    scheduled_queue(audio);
     ph_audio_note_broadcast_video(audio, 0);
-    CHECK(ph_audio_push_broadcast_timed(audio, pcm, sizeof pcm, first_picture) == 0);
-    ph_audio_note_broadcast_video_received(audio, first_picture);
-    ph_audio_note_broadcast_video(audio, first_picture);
-    CHECK(ph_audio_push_broadcast_timed(audio, pcm, sizeof pcm, first_picture) == 1024);
-    ph_audio_note_broadcast_video_received(audio, first_picture + 40000000ULL);
-    SDL_Delay(260);
-    CHECK(ph_audio_push_broadcast_timed(audio, pcm, sizeof pcm, first_picture + 260000000ULL) == 0);
-    ph_audio_note_broadcast_video(audio, first_picture + 40000000ULL);
-    CHECK(ph_audio_push_broadcast_timed(audio, pcm, sizeof pcm, first_picture + 40000000ULL) == 1024);
+    ph_audio_flush(audio);
+    /* Before a shared-screen frame is drawn, there is nothing to match. */
+    CHECK(ph_audio_push_broadcast_timed(audio, pcm, sizeof pcm, capture) == 1024);
+    CHECK(ph_audio_queued_ms(audio) > 0);
+    /* Sound plays when a frame captured at the same moment was drawn: at once
+     * for this frame's time, a second later for sound captured a second later. */
+    ph_audio_flush(audio);
+    ph_audio_note_broadcast_video_received(audio, capture);
+    ph_audio_note_broadcast_video(audio, capture);
+    CHECK(ph_audio_push_broadcast_timed(audio, pcm, sizeof pcm, capture) == 1024);
+    uint32_t queued = ph_audio_queued_ms(audio);
+    CHECK(queued > 0);
+    CHECK(ph_audio_push_broadcast_timed(audio, pcm, sizeof pcm, capture + 1000000000ULL) == 1024);
+    CHECK(ph_audio_queued_ms(audio) <= queued);
+    CHECK(ph_audio_settings(audio, &settings) && settings.queued_ms >= 20);
+    /* Sound captured well before the drawn picture is skipped. */
+    ph_audio_flush(audio);
+    CHECK(ph_audio_push_broadcast_timed(audio, pcm, sizeof pcm, capture - 500000000ULL) == 1024);
+    CHECK(ph_audio_settings(audio, &settings) && settings.queued_ms == 0);
     ph_audio_note_broadcast_video(audio, 0);
     CHECK(ph_audio_push_broadcast(audio, pcm, 5) < 0);
     CHECK(ph_audio_push_broadcast(audio, pcm, sizeof pcm) == 1024);

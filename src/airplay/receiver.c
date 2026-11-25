@@ -10,6 +10,7 @@
 #include "dnssd.h"
 #include "logger.h"
 #include "raop.h"
+#include "raop_ntp.h"
 #include "stream.h"
 
 #include "core/config.h"
@@ -94,12 +95,25 @@ static void cb_video_process(void *cls, raop_ntp_t *ntp, video_decode_struct *da
         r->cb.video(r->cb.user, data->data, (size_t)data->data_len, data->ntp_time_remote);
 }
 
+/* The iPhone expects AirPlay audio to be heard this long after UxPlay's
+ * timestamp: the "Audio-Latency" of 11025 frames that UxPlay's RECORD reply
+ * reports. shairport-sync adds the same fixed offset to iOS's 77175-frame
+ * (1.75 s) stream latency, two seconds in all. The iPhone delays its own video
+ * by that total, so sound played on arrival runs about two seconds ahead. */
+#define AIRPLAY_OUTPUT_LATENCY_NS 250000000LL
+
 static void cb_audio_process(void *cls, raop_ntp_t *ntp, audio_decode_struct *data)
 {
     ph_receiver *r = self(cls);
     (void)ntp;
-    if (r->cb.audio && data->data_len > 0)
-        r->cb.audio(r->cb.user, data->ct, data->data, (size_t)data->data_len, data->ntp_time_remote);
+    if (!r->cb.audio || data->data_len <= 0)
+        return;
+    int64_t due_in_us = INT64_MIN; /* before the first clock sync */
+    if (data->ntp_time_local)
+        due_in_us = ((int64_t)data->ntp_time_local - (int64_t)raop_ntp_get_local_time()
+                     + AIRPLAY_OUTPUT_LATENCY_NS) / 1000;
+    r->cb.audio(r->cb.user, data->ct, data->data, (size_t)data->data_len, data->ntp_time_remote,
+                due_in_us);
 }
 
 static void cb_audio_flush(void *cls)

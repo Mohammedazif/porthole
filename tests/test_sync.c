@@ -103,17 +103,57 @@ int main(void)
     ph_sync_set_offset_ms(sync, 0);
     expect(sync, t + 541 * ns, PH_SYNC_HOLD, 200);
 
-    action = ph_sync_broadcast_audio_at(t, 1000, t + 50 * ns, 1010, 15, 0);
-    CHECK(action.kind == PH_SYNC_HOLD && action.hold_or_drop_ms == 25);
-    action = ph_sync_broadcast_audio_at(t, 1000, t + 50 * ns, 1010, 35, 0);
-    CHECK(action.kind == PH_SYNC_PLAY); /* the speaker queue already covers the lead */
-    action = ph_sync_broadcast_audio_at(t, 1000, t, 1200, 0, 0);
-    CHECK(action.kind == PH_SYNC_DROP); /* do not replay audio after the picture stalls */
-    action = ph_sync_broadcast_audio_at(t, 1000, t + 500 * ns, 1500, 0, 0);
-    CHECK(action.kind == PH_SYNC_PLAY); /* a still screen does not require fresh frames */
-    action = ph_sync_broadcast_audio_at(t, 1000, t + 500 * ns, 1010, 0, 0);
-    CHECK(action.kind == PH_SYNC_DROP); /* audio cannot run far ahead of the picture */
-    CHECK(ph_sync_broadcast_audio_at(0, 0, t, 1000, 0, 0).kind == PH_SYNC_DROP);
+    /* Shared screen: the PC clock reads 9000 ms when the iPhone captures t.
+     * Frames arrive 40-50 ms later and are drawn 120-130 ms later. */
+    ph_av_delay d;
+    int64_t local = 0;
+    int video = 0;
+    ph_av_delay_reset(&d);
+    CHECK(!ph_av_delay_local_us(&d, t, &local));
+    CHECK(!ph_av_delay_video_ms(&d, 30, &video));
+    for (uint64_t i = 0; i < 20; i++) {
+        ph_av_delay_arrived(&d, t + i * 40 * ns, 9000 + i * 40 + 40 + (i % 2) * 10);
+        ph_av_delay_presented(&d, t + i * 40 * ns, 9000 + i * 40 + 120 + (i % 3) * 5);
+    }
+    CHECK(ph_av_delay_local_us(&d, t, &local) && local == 9120 * 1000);
+    CHECK(ph_av_delay_local_us(&d, t + 5 * ns, &local) && local == 9125 * 1000);
+    /* Drawn 120 ms after a fastest arrival of 40 ms, which took about 30 ms. */
+    CHECK(ph_av_delay_video_ms(&d, 30, &video) && video == 110);
+    /* Small jitter keeps the delay; a lasting change moves it. */
+    for (uint64_t i = 20; i < 40; i++)
+        ph_av_delay_presented(&d, t + i * 40 * ns, 9000 + i * 40 + 135);
+    CHECK(ph_av_delay_local_us(&d, t, &local) && local == 9120 * 1000);
+    for (uint64_t i = 40; i < 60; i++)
+        ph_av_delay_presented(&d, t + i * 40 * ns, 9000 + i * 40 + 300);
+    CHECK(ph_av_delay_local_us(&d, t, &local) && local == 9300 * 1000);
+    CHECK(ph_av_delay_video_ms(&d, 30, &video) && video == 290);
+    /* A capture clock running backwards is a new broadcast. */
+    ph_av_delay_presented(&d, t - 5000 * ns, 20000);
+    CHECK(ph_av_delay_local_us(&d, t - 5000 * ns, &local) && local == 20000 * 1000);
+    CHECK(!ph_av_delay_video_ms(&d, 30, &video));
+    /* ReplayKit audio arriving 50 ms after its picture would be drawn waits
+     * for its own arrival plus margin, but never more than 200 ms past it. */
+    ph_av_delay_reset(&d);
+    CHECK(!ph_av_delay_audio_us(&d, t, 60, &local));
+    ph_av_delay_audio_arrived(&d, t, 9150);
+    CHECK(ph_av_delay_audio_us(&d, t, 60, &local) && local == 9210 * 1000);
+    ph_av_delay_presented(&d, t, 9100);
+    CHECK(ph_av_delay_audio_us(&d, t, 60, &local) && local == 9210 * 1000);
+    ph_av_delay_audio_arrived(&d, t + 10 * ns, 9020);
+    CHECK(ph_av_delay_audio_us(&d, t, 60, &local) && local == 9210 * 1000);
+    ph_av_delay_audio_arrived(&d, t, 9700);
+    CHECK(ph_av_delay_audio_us(&d, t, 60, &local) && local == 9300 * 1000);
+    /* Early audio still follows the picture. */
+    ph_av_delay_reset(&d);
+    ph_av_delay_presented(&d, t, 9100);
+    ph_av_delay_audio_arrived(&d, t, 9010);
+    CHECK(ph_av_delay_audio_us(&d, t, 60, &local) && local == 9100 * 1000);
+    CHECK(!ph_av_delay_audio_us(NULL, t, 60, &local));
+    ph_av_delay_audio_arrived(NULL, t, 1);
+    ph_av_delay_arrived(NULL, t, 1);
+    ph_av_delay_presented(NULL, t, 1);
+    ph_av_delay_reset(NULL);
+    CHECK(!ph_av_delay_local_us(NULL, t, &local));
 
     ph_sync_note_video(NULL, t);
     ph_sync_reset(NULL);
