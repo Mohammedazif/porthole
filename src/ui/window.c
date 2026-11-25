@@ -24,6 +24,7 @@
 
 #define RESIZE_SETTLE_MS 400 /* a new picture size must last this long before resizing */
 #define SCALE_POLL_MS 2000
+#define STARTUP_RECONNECT_MS 20000
 #define WAITING_W 1024
 #define WAITING_H 680
 #define MIN_WINDOW_W 320
@@ -57,6 +58,7 @@ struct ph_window {
     char notice[160];
     Uint64 notice_until;
     bool workspace_drawn, companion_connected, recording, dark, clipboard_available;
+    Uint64 startup_reconnect_until;
     unsigned unread_files;
     char unread_key[80];
     SDL_Texture *texture;
@@ -1894,6 +1896,8 @@ void ph_window_show(ph_window *w)
 {
     if (!w || !w->window)
         return;
+    if (!w->code_open && w->share_checked && !w->companion_connected)
+        w->startup_reconnect_until = SDL_GetTicks64() + STARTUP_RECONNECT_MS;
     ph_window_redraw(w);
     SDL_ShowWindow(w->window);
 }
@@ -2078,7 +2082,9 @@ void ph_window_set_code_open(ph_window *w, bool open)
     if (!w || w->code_open == open)
         return;
     w->code_open = open;
-    if (!open)
+    if (open)
+        w->startup_reconnect_until = 0;
+    else
         w->pairing_visible = false;
     ph_window_redraw(w);
 }
@@ -2756,6 +2762,10 @@ void ph_window_tick(ph_window *w)
 {
     const Uint64 now = SDL_GetTicks64();
     refresh_content_scale(w, now);
+    if (w->startup_reconnect_until && now >= w->startup_reconnect_until) {
+        w->startup_reconnect_until = 0;
+        ph_window_redraw(w);
+    }
     if (w->notice_until && now >= w->notice_until) {
         w->notice_until = 0;
         ph_window_redraw(w);
@@ -3130,6 +3140,8 @@ void ph_window_set_companion(ph_window *w, bool connected, bool recording, int v
         (w->companion_connected == connected && w->recording == recording && w->volume == volume))
         return;
     w->companion_connected = connected;
+    if (connected)
+        w->startup_reconnect_until = 0;
     w->recording = recording;
     w->volume = volume;
     ph_window_redraw(w);
@@ -3177,6 +3189,7 @@ static void draw_workspace(ph_window *w, SDL_Rect area, ph_workspace_view page)
 {
     ph_workspace_live live = {.paired = !w->code_open,
                               .connected = w->companion_connected,
+                              .waiting_for_phone = w->startup_reconnect_until != 0,
                               .mirroring = w->has_picture,
                               .controls = w->control_ready,
                               .paused = w->paused,

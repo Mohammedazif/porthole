@@ -42,6 +42,7 @@ bool ph_origin_choose_phone(ph_origin *origin, const char *id);
 bool ph_origin_rename_phone(ph_origin *origin, const char *id, const char *name);
 bool ph_origin_remove_saved_phone(ph_origin *origin, const char *id);
 bool ph_origin_selected_id(ph_origin *origin, char id[65]);
+bool ph_origin_companion_connected(ph_origin *origin);
 unsigned ph_origin_generation(ph_origin *origin, const char *ticket);
 unsigned ph_origin_inbox_generation(ph_origin *origin, const char *ticket);
 void ph_origin_screen_live(ph_origin *origin, unsigned generation, bool live);

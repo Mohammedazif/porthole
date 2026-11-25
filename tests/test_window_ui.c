@@ -823,7 +823,9 @@ int main(int argc, char **argv)
     click_at(w, tx, ty);
     CHECK(!ph_window_help_visible(w));
     ph_window_set_code_open(w, false);
+    CHECK(!ph_workspace_target(workspace, PH_WORKSPACE_SEND_FILES, &tx, &ty));
     ph_window_set_companion(w, true, false, 100);
+    CHECK(ph_workspace_target(workspace, PH_WORKSPACE_SEND_FILES, &tx, &ty));
     ph_window_set_phone_name(w, "iPhone");
     ph_history *history = ph_history_open(NULL);
     ph_workspace_set_history(workspace, history);

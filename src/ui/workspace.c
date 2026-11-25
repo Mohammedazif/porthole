@@ -1516,7 +1516,9 @@ static void home(ph_workspace *u)
     fitted_label(u, u->live.phone[0] ? u->live.phone : "iPhone", x + 66, y,
                  width - (width < 550 ? 76 : 348), 28, true, u->ink);
     status_dot(u, x + 66, y + 44, u->live.connected);
-    text(u, u->live.connected ? "Connected" : "Disconnected", x + 80, y + 38, 100, 12, false,
+    const char *status = u->live.connected ? "Connected"
+                         : u->live.waiting_for_phone ? "Waiting for iPhone" : "Disconnected";
+    text(u, status, x + 80, y + 38, 132, 12, false,
          u->live.connected ? u->positive : u->muted);
     if (u->live.connected)
         text(u, "Wi-Fi", x + 154, y + 38, 55, 12, false, u->muted);
@@ -2006,7 +2008,9 @@ static int device_row(ph_workspace *u, int x, int y, int width, int index)
                    : "AirPlay · Screen only",
          x + 14, y + 35, width - 28, 12, false, u->muted);
     const char *status = connected ? "Connected" : sharing ? "Screen sharing"
-                       : companion && d && !d->active ? "Saved" : "Disconnected";
+                       : companion && d && !d->active ? "Saved"
+                       : companion && u->live.waiting_for_phone ? "Waiting for iPhone"
+                                                               : "Disconnected";
     text(u, status, x + 14, y + 56, width - 28, 11, false,
          connected || sharing ? u->positive : u->muted);
     int dx = x + 12, dy = y + 83;
@@ -2209,7 +2213,9 @@ static int statistics_settings(ph_workspace *u, int x, int y, int width)
     setting_row session[] = {
         value_row("Device", NULL, u->live.phone[0] ? u->live.phone : "—"),
         value_row("Connection", NULL, u->live.connected ? "Wi-Fi"
-                                     : u->live.mirroring ? "Screen connected" : "Disconnected"),
+                                     : u->live.mirroring ? "Screen connected"
+                                     : u->live.waiting_for_phone ? "Waiting for iPhone"
+                                                                 : "Disconnected"),
         value_row("Screen sharing", NULL, u->live.mirroring ? "Active" : "Inactive"),
         value_row("Bluetooth input", NULL, u->live.controls_connected ? "Active" : "Inactive")
     };

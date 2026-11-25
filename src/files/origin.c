@@ -472,6 +472,16 @@ static bool paired_client(const ph_origin *o)
     return o->have_client && o->client_generation == o->pairing_generation && o->reconnect_key[0];
 }
 
+bool ph_origin_companion_connected(ph_origin *o)
+{
+    if (!o)
+        return false;
+    pthread_mutex_lock(&o->lock);
+    bool connected = paired_client(o);
+    pthread_mutex_unlock(&o->lock);
+    return connected;
+}
+
 static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consumed)
 {
     char kind;
@@ -1901,7 +1911,7 @@ void ph_origin_sessions(ph_origin *o, ph_session_state *state)
                  phone->alias[0] ? phone->alias : phone->remote[0] ? phone->remote : "iPhone");
         row->companion = true;
         row->active = selected;
-        row->connected = selected && o->have_client;
+        row->connected = selected && paired_client(o);
         row->screen_sharing = selected && o->screen_live;
     }
     pthread_mutex_unlock(&o->lock);

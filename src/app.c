@@ -520,6 +520,19 @@ static bool setup_controls_ready(const app *a)
                : a->input.enabled;
 }
 
+static void sync_window_state(app *a)
+{
+    struct ph_audio_settings sound = {0};
+    bool sound_on = !ph_audio_settings(a->audio, &sound) || !sound.muted;
+    ph_control_policy policy = ph_origin_control_policy(a->origin);
+    a->companion_connected = ph_origin_companion_connected(a->origin);
+    ph_window_set_input_policy(a->win, a->link && !a->link_stopping &&
+                                         !strcmp(a->ble_status, "on"), policy);
+    ph_window_set_companion(a->win, a->companion_connected, ph_polish_recording(a->polish),
+                            (int)lroundf(100 * powf(10, sound.volume_db / 20)));
+    ph_window_set_live_state(a->win, a->feed_mode, a->controls_paused, sound_on);
+}
+
 static void update_title(app *a)
 {
     char title[320];
@@ -2827,7 +2840,11 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
             ph_window_keep_aspect(a->win);
         if (e->window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED)
             ph_window_display_changed(a->win);
-        else if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+        else if (e->window.event == SDL_WINDOWEVENT_SHOWN ||
+                 e->window.event == SDL_WINDOWEVENT_RESTORED) {
+            sync_window_state(a);
+            ph_window_redraw(a->win);
+        } else if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
             e->window.event == SDL_WINDOWEVENT_EXPOSED ||
             e->window.event == SDL_WINDOWEVENT_FOCUS_GAINED)
             ph_window_redraw(a->win);
@@ -3841,6 +3858,7 @@ int ph_app_run(const ph_app_options *opt)
     PH_LOGI("waiting for the iPhone: connect in Porthole, then tap Share screen");
     tick_control_connection(&a);
     update_title(&a);
+    sync_window_state(&a);
     ph_window_show(a.win);
     if (opt->usb && pthread_create(&a.usb_thread, NULL, usb_thread_main, &a) == 0)
         a.usb_started = true;
@@ -3946,17 +3964,7 @@ int ph_app_run(const ph_app_options *opt)
                 finish_pull(&a);
         }
 #endif
-        {
-            struct ph_audio_settings sound = {0};
-            bool sound_on = !a.audio || !ph_audio_settings(a.audio, &sound) || !sound.muted;
-            ph_control_policy policy = ph_origin_control_policy(a.origin);
-            a.companion_connected = policy.connected;
-            ph_window_set_input_policy(a.win, a.link && !a.link_stopping &&
-                                              !strcmp(a.ble_status, "on"), policy);
-            ph_window_set_companion(a.win, a.companion_connected, ph_polish_recording(a.polish),
-                                    (int)lroundf(100 * powf(10, sound.volume_db / 20)));
-            ph_window_set_live_state(a.win, a.feed_mode, a.controls_paused, sound_on);
-        }
+        sync_window_state(&a);
         if (ph_window_take_cancel(a.win) && a.origin)
             ph_origin_cancel_push(a.origin);
         const char *capture_notice = ph_polish_capture_notice(a.polish);

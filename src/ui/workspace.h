@@ -71,6 +71,7 @@ typedef struct ph_workspace_live {
     char bluetooth_peer[128];
     bool paired, connected, mirroring, controls, paused, feed, toolbar, ctrl_command, media_keys,
         release_blur, relative, sound, recording;
+    bool waiting_for_phone;
     bool share_checked, share_available, clipboard_available, modal;
     ph_origin_start_status pairing_status;
     bool always_on_top, controls_connected, phone_controls_managed, phone_controls_allowed,
