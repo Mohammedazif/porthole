@@ -62,6 +62,8 @@ FRAME_SYNC, FRAME_INTERVAL = 16, 17
 FRAME_DELAY = 18
 FRAME_PHONE_AUDIO = 19  # 1 byte: 1 = the phone plays its sound through this PC, 0 = on the phone
 A2DP_SOURCE_UUID = "0000110a-0000-1000-8000-00805f9b34fb"  # the phone's audio, as a remote profile
+PHONE_AUDIO_RETRY_S = 8  # between tries to bring the phone's sound here
+PHONE_AUDIO_TRIES = 8  # per connection, about a minute
 MEDIA_TRANSPORT_IFACE = "org.bluez.MediaTransport1"
 KEY_LANE = (FRAME_KEYBOARD, FRAME_CONSUMER)
 
@@ -706,6 +708,7 @@ def main():
                     report.subscribed_at = 0.0
                 subscription_peer[0] = None
             emit("connected")
+            reset_phone_audio_retry()
             if phone_audio[0]:
                 GLib.timeout_add(1500, apply_phone_audio)  # once the phone link settles
             # Only the same bonded peer can reuse this service's enabled CCCDs.
@@ -755,11 +758,16 @@ def main():
     transports = set()  # the phone's audio streams to this PC (MediaTransport1 paths)
 
     def audio_phone_path():
-        """A paired phone that can send audio here, the connected one first."""
+        """A paired phone that can send audio here, the connected one first.
+
+        One pairing over LE also gives the iPhone and this PC a Classic key
+        (cross-transport key derivation), so the connected phone counts before
+        its Classic services are known: BlueZ reads them while connecting."""
         candidates = []
         for path, properties in devices.items():
             uuids = {str(uuid).lower() for uuid in properties.get("UUIDs", [])}
-            if selected_adapter(path) and properties.get("Paired") and A2DP_SOURCE_UUID in uuids:
+            if (selected_adapter(path) and properties.get("Paired")
+                    and (A2DP_SOURCE_UUID in uuids or path == connected_path[0])):
                 candidates.append((path != connected_path[0], path))
         return min(candidates)[1] if candidates else None
 
@@ -775,17 +783,46 @@ def main():
         def failed(error):
             name = error.get_dbus_name() if hasattr(error, "get_dbus_name") else str(error)
             if not name.endswith(("AlreadyConnected", "NotConnected", "InProgress")):
-                log(f"phone audio {action}: {name}")
+                detail = error.get_dbus_message() if hasattr(error, "get_dbus_message") else ""
+                log(f"phone audio {action}: {name}" + (f" ({detail})" if detail else ""))
+            if wanted:
+                retry_phone_audio()
 
         call = device.ConnectProfile if wanted else device.DisconnectProfile
         call(A2DP_SOURCE_UUID, reply_handler=lambda: log(f"phone audio {action}ed"),
              error_handler=failed)
         return False
 
+    # The phone can refuse while its links are still settling (the iPhone
+    # answers "Configuration not supported" or resets the first try), so keep
+    # asking while it is connected here and the sound belongs on this PC.
+    audio_retry = [None, 0]  # pending GLib source, attempts this connection
+
+    def retry_phone_audio():
+        if audio_retry[0] is not None or audio_retry[1] >= PHONE_AUDIO_TRIES:
+            return
+        audio_retry[1] += 1
+
+        def again():
+            audio_retry[0] = None
+            path = audio_phone_path()
+            if (phone_audio[0] and connected_path[0] and path
+                    and not any(t.startswith(path + "/") for t in transports)):
+                apply_phone_audio()
+            return False
+
+        audio_retry[0] = GLib.timeout_add_seconds(PHONE_AUDIO_RETRY_S, again)
+
+    def reset_phone_audio_retry():
+        if audio_retry[0] is not None:
+            GLib.source_remove(audio_retry[0])
+        audio_retry[0], audio_retry[1] = None, 0
+
     def set_phone_audio(wanted):
         changed = phone_audio[0] != wanted
         phone_audio[0] = wanted
         if changed:
+            reset_phone_audio_retry()
             apply_phone_audio()
         return False
 
@@ -796,6 +833,7 @@ def main():
         # keep it on the phone unless Porthole chose this PC.
         if MEDIA_TRANSPORT_IFACE in interfaces and selected_adapter(path):
             transports.add(str(path))
+            reset_phone_audio_retry()
             if phone_audio[0] is False:
                 GLib.timeout_add(500, apply_phone_audio)
 

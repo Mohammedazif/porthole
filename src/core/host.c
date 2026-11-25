@@ -10,7 +10,8 @@
 static bool copy_windows_name(const wchar_t *name, char *out, size_t len)
 {
     char utf8[768];
-    if (!name[0] || !_wcsicmp(name, L"unknown") || !_wcsicmp(name, L"localhost") ||
+    /* Any name the PC has is its name, "UNKNOWN" included. */
+    if (!name[0] ||
         !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, name, -1, utf8, sizeof utf8, NULL, NULL))
         return false;
     size_t count = strlen(utf8);
