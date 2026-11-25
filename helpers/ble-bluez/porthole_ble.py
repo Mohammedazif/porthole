@@ -24,6 +24,7 @@ The helper exits when stdin closes. The HID report descriptor is read from
 src/hid/hid_reports.c so the app and the helper always agree on the report layout.
 """
 
+import hashlib
 import os
 import queue
 import re
@@ -607,6 +608,12 @@ def main():
         except dbus.exceptions.DBusException:
             return False
 
+    def emit_subscribed(path):
+        """Names the phone by a hash of its Bluetooth device, so Porthole can tell
+        the same phone returning from a different one without logging addresses."""
+        emit("peer-id " + hashlib.sha256(str(path).encode()).hexdigest()[:16])
+        emit("subscribed")
+
     def on_subscribe():
         if (service_registered[0] and connected_path[0]
                 and device_connected(connected_path[0])
@@ -614,7 +621,7 @@ def main():
                 and time.time() - subscribed_announced[0] > 1.0):
             subscribed_announced[0] = time.time()
             subscription_peer[0] = connected_path[0]
-            emit("subscribed")
+            emit_subscribed(connected_path[0])
     for report in reports.values():
         report.on_subscribe = on_subscribe
 
@@ -705,12 +712,12 @@ def main():
             if (service_registered[0] and subscription_peer[0] == path and reports_subscribed(reports)
                     and bonded_and_trusted(path)):
                 subscribed_announced[0] = time.time()
-                emit("subscribed")
+                emit_subscribed(path)
             elif (service_registered[0] and device_connected(path)
                   and reports_subscribed(reports, connected_since[0])):
                 subscription_peer[0] = path
                 subscribed_announced[0] = time.time()
-                emit("subscribed")
+                emit_subscribed(path)
             else:
                 arm_subscription_check()
         if "Connected" in changed and not changed["Connected"] and path == connected_path[0]:

@@ -17,7 +17,7 @@ uint32_t ph_screen_parse_header(const uint8_t header[5], uint32_t max_len, int *
           | header[3];
     *type = header[4];
     if (len == 0 || len > max_len || (*type != 1 && *type != 2 && *type != 3 && *type != 5) ||
-        (*type == 3 && (len > PH_SCREEN_AUDIO_MAX || len % 4)) || (*type == 5 && len != 1))
+        (*type == 3 && (len > PH_SCREEN_AUDIO_MAX || len % 4)) || (*type == 5 && len > PH_SCREEN_TURN_MAX))
         return 0;
     return len;
 }
@@ -142,7 +142,7 @@ static void serve(ph_screen *s, int fd, const char *address)
                 s->cb.audio(s->cb.user, frame, len, pts_ns);
         } else if (type == 5) {
             if (s->cb.orientation)
-                s->cb.orientation(s->cb.user, frame[0]);
+                s->cb.orientation(s->cb.user, frame, len);
         } else {
             if (s->cb.video)
                 s->cb.video(s->cb.user, frame, len, type == 2, pts_ns);

@@ -85,7 +85,7 @@ internal static class Program
                 return 0;
             }
             using Stream input = Console.OpenStandardInput();
-            using var phoneAudio = new PhoneAudioReceiver(Diagnostic);
+            using var phoneAudio = new PhoneAudioReceiver(Status, Diagnostic);
             var runner = new ProtocolRunner(gate, peripheral, Status) { PhoneAudio = phoneAudio.SetEnabled };
             Task running = runner.RunAsync(input, shutdown.Token);
             if (!peripheral.Failure.IsCompleted)

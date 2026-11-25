@@ -2651,6 +2651,10 @@ static void fit_window_to_picture(ph_window *w, int pic_w, int pic_h)
     w->fit_w = pic_w;
     w->fit_h = pic_h;
     w->pending_w = w->pending_h = 0;
+    Uint32 flags = SDL_GetWindowFlags(w->window);
+    PH_LOGI("window: fitting a %dx%d picture%s", pic_w, pic_h,
+            (flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_MAXIMIZED))
+                ? " (kept: the window is maximized or full screen)" : "");
     place_window(w, pic_w, pic_h, first || turned);
 }
 

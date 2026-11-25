@@ -13,13 +13,20 @@ namespace Porthole.Ble.WinRT;
 internal sealed class PhoneAudioReceiver : IDisposable
 {
     private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(10);
+    private readonly Action<string> status;
     private readonly Action<string> diagnostic;
     private readonly object gate = new();
     private readonly Dictionary<string, AudioPlaybackConnection> connections = new();
     private DeviceWatcher? watcher;
     private bool enabled;
 
-    public PhoneAudioReceiver(Action<string> diagnostic) => this.diagnostic = diagnostic;
+    // Status lines for Porthole: "phone-audio connected", or "phone-audio unpaired"
+    // when Windows lists no paired phone that can send it audio.
+    public PhoneAudioReceiver(Action<string> status, Action<string> diagnostic)
+    {
+        this.status = status;
+        this.diagnostic = diagnostic;
+    }
 
     public void SetEnabled(bool on)
     {
@@ -33,6 +40,7 @@ internal sealed class PhoneAudioReceiver : IDisposable
                 watcher = DeviceInformation.CreateWatcher(AudioPlaybackConnection.GetDeviceSelector());
                 watcher.Added += OnAdded;
                 watcher.Removed += OnRemoved;
+                watcher.EnumerationCompleted += OnEnumerated;
                 watcher.Start();
             }
             else
@@ -44,6 +52,15 @@ internal sealed class PhoneAudioReceiver : IDisposable
     }
 
     private void OnAdded(DeviceWatcher source, DeviceInformation device) => _ = KeepOpenAsync(source, device.Id);
+
+    private void OnEnumerated(DeviceWatcher source, object _)
+    {
+        bool none;
+        lock (gate)
+            none = watcher == source && connections.Count == 0;
+        if (none)
+            status("phone-audio unpaired");
+    }
 
     private void OnRemoved(DeviceWatcher source, DeviceInformationUpdate update)
     {
@@ -79,7 +96,9 @@ internal sealed class PhoneAudioReceiver : IDisposable
                 if (connection.State != AudioPlaybackConnectionState.Opened)
                 {
                     var result = await connection.OpenAsync();
-                    if (result.Status != AudioPlaybackConnectionOpenResultStatus.Success)
+                    if (result.Status == AudioPlaybackConnectionOpenResultStatus.Success)
+                        status("phone-audio connected");
+                    else
                         diagnostic($"Phone audio not connected yet ({result.Status}).");
                 }
                 await Task.Delay(RetryInterval);
@@ -99,6 +118,7 @@ internal sealed class PhoneAudioReceiver : IDisposable
         {
             watcher.Added -= OnAdded;
             watcher.Removed -= OnRemoved;
+            watcher.EnumerationCompleted -= OnEnumerated;
             if (watcher.Status is DeviceWatcherStatus.Started or DeviceWatcherStatus.EnumerationCompleted)
                 watcher.Stop();
             watcher = null;

@@ -71,8 +71,42 @@ static void print_version(void)
     printf("  Wi-Fi receiver (AirPlay core): %s\n", FEATURE_AIRPLAY);
 }
 
+#ifdef _WIN32
+#include <io.h>
+
+/* Started from the Start menu, Porthole has nowhere to print its log. Keep it
+ * in the settings folder as porthole.log (the previous run's as
+ * porthole.old.log) so a problem can be reported. A console or a redirect
+ * keeps receiving it as before, and the Bluetooth helper writes to it too. */
+static void keep_log_file(void)
+{
+    HANDLE current = GetStdHandle(STD_ERROR_HANDLE);
+    if (current && current != INVALID_HANDLE_VALUE && GetFileType(current) != FILE_TYPE_UNKNOWN)
+        return;
+    char dir[480], path[512], old[520];
+    if (!ph_config_dir(dir, sizeof dir) ||
+        snprintf(path, sizeof path, "%s\\porthole.log", dir) >= (int)sizeof path ||
+        snprintf(old, sizeof old, "%s\\porthole.old.log", dir) >= (int)sizeof old)
+        return;
+    ph_remove(old);
+    ph_rename(path, old);
+    wchar_t *wide = ph_wide(path);
+    FILE *file = wide ? _wfreopen(wide, L"w", stderr) : NULL;
+    free(wide);
+    if (!file)
+        return;
+    setvbuf(stderr, NULL, _IONBF, 0);
+    HANDLE handle = (HANDLE)_get_osfhandle(_fileno(stderr));
+    if (handle != INVALID_HANDLE_VALUE)
+        SetStdHandle(STD_ERROR_HANDLE, handle);
+}
+#endif
+
 int main(int argc, char **argv)
 {
+#ifdef _WIN32
+    keep_log_file();
+#endif
     const char *name = PORTHOLE_NAME;
     bool fixed_ports = true;
     bool debug = false;

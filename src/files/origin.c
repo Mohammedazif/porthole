@@ -1249,6 +1249,7 @@ static void serve_client(ph_origin *o, int fd)
     }
     char hostname[64], encoded[96], welcome[256];
     ph_host_name(hostname, sizeof hostname);
+    PH_LOGI("photo pull: this PC introduces itself as \"%s\"", hostname);
     EVP_EncodeBlock((unsigned char *)encoded, (const unsigned char *)hostname,
                     (int)strlen(hostname));
     int welcome_len =

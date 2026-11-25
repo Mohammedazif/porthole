@@ -20,6 +20,10 @@ public sealed class SessionGate : IDisposable
     public bool HostSuspended { get { lock (stateLock) return hostSuspended; } }
     private bool ReadyLocked => !disposed && peer.HasValue && subscriptions == AllReports;
 
+    public static string PeerHash(string clientId) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(clientId)))[..16].ToLowerInvariant();
+
     public PeerSession? Connect(string clientId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clientId);
@@ -89,7 +93,12 @@ public sealed class SessionGate : IDisposable
             status("connected");
         }
         else if (!wasReady && ReadyLocked)
+        {
+            // Lets Porthole tell the same phone returning from a different one
+            // without logging the device identifier itself.
+            status("peer-id " + PeerHash(peer!.Value.ClientId));
             status("subscribed");
+        }
     }
 
     public void Disconnect(PeerSession session)

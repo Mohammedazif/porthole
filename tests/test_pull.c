@@ -121,8 +121,10 @@ static void test_screen_header(void)
     CHECK(ph_screen_parse_header(odd, PH_SCREEN_FRAME_MAX, &type) == 0);
     CHECK(ph_screen_parse_header(huge, PH_SCREEN_FRAME_MAX, &type) == 0);
     /* PSCR 4: one byte saying how the phone turned its screen upright. */
-    const uint8_t turn[5] = {0, 0, 0, 1, 5}, long_turn[5] = {0, 0, 0, 2, 5};
+    const uint8_t turn[5] = {0, 0, 0, 1, 5}, detailed_turn[5] = {0, 0, 0, 7, 5};
+    const uint8_t long_turn[5] = {0, 0, 0, 17, 5};
     CHECK(ph_screen_parse_header(turn, PH_SCREEN_FRAME_MAX, &type) == 1 && type == 5);
+    CHECK(ph_screen_parse_header(detailed_turn, PH_SCREEN_FRAME_MAX, &type) == 7 && type == 5);
     CHECK(ph_screen_parse_header(long_turn, PH_SCREEN_FRAME_MAX, &type) == 0);
 }
 

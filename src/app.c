@@ -145,6 +145,10 @@ typedef struct app {
     char phone_name[128];      /* from the mirroring session; empty when not mirroring */
     char ble_status[64];       /* last state reported by the Bluetooth helper */
     char ble_peer_name[64];
+    /* Hash of the connected phone's Bluetooth device ("peer-id"). A verified
+     * phone that drops keeps its verification for a while if it comes back. */
+    char ble_peer_id[40], held_peer_id[40];
+    uint64_t verification_hold_until;
     ph_input input;
     ph_pointer pointer;
     ph_abs abs; /* used instead of `pointer` in absolute mode */
@@ -491,11 +495,15 @@ static void screen_video(void *user, const uint8_t *annexb, size_t len, bool key
     pthread_mutex_unlock(&a->src_lock);
 }
 
-static void screen_orientation(void *user, int exif_orientation)
+static void screen_orientation(void *user, const uint8_t *turn, size_t len)
 {
     app *a = user;
-    if (atomic_exchange(&a->phone_orientation, exif_orientation) != exif_orientation)
-        PH_LOGD("shared screen turned upright with orientation %d", exif_orientation);
+    atomic_store(&a->phone_orientation, turn[0]);
+    if (len >= 7)
+        PH_LOGI("shared screen turn: pointer %u, iOS tag %u, picture %u, captured %ux%u", turn[0],
+                turn[1], turn[2], (unsigned)turn[3] << 8 | turn[4], (unsigned)turn[5] << 8 | turn[6]);
+    else
+        PH_LOGI("shared screen turn: pointer %u", turn[0]);
 }
 
 static void screen_audio(void *user, const uint8_t *pcm, size_t len, uint64_t pts_ns)
@@ -695,8 +703,35 @@ static bool start_control_gesture(app *a, ph_gesture_kind kind,
     return ph_gesture_start(&a->gesture, &request, SDL_GetTicks64());
 }
 
+#define VERIFICATION_HOLD_MS 120000
+
+static void end_verification_hold(app *a, bool keep)
+{
+    if (!a->verification_hold_until)
+        return;
+    a->verification_hold_until = 0;
+    a->held_peer_id[0] = 0;
+    if (keep) {
+        PH_LOGI("Bluetooth: the same iPhone reconnected; controls stay verified");
+    } else {
+        PH_LOGI("Bluetooth: a different device, or no return in time; verify again on the iPhone");
+        ph_origin_reset_control_verification(a->origin);
+    }
+}
+
 static void handle_ble_status(app *a, const char *line)
 {
+    if (!strncmp(line, "peer-id ", 8)) {
+        snprintf(a->ble_peer_id, sizeof a->ble_peer_id, "%s", line + 8);
+        return;
+    }
+    if (!strncmp(line, "phone-audio ", 12)) {
+        PH_LOGI("Bluetooth: %s", line);
+        if (!strcmp(line + 12, "unpaired") && atomic_load(&a->sound_mode) == PH_SOUND_PC)
+            ph_window_set_detail(a->win, "To play iPhone sound here, pair the iPhone in "
+                                         "Windows Settings › Bluetooth & devices");
+        return;
+    }
     if (!strncmp(line, "peer-name ", 10)) {
         if (!a->link_stopping && strlen(line + 10) < sizeof a->ble_peer_name)
             snprintf(a->ble_peer_name, sizeof a->ble_peer_name, "%s", line + 10);
@@ -759,9 +794,21 @@ static void handle_ble_status(app *a, const char *line)
     if (state && !(!strcmp(line, "connected") && !strcmp(a->ble_status, "on")))
         snprintf(a->ble_status, sizeof a->ble_status, "%s", state);
     if (was_on && strcmp(a->ble_status, "on")) {
-        ph_origin_reset_control_verification(a->origin);
+        /* The same bonded phone usually comes straight back; keep its
+         * verification for a while instead of asking for the iPhone app. */
+        if (a->ble_peer_id[0] && ph_origin_broadcast_control_policy(a->origin).verified) {
+            snprintf(a->held_peer_id, sizeof a->held_peer_id, "%s", a->ble_peer_id);
+            a->verification_hold_until = SDL_GetTicks64() + VERIFICATION_HOLD_MS;
+            PH_LOGI("Bluetooth: keeping verification while the iPhone reconnects");
+        } else {
+            ph_origin_reset_control_verification(a->origin);
+        }
         a->proof_grace_until = 0;
     }
+    if (!strcmp(line, "subscribed") && a->verification_hold_until)
+        end_verification_hold(a, !strcmp(a->ble_peer_id, a->held_peer_id));
+    if (!strcmp(line, "disconnected") || !strcmp(line, "exited"))
+        a->ble_peer_id[0] = 0;
     ph_input_set_enabled(&a->input, may_forward_controls(a));
     if (!strcmp(line, "subscribed") && !was_on && a->input.enabled)
         PH_LOGI("Bluetooth keyboard ready. Alt+K shows or hides the iPhone keyboard");
@@ -4085,6 +4132,8 @@ int ph_app_run(const ph_app_options *opt)
         }
 #endif
         sync_sound_mode(&a);
+        if (a.verification_hold_until && SDL_GetTicks64() >= a.verification_hold_until)
+            end_verification_hold(&a, false);
         sync_window_state(&a);
         if (ph_window_take_cancel(a.win) && a.origin)
             ph_origin_cancel_push(a.origin);
