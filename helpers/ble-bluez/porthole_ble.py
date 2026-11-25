@@ -745,6 +745,7 @@ def main():
 
     # ---- the phone's sound through this PC (BlueZ with PipeWire plays it) ----
     phone_audio = [None]  # None until Porthole says; then True (play here) or False
+    transports = set()  # the phone's audio streams to this PC (MediaTransport1 paths)
 
     def audio_phone_path():
         """A paired phone that can send audio here, the connected one first."""
@@ -759,6 +760,8 @@ def main():
         wanted, path = phone_audio[0], audio_phone_path()
         if wanted is None or path is None:
             return False
+        if wanted and any(t.startswith(path + "/") for t in transports):
+            return False  # already playing here; another request only disturbs the links
         device = dbus.Interface(bus.get_object(BLUEZ, path), DEVICE_IFACE)
         action = "connect" if wanted else "disconnect"
 
@@ -784,11 +787,15 @@ def main():
             on_device_changed(DEVICE_IFACE, interfaces[DEVICE_IFACE], [], path=path)
         # The phone may start its audio by itself (it reconnects known speakers);
         # keep it on the phone unless Porthole chose this PC.
-        if MEDIA_TRANSPORT_IFACE in interfaces and phone_audio[0] is False and selected_adapter(path):
-            GLib.timeout_add(500, apply_phone_audio)
+        if MEDIA_TRANSPORT_IFACE in interfaces and selected_adapter(path):
+            transports.add(str(path))
+            if phone_audio[0] is False:
+                GLib.timeout_add(500, apply_phone_audio)
 
     def on_device_removed(path, interfaces):
         path = str(path)
+        if MEDIA_TRANSPORT_IFACE in interfaces:
+            transports.discard(path)
         if DEVICE_IFACE not in interfaces or not selected_adapter(path):
             return
         on_device_changed(DEVICE_IFACE, {"Connected": False}, [], path=path)

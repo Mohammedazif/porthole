@@ -53,6 +53,10 @@ typedef struct ph_abs {
 } ph_abs;
 
 void ph_abs_init(ph_abs *a, ph_abs_output output);
+/* The phone places an absolute pointer on its screen as mounted (portrait),
+ * whichever way it is turned. Maps a position in the upright picture back to
+ * that screen, given the EXIF orientation that turned the screen upright. */
+void ph_abs_picture_to_screen(int exif_orientation, double *x, double *y);
 /* PC mouse position over the picture. */
 void ph_abs_move(ph_abs *a, double x, double y, uint64_t now_ms);
 /* A physical button press or release at x/y (HID button bit). */

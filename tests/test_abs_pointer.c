@@ -67,9 +67,37 @@ static int first_with_button(void)
     return -1;
 }
 
+static void test_picture_to_screen(void)
+{
+    double x, y;
+
+    x = .25, y = .75;
+    ph_abs_picture_to_screen(1, &x, &y);
+    CHECK(x == .25 && y == .75);
+    /* Measured on iOS 26.6.1 in landscape (orientation 8): the picture point
+     * (0.732, 0.070), sent unchanged, showed at (0.07, 0.27). Turned first, it
+     * is sent as (0.930, 0.732), which shows at (0.732, 0.070). */
+    x = .732, y = .070;
+    ph_abs_picture_to_screen(8, &x, &y);
+    CHECK(fabs(x - .930) < 1e-9 && fabs(y - .732) < 1e-9);
+    x = .732, y = .070;
+    ph_abs_picture_to_screen(6, &x, &y);
+    CHECK(fabs(x - .070) < 1e-9 && fabs(y - .268) < 1e-9);
+    x = .2, y = .1;
+    ph_abs_picture_to_screen(3, &x, &y);
+    CHECK(fabs(x - .8) < 1e-9 && fabs(y - .9) < 1e-9);
+    /* Each quarter turn is undone by the other one. */
+    x = .3, y = .6;
+    ph_abs_picture_to_screen(6, &x, &y);
+    ph_abs_picture_to_screen(8, &x, &y);
+    CHECK(fabs(x - .3) < 1e-9 && fabs(y - .6) < 1e-9);
+}
+
 int main(void)
 {
     ph_abs a;
+
+    test_picture_to_screen();
 
     /* Hover goes straight to the phone, paced to one report per 15 ms with the
      * latest position winning. */

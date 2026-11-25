@@ -18,6 +18,27 @@ static double clamp01(double v)
     return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
+void ph_abs_picture_to_screen(int exif_orientation, double *x, double *y)
+{
+    double px = *x, py = *y;
+    switch (exif_orientation) {
+    case 3: /* turned half way */
+        *x = 1 - px;
+        *y = 1 - py;
+        break;
+    case 6: /* turned a quarter clockwise to stand upright */
+        *x = py;
+        *y = 1 - px;
+        break;
+    case 8: /* turned a quarter counterclockwise */
+        *x = 1 - py;
+        *y = px;
+        break;
+    default:
+        break;
+    }
+}
+
 static void send(ph_abs *a, uint8_t buttons, double x, double y, uint64_t now_ms)
 {
     x = clamp01(x);

@@ -16,8 +16,8 @@ uint32_t ph_screen_parse_header(const uint8_t header[5], uint32_t max_len, int *
     len = (uint32_t)header[0] << 24 | (uint32_t)header[1] << 16 | (uint32_t)header[2] << 8
           | header[3];
     *type = header[4];
-    if (len == 0 || len > max_len || (*type != 1 && *type != 2 && *type != 3) ||
-        (*type == 3 && (len > PH_SCREEN_AUDIO_MAX || len % 4)))
+    if (len == 0 || len > max_len || (*type != 1 && *type != 2 && *type != 3 && *type != 5) ||
+        (*type == 3 && (len > PH_SCREEN_AUDIO_MAX || len % 4)) || (*type == 5 && len != 1))
         return 0;
     return len;
 }
@@ -81,7 +81,8 @@ static int read_hello(ph_screen *s, int fd)
         line[n++] = c;
     }
     line[n] = 0;
-    return !strcmp(line, "PSCR 3") ? 3 : !strcmp(line, "PSCR 2") ? 2 : !strcmp(line, "PSCR 1") ? 1 : 0;
+    return !strcmp(line, "PSCR 4") ? 4 : !strcmp(line, "PSCR 3") ? 3 : !strcmp(line, "PSCR 2") ? 2
+           : !strcmp(line, "PSCR 1") ? 1 : 0;
 }
 
 static void serve(ph_screen *s, int fd, const char *address)
@@ -109,7 +110,7 @@ static void serve(ph_screen *s, int fd, const char *address)
 
         if (!read_all(s, fd, header, sizeof header, ph_metrics_now_ms() + frame_header_timeout_ms))
             break;
-        if (version == 3 && header[4] == 4 &&
+        if (version >= 3 && header[4] == 4 &&
             header[0] == 0 && header[1] == 0 && header[2] == 0 && header[3] == 0) {
             if (s->cb.ended)
                 s->cb.ended(s->cb.user);
@@ -117,13 +118,13 @@ static void serve(ph_screen *s, int fd, const char *address)
             break;
         }
         len = ph_screen_parse_header(header, PH_SCREEN_FRAME_MAX, &type);
-        if (!len || (type == 3 && version < 2)) {
+        if (!len || (type == 3 && version < 2) || (type == 5 && version < 4)) {
             PH_LOGW("screen broadcast: bad frame header, closing");
             break;
         }
         uint64_t deadline = ph_metrics_now_ms() + 5000;
         uint64_t pts_ns = 0;
-        if (version == 3) {
+        if (version >= 3) {
             uint8_t timestamp[8];
             if (!read_all(s, fd, timestamp, sizeof timestamp, deadline))
                 break;
@@ -139,6 +140,9 @@ static void serve(ph_screen *s, int fd, const char *address)
         if (type == 3) {
             if (frames && s->cb.audio)
                 s->cb.audio(s->cb.user, frame, len, pts_ns);
+        } else if (type == 5) {
+            if (s->cb.orientation)
+                s->cb.orientation(s->cb.user, frame[0]);
         } else {
             if (s->cb.video)
                 s->cb.video(s->cb.user, frame, len, type == 2, pts_ns);

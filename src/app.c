@@ -189,6 +189,8 @@ typedef struct app {
     /* Where the iPhone's sound plays while sharing (ph_sound_mode), the same
      * on both devices. Read on network threads. */
     atomic_int sound_mode;
+    /* How the shared screen was turned upright (EXIF orientation; 1 = as mounted). */
+    atomic_int phone_orientation;
     int audible_mode; /* the last choice that plays here, for unmuting */
     unsigned sound_serial;
     bool pc_muted_seen;
@@ -458,6 +460,7 @@ static void screen_connected(void *user, const char *address)
     bool started = a->screen_dec != NULL;
     if (started)
         atomic_store(&a->screen_on, true);
+    atomic_store(&a->phone_orientation, 1); /* until the phone says otherwise */
     bool announce = started && a->src.current != PH_SRC_USB && !a->src.have_wifi;
     pthread_mutex_unlock(&a->src_lock);
     if (started)
@@ -486,6 +489,13 @@ static void screen_video(void *user, const uint8_t *annexb, size_t len, bool key
         ph_decoder_push_timestamped(a->screen_dec, annexb, len, pts_ns);
     }
     pthread_mutex_unlock(&a->src_lock);
+}
+
+static void screen_orientation(void *user, int exif_orientation)
+{
+    app *a = user;
+    if (atomic_exchange(&a->phone_orientation, exif_orientation) != exif_orientation)
+        PH_LOGD("shared screen turned upright with orientation %d", exif_orientation);
 }
 
 static void screen_audio(void *user, const uint8_t *pcm, size_t len, uint64_t pts_ns)
@@ -811,6 +821,12 @@ static void send_consumer(void *user, uint16_t usage)
 static void send_abs(void *user, uint8_t buttons, double x, double y)
 {
     app *a = user;
+    /* Pointer positions are picture fractions; the phone wants its own screen's. */
+    pthread_mutex_lock(&a->src_lock);
+    bool broadcast = a->src.current == PH_SRC_BROADCAST;
+    pthread_mutex_unlock(&a->src_lock);
+    if (broadcast)
+        ph_abs_picture_to_screen(atomic_load(&a->phone_orientation), &x, &y);
     if (a->link && ph_hid_link_abs_mouse(a->link, buttons, x, y))
         record_input_handoff(a);
 }
@@ -3884,6 +3900,7 @@ int ph_app_run(const ph_app_options *opt)
         if (ph_config_read_line("sound-mode", line, sizeof line) && ph_sound_mode_parse(line) >= 0)
             mode = ph_sound_mode_parse(line);
         atomic_init(&a.sound_mode, mode);
+        atomic_init(&a.phone_orientation, 1);
         a.audible_mode = mode == PH_SOUND_IPHONE ? PH_SOUND_BOTH : mode;
         a.pc_muted_seen = mode == PH_SOUND_IPHONE;
         if (a.audio)
@@ -3928,6 +3945,7 @@ int ph_app_run(const ph_app_options *opt)
             .connected = screen_connected,
             .video = screen_video,
             .audio = screen_audio,
+            .orientation = screen_orientation,
             .ended = screen_ended,
             .disconnected = screen_disconnected,
         };

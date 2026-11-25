@@ -32,6 +32,8 @@
 #define RESIZE_EDGE_PX 12
 #define RAIL_W 60
 #define TRANSFERS_W 300
+/* Settings beside a short (landscape) picture makes the window at least this tall. */
+#define SETTINGS_MIN_H 680
 
 struct ph_window {
     SDL_Window *window;
@@ -54,6 +56,7 @@ struct ph_window {
     char incoming_file[128];
     uint64_t incoming_bytes, incoming_size;
     int settings_width, settings_expansion, rail_expansion, transfers_expansion;
+    int settings_height_expansion; /* extra height Settings added, removed on close */
     int receiving_done, receiving_total, volume;
     char notice[160];
     Uint64 notice_until;
@@ -1796,15 +1799,36 @@ static void flip_panel(ph_window *w, bool *flag, int points)
         int min_w;
         SDL_GetWindowMinimumSize(w->window, &min_w, NULL);
         int width = SDL_max(min_w, ww + delta);
+        int height = wh;
         SDL_Rect usable;
-        if (SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(w->window), &usable) == 0) {
+        bool have_usable =
+            SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(w->window), &usable) == 0;
+        /* A landscape picture leaves the window short; give Settings room to read. */
+        if (flag == &w->settings_visible) {
+            int wanted = ph_display_units(SETTINGS_MIN_H, w->content_scale);
+            if (have_usable)
+                wanted = SDL_min(wanted, usable.h);
+            if (*flag && wh < wanted) {
+                height = wanted;
+                w->settings_height_expansion = wanted - wh;
+            } else if (!*flag && w->settings_height_expansion) {
+                height = SDL_max(1, wh - w->settings_height_expansion);
+                w->settings_height_expansion = 0;
+            }
+        }
+        if (have_usable) {
             int x, y;
             SDL_GetWindowPosition(w->window, &x, &y);
             width = SDL_min(width, usable.w);
             x = SDL_clamp(x, usable.x, usable.x + SDL_max(0, usable.w - width));
+            y = SDL_clamp(y, usable.y, usable.y + SDL_max(0, usable.h - height));
             SDL_SetWindowPosition(w->window, x, y);
         }
-        SDL_SetWindowSize(w->window, width, wh);
+        SDL_SetWindowSize(w->window, width, height);
+        if (height != wh) {
+            w->sized_w = width;
+            w->sized_h = height;
+        }
         if (*flag)
             *expansion = width - ww;
     } else if (*flag) {
@@ -2547,6 +2571,7 @@ static void refresh_content_scale(ph_window *w, Uint64 now)
     float ratio = scale / w->content_scale;
     w->content_scale = scale;
     w->settings_expansion = ph_display_units(w->settings_expansion, ratio);
+    w->settings_height_expansion = ph_display_units(w->settings_height_expansion, ratio);
     w->rail_expansion = ph_display_units(w->rail_expansion, ratio);
     w->transfers_expansion = ph_display_units(w->transfers_expansion, ratio);
 
@@ -2642,7 +2667,8 @@ void ph_window_keep_aspect(ph_window *w)
         return;
     flags = SDL_GetWindowFlags(w->window);
     SDL_GetWindowSize(w->window, &ww, &wh);
-    if (!ph_workspace_keep_aspect(w->workspace) ||
+    /* Settings that made the window taller than the picture keeps that height. */
+    if (!ph_workspace_keep_aspect(w->workspace) || w->settings_height_expansion ||
         (flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP))) {
         w->sized_w = ww;
         w->sized_h = wh;

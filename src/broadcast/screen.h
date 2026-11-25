@@ -11,7 +11,11 @@
  * taken with one byte, 'A'. With PSCR 2, type 3 carries 44.1 kHz stereo PCM16LE.
  * PSCR 3 puts an 8-byte big-endian capture time in nanoseconds after the type.
  * The length still describes only the media payload. A zero length with type 4
- * explicitly ends PSCR 3, with no timestamp. The PC replies with 'E'. */
+ * explicitly ends PSCR 3, with no timestamp. The PC replies with 'E'.
+ * PSCR 4 adds type 5: one byte, the EXIF orientation (1 up, 3 down, 6 right,
+ * 8 left) the phone applied to turn its screen upright, sent before the first
+ * frame and whenever it changes. The phone places an absolute pointer on its
+ * screen as mounted, so the PC undoes that turn for pointer positions. */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -31,6 +35,7 @@ typedef struct ph_screen_callbacks {
     void (*connected)(void *user, const char *address);
     void (*video)(void *user, const uint8_t *annexb, size_t len, bool keyframe, uint64_t pts_ns);
     void (*audio)(void *user, const uint8_t *pcm, size_t len, uint64_t pts_ns);
+    void (*orientation)(void *user, int exif_orientation);
     void (*ended)(void *user);
     void (*disconnected)(void *user);
 } ph_screen_callbacks;
