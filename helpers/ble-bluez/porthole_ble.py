@@ -827,7 +827,10 @@ def main():
         phone_audio[0] = wanted
         if changed:
             reset_phone_audio_retry()
-            apply_phone_audio()
+            # Returning the sound to the phone happens at once; bringing it
+            # here waits for the mouse and keyboard (emit_subscribed).
+            if not wanted or (connected_path[0] and subscription_peer[0] == connected_path[0]):
+                apply_phone_audio()
         return False
 
     def on_device_added(path, interfaces):
