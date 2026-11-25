@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      windows_only:
+        description: Build and test Windows, including the Setup installer
+        type: boolean
+        default: false
       windows_payload_run:
         description: Rebuild Windows Setup from another run's Windows payload
         type: string
@@ -17,7 +21,7 @@ on:
 
 jobs:
   linux:
-    if: ${{ !inputs.windows_payload_run && !inputs.windows_ui_only }}
+    if: ${{ !inputs.windows_only && !inputs.windows_payload_run && !inputs.windows_ui_only }}
     name: Linux (full build)
     runs-on: ubuntu-24.04
     steps:
@@ -59,7 +63,7 @@ jobs:
           if-no-files-found: error
 
   debian:
-    if: ${{ !inputs.windows_payload_run && !inputs.windows_ui_only }}
+    if: ${{ !inputs.windows_only && !inputs.windows_payload_run && !inputs.windows_ui_only }}
     name: Linux installer (Debian 13)
     runs-on: ubuntu-24.04
     container: debian:13
