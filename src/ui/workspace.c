@@ -1596,9 +1596,10 @@ static void home(ph_workspace *u)
 }
 typedef enum { SETTING_VALUE, SETTING_TOGGLE, SETTING_BUTTON, SETTING_SEGMENTS, SETTING_VOLUME } setting_kind;
 typedef struct {
-    const char *title, *detail, *value, *alternate;
+    const char *title, *detail, *value, *alternate, *third;
     setting_kind kind;
     int action;
+    int selected; /* segments: the chosen option */
     bool on, enabled;
 } setting_row;
 
@@ -1624,22 +1625,32 @@ static setting_row segment_row(const char *title, const char *detail, const char
                                const char *second, int action, bool second_selected)
 {
     return (setting_row){.title = title, .detail = detail, .value = first, .alternate = second,
-                         .kind = SETTING_SEGMENTS, .action = action, .on = second_selected};
+                         .kind = SETTING_SEGMENTS, .action = action, .selected = second_selected};
+}
+
+static setting_row segment3_row(const char *title, const char *detail, const char *first,
+                                const char *second, const char *third, int action, int selected)
+{
+    return (setting_row){.title = title, .detail = detail, .value = first, .alternate = second,
+                         .third = third, .kind = SETTING_SEGMENTS, .action = action,
+                         .selected = selected};
 }
 
 static int segments_width(const setting_row *row)
 {
     int font = PH_TEXT(11, PH_FONT_REGULAR);
-    return ph_text_width(row->value, font) + ph_text_width(row->alternate, font) + 54;
+    int width = ph_text_width(row->value, font) + ph_text_width(row->alternate, font) + 54;
+    return row->third ? width + ph_text_width(row->third, font) + 24 : width;
 }
 
 static void segments(ph_workspace *u, const setting_row *row, int x, int y)
 {
     rounded(u, (SDL_Rect){x, y, segments_width(row), 35}, 7, u->background);
     x += 3;
-    const char *names[] = {row->value, row->alternate};
-    for (int i = 0; i < 2; i++) {
-        bool selected = i == (int)row->on;
+    const char *names[] = {row->value, row->alternate, row->third};
+    int count = row->third ? 3 : 2;
+    for (int i = 0; i < count; i++) {
+        bool selected = i == row->selected;
         int font = PH_TEXT(11, selected ? PH_FONT_MEDIUM : PH_FONT_REGULAR);
         int width = 24 + ph_text_width(names[i], PH_TEXT(11, PH_FONT_REGULAR));
         SDL_Rect b = {x, y + 3, width, 29};
@@ -2075,10 +2086,17 @@ static int screen_settings(ph_workspace *u, int x, int y, int width)
     y = setting_group(u, x, y, width, "SCREEN", screen, SDL_arraysize(screen));
     char volume[16];
     snprintf(volume, sizeof volume, "%d%%", u->live.volume);
+    /* Listed PC, Both, iPhone; live.sound_mode is 2, 1, 0 in that order. */
+    int mode = SDL_clamp(u->live.sound_mode, 0, 2);
+    setting_row volume_row = mode == 1
+        ? (setting_row){.title = "Volume", .detail = "Adjusts this PC only.", .value = volume,
+                        .kind = SETTING_VOLUME}
+        : value_row("Volume", mode == 2 ? "Use the iPhone volume buttons." : "Not playing on this PC.",
+                    mode == 2 ? "iPhone" : "Off");
     setting_row audio[] = {
-        toggle_row("PC audio", "Play audio from screen sharing and Screen Mirroring on this PC.",
-                   PH_WORKSPACE_SOUND, u->live.sound),
-        {.title = "Output volume", .value = volume, .kind = SETTING_VOLUME}
+        segment3_row("Play iPhone sound on", "Synced with iPhone.", "PC", "Both", "iPhone",
+                     PH_WORKSPACE_SOUND_MODE, 2 - mode),
+        volume_row
     };
     y = setting_group(u, x, y, width, "AUDIO", audio, SDL_arraysize(audio));
     setting_row capture[] = {

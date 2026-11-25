@@ -186,8 +186,11 @@ typedef struct app {
     uint64_t screen_seq;
     atomic_bool screen_on, airplay_on;
     uint64_t last_airplay_audio_ms; /* Last accepted packet, protected by src_lock. */
-    /* The PC sound switch and the iPhone's "Include app audio" follow each other. */
-    unsigned phone_audio_serial;
+    /* Where the iPhone's sound plays while sharing (ph_sound_mode), the same
+     * on both devices. Read on network threads. */
+    atomic_int sound_mode;
+    int audible_mode; /* the last choice that plays here, for unmuting */
+    unsigned sound_serial;
     bool pc_muted_seen;
     bool broadcast_airplay_audio, stopping_broadcast_airplay; /* protected by src_lock */
     /* A press on one photo is held back from the phone. A quick move is replayed
@@ -324,13 +327,13 @@ static void on_audio(void *user, unsigned char compression, const uint8_t *data,
                      uint64_t timestamp_ns, int64_t due_in_us)
 {
     app *a = user;
-    bool phone_audio_off = ph_origin_phone_audio(a->origin) == 0;
+    bool phone_audio_off = atomic_load(&a->sound_mode) == PH_SOUND_IPHONE;
     pthread_mutex_lock(&a->src_lock);
-    /* "Include app audio" is off on the iPhone, but its output is this PC.
-     * Close the AirPlay audio so iOS plays the sound on the phone again. */
+    /* Sound is set to stay on the iPhone, but its output is this PC. Close the
+     * AirPlay audio so iOS plays the sound on the phone again. */
     if (phone_audio_off && atomic_load(&a->screen_on) && !a->src.have_wifi &&
         !a->stopping_broadcast_airplay && atomic_load(&a->airplay_on)) {
-        PH_LOGI("iPhone app audio is off; returning AirPlay sound to the iPhone");
+        PH_LOGI("sound is set to the iPhone; returning AirPlay sound to it");
         a->stopping_broadcast_airplay = true;
         ph_audio_flush_airplay(a->audio);
         push_event(a, EV_END_BROADCAST_AIRPLAY, NULL);
@@ -488,8 +491,8 @@ static void screen_video(void *user, const uint8_t *annexb, size_t len, bool key
 static void screen_audio(void *user, const uint8_t *pcm, size_t len, uint64_t pts_ns)
 {
     app *a = user;
-    if (ph_origin_phone_audio(a->origin) == 0)
-        return; /* "Include app audio" is off on the iPhone */
+    if (atomic_load(&a->sound_mode) != PH_SOUND_BOTH)
+        return; /* the iPhone plays its own sound, or this PC as its speaker */
     pthread_mutex_lock(&a->src_lock);
     /* The AirPlay route carries the same sound. It arrives about two seconds
      * before it is due, so let it finish before ReplayKit's copy takes over. */
@@ -559,29 +562,53 @@ static void sync_window_state(app *a)
     ph_window_set_live_state(a->win, a->feed_mode, a->controls_paused, sound_on);
 }
 
-/* Turning sound off on either the PC or the iPhone turns it off on both. */
-static void sync_phone_audio(app *a)
+static const char *sound_mode_label(int mode)
 {
-    struct ph_audio_settings sound;
+    return mode == PH_SOUND_PC ? "PC" : mode == PH_SOUND_BOTH ? "Both" : "iPhone";
+}
 
-    if (!a->audio || !a->origin || !ph_audio_settings(a->audio, &sound))
+/* Applies a sound choice made on either device:
+ *  - PC: the iPhone plays through this PC as a speaker; the shared screen sends no sound.
+ *  - Both: the iPhone plays it, and this PC plays the shared screen's sound.
+ *  - iPhone: this PC plays nothing. */
+static void apply_sound_mode(app *a, int mode, bool from_phone)
+{
+    if (mode < PH_SOUND_IPHONE || mode > PH_SOUND_PC)
         return;
-    unsigned serial = ph_origin_phone_audio_serial(a->origin);
-    if (serial != a->phone_audio_serial) {
-        a->phone_audio_serial = serial;
-        int phone = ph_origin_phone_audio(a->origin);
-        if (phone >= 0 && sound.muted != (phone == 0)) {
-            ph_audio_set_muted(a->audio, phone == 0);
-            ph_window_set_detail(a->win, phone ? "Sound turned on from the iPhone"
-                                               : "Sound turned off from the iPhone");
-        }
-        a->pc_muted_seen = phone >= 0 ? phone == 0 : sound.muted;
+    bool changed = atomic_exchange(&a->sound_mode, mode) != mode;
+    if (mode != PH_SOUND_IPHONE)
+        a->audible_mode = mode;
+    if (a->audio)
+        ph_audio_set_muted(a->audio, mode == PH_SOUND_IPHONE);
+    a->pc_muted_seen = mode == PH_SOUND_IPHONE;
+    if (a->link && !a->link_stopping)
+        ph_hid_link_phone_audio(a->link, mode == PH_SOUND_PC);
+    ph_window_set_sound_mode(a->win, mode);
+    if (!from_phone)
+        ph_origin_set_sound_mode(a->origin, mode);
+    if (changed && !ph_config_write_line("sound-mode", ph_sound_mode_name(mode)))
+        PH_LOGW("couldn't save the sound choice");
+    if (changed) {
+        char note[48];
+        snprintf(note, sizeof note, "Sound: %s", sound_mode_label(mode));
+        ph_window_set_detail(a->win, note);
+    }
+}
+
+/* The choice follows the iPhone, the Settings choice, and the PC's mute
+ * shortcuts (which pick iPhone, or the last choice that plays here). */
+static void sync_sound_mode(app *a)
+{
+    unsigned serial = ph_origin_sound_serial(a->origin);
+    if (serial != a->sound_serial) {
+        a->sound_serial = serial;
+        apply_sound_mode(a, ph_origin_sound_mode(a->origin), true);
         return;
     }
-    if (sound.muted != a->pc_muted_seen) {
-        a->pc_muted_seen = sound.muted;
-        ph_origin_set_phone_audio(a->origin, !sound.muted);
-    }
+    struct ph_audio_settings sound;
+    if (!a->audio || !ph_audio_settings(a->audio, &sound) || sound.muted == a->pc_muted_seen)
+        return;
+    apply_sound_mode(a, sound.muted ? PH_SOUND_IPHONE : a->audible_mode, false);
 }
 
 static void update_title(app *a)
@@ -670,6 +697,9 @@ static void handle_ble_status(app *a, const char *line)
     const char *state = NULL;
     bool was_on = !strcmp(a->ble_status, "on");
 
+    /* A new helper starts without the phone audio choice. */
+    if (!strcmp(line, "ready") && a->link && !a->link_stopping)
+        ph_hid_link_phone_audio(a->link, atomic_load(&a->sound_mode) == PH_SOUND_PC);
     if (!strcmp(line, "ready"))
 #ifdef _WIN32
         state = "starting Bluetooth advertising";
@@ -3426,6 +3456,12 @@ static void do_window_action(app *a, ph_window_action action, bool *running)
                                         : a->input.enabled ? "PC controls enabled"
                                                            : "PC controls requested");
         break;
+    case PH_WINDOW_ACTION_SOUND_MODE: {
+        int mode = ph_window_take_sound_mode(a->win);
+        if (mode >= 0)
+            apply_sound_mode(a, mode, false);
+        break;
+    }
     case PH_WINDOW_ACTION_MUTE:
         if (a->audio) {
             struct ph_audio_settings settings;
@@ -3841,6 +3877,19 @@ int ph_app_run(const ph_app_options *opt)
     a.dec = ph_decoder_start(on_frame, &a);
     if (opt->audio)
         a.audio = ph_audio_create();
+    {
+        /* The last choice made here; a phone that connects reports its own. */
+        char line[16];
+        int mode = PH_SOUND_BOTH;
+        if (ph_config_read_line("sound-mode", line, sizeof line) && ph_sound_mode_parse(line) >= 0)
+            mode = ph_sound_mode_parse(line);
+        atomic_init(&a.sound_mode, mode);
+        a.audible_mode = mode == PH_SOUND_IPHONE ? PH_SOUND_BOTH : mode;
+        a.pc_muted_seen = mode == PH_SOUND_IPHONE;
+        if (a.audio)
+            ph_audio_set_muted(a.audio, a.pc_muted_seen);
+        ph_window_set_sound_mode(a.win, mode);
+    }
     a.polish = ph_polish_create(&(ph_polish_options){.pin_required = opt->pin_required,
                                                      .autostart = opt->autostart,
                                                      .precise_touch = opt->precise_touch,
@@ -4017,7 +4066,7 @@ int ph_app_run(const ph_app_options *opt)
                 finish_pull(&a);
         }
 #endif
-        sync_phone_audio(&a);
+        sync_sound_mode(&a);
         sync_window_state(&a);
         if (ph_window_take_cancel(a.win) && a.origin)
             ph_origin_cancel_push(a.origin);

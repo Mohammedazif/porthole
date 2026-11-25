@@ -274,6 +274,27 @@ internal static class Program
         Check(overflow.Status.Any(s => s.Contains("queue full")) && !overflow.Status.Contains("sync 92"), "Overflow silently lost work.");
     }
 
+    private static async Task PhoneAudio()
+    {
+        // Phone audio is a setting: it applies before the reports are ready and
+        // sends no report.
+        using var unready = new Fixture(false);
+        var choices = new List<bool>();
+        var runner = unready.Runner();
+        runner.PhoneAudio = choices.Add;
+        await runner.RunAsync(new MemoryStream(Join(Frame(19, 1), Frame(19, 0))));
+        Check(choices.SequenceEqual([true, false]), "Phone audio choices were not applied in order.");
+        Check(unready.Notifier.Sent.IsEmpty && !unready.Status.Any(s => s.Contains("before reports are ready")),
+              "Phone audio was treated as a report.");
+        using var bad = new Fixture();
+        var ignored = new List<bool>();
+        var badRunner = bad.Runner();
+        badRunner.PhoneAudio = ignored.Add;
+        await badRunner.RunAsync(new MemoryStream(Frame(19, 1, 1)));
+        Check(bad.Status.Any(s => s.Contains("bad frame")) && ignored.Count == 0,
+              "A malformed phone audio frame was applied.");
+    }
+
     private static async Task BoundedEofAndNotification()
     {
         using var f = new Fixture();
@@ -315,6 +336,7 @@ internal static class Program
             ("empty fence, priming and EOF releases", EmptyFenceAndEof), ("motion order and pacing", PacingAndOrder),
             ("independent keyboard lane", IndependentLanes), ("dispatch ACK and failure", AwaitDispatchAndFailure),
             ("queued epoch/client isolation", EpochIsolation), ("invalid input and bounded queues", BadInputAndOverflow),
+            ("phone audio setting", PhoneAudio),
             ("bounded notification and EOF drain", BoundedEofAndNotification)
         ];
         int failed = 0;

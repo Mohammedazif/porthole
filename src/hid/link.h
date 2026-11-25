@@ -30,6 +30,8 @@ bool ph_hid_link_abs_mouse(ph_hid_link *l, uint8_t buttons, double x, double y);
 bool ph_hid_link_consumer(ph_hid_link *l, uint16_t usage);
 bool ph_hid_link_sync(ph_hid_link *l, uint32_t id);
 bool ph_hid_link_delay(ph_hid_link *l, uint16_t milliseconds);
+/* Have the paired phone play its sound through this PC, or return it to the phone. */
+bool ph_hid_link_phone_audio(ph_hid_link *l, bool on);
 
 /* Main-thread lifecycle: request_stop closes stdin once and rejects new reports.
  * Poll regularly to reap without blocking, allowing EOF cleanup before bounded

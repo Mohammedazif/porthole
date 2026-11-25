@@ -4,7 +4,7 @@
 /* Wire format between the app and a Bluetooth helper (stdin of the helper process, or a
  * serial port for the ESP32 dongle): [type: 1 byte][length: 1 byte][payload].
  * The helper answers with text lines: ready, advertising, connected, disconnected,
- * subscribed, sync <id>, error <message>. */
+ * subscribed, sync <id>, error <message>. Unknown frame types are skipped. */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -20,7 +20,10 @@ enum {
     /* 4-byte id: the helper prints "sync <id>" once the mouse reports before it are sent */
     PH_LINK_SYNC = 16,
     PH_LINK_INTERVAL = 17, /* 2-byte milliseconds between reports */
-    PH_LINK_DELAY = 18     /* 2-byte pause in milliseconds, after all preceding reports */
+    PH_LINK_DELAY = 18,    /* 2-byte pause in milliseconds, after all preceding reports */
+    /* 1 byte: 1 has the paired phone play its sound through this PC, 0 returns it
+     * to the phone. Handled as soon as it arrives, before the reports are ready. */
+    PH_LINK_PHONE_AUDIO = 19
 };
 
 #define PH_LINK_MAX_FRAME (2 + 8)

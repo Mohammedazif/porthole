@@ -44,6 +44,10 @@ public sealed class ProtocolRunner
             throw new ArgumentOutOfRangeException(nameof(options));
     }
 
+    // Phone audio frames are settings, not reports: they apply at once, even
+    // before the reports are ready, and never wait in a lane.
+    public Action<bool>? PhoneAudio { get; set; }
+
     private void Emit(string line) { lock (outputLock) status(line); }
     private void ProtocolError(string line)
     {
@@ -74,6 +78,11 @@ public sealed class ProtocolRunner
         {
             await foreach (var frame in FrameReader.ReadAsync(input, Fail, run.Token).ConfigureAwait(false))
             {
+                if (frame.Type == FrameType.PhoneAudio)
+                {
+                    PhoneAudio?.Invoke(frame.Payload[0] == 1);
+                    continue;
+                }
                 if (!gate.Capture(out var ticket))
                 {
                     Fail("error input received before reports are ready");

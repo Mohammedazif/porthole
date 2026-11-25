@@ -56,7 +56,8 @@ typedef enum ph_window_action {
     PH_WINDOW_ACTION_QUIT,
     PH_WINDOW_ACTION_SAVE,
     PH_WINDOW_ACTION_PICK_FOLDER,
-    PH_WINDOW_ACTION_SAVE_DOWNLOADS
+    PH_WINDOW_ACTION_SAVE_DOWNLOADS,
+    PH_WINDOW_ACTION_SOUND_MODE /* ph_window_take_sound_mode has the choice */
 } ph_window_action;
 
 ph_window_action ph_window_take_action(ph_window *w);
@@ -74,6 +75,10 @@ void ph_window_display_changed(ph_window *w);
 
 /* Feed scrolling, paused controls and PC sound, shown in Settings. */
 void ph_window_set_live_state(ph_window *w, bool feed, bool paused, bool sound_on);
+/* Where the iPhone's sound plays while sharing (ph_sound_mode), shown in Settings. */
+void ph_window_set_sound_mode(ph_window *w, int mode);
+/* The choice picked in Settings with PH_WINDOW_ACTION_SOUND_MODE, or -1. */
+int ph_window_take_sound_mode(ph_window *w);
 bool ph_window_media_keys(const ph_window *w);
 void ph_window_set_media_keys(ph_window *w, bool on);
 /* Settings rows, top to bottom: pointer, wheel, pause, guide, Ctrl, media keys,

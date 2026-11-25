@@ -3,7 +3,12 @@ using System.Runtime.CompilerServices;
 namespace Porthole.Ble.Core;
 
 public enum ReportKind : byte { Keyboard = 1, Mouse = 2, Consumer = 3 }
-public enum FrameType : byte { Keyboard = 1, Mouse = 2, Consumer = 3, AbsMouse = 4, Sync = 16, Interval = 17, Delay = 18 }
+public enum FrameType : byte
+{
+    Keyboard = 1, Mouse = 2, Consumer = 3, AbsMouse = 4, Sync = 16, Interval = 17, Delay = 18,
+    // 1 byte: 1 = the paired phone plays its sound through this PC, 0 = on the phone.
+    PhoneAudio = 19
+}
 public sealed record ProtocolFrame(FrameType Type, byte[] Payload);
 
 public static class FrameReader
@@ -12,7 +17,7 @@ public static class FrameReader
     {
         // The relative and absolute mouse frames are each valid only with their report map.
         1 => 8, 2 => HidDescriptor.Absolute ? -1 : 7, 3 => 2, 4 => HidDescriptor.Absolute ? 6 : -1,
-        16 => 4, 17 or 18 => 2, _ => -1
+        16 => 4, 17 or 18 => 2, 19 => 1, _ => -1
     };
 
     public static async IAsyncEnumerable<ProtocolFrame> ReadAsync(Stream input, Action<string> error,

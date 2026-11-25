@@ -96,6 +96,7 @@ struct ph_window {
     bool release_blur;
     bool media_keys;
     bool feed_on, paused, sound_on; /* app state shown in Settings */
+    int sound_mode, picked_sound_mode; /* ph_sound_mode; picked is -1 until chosen */
     bool next_relative;
     char save_label[128];
     char save_about[256];
@@ -1824,6 +1825,8 @@ ph_window *ph_window_create(const char *title)
     w->release_blur = true;
     w->media_keys = true;
     w->sound_on = true;
+    w->sound_mode = 1;
+    w->picked_sound_mode = -1;
     w->transfer_percent = -1;
 #ifdef _WIN32
     /* Without this, a borderless window gets no thick frame and Windows will not resize it. */
@@ -2024,6 +2027,23 @@ void ph_window_set_live_state(ph_window *w, bool feed, bool paused, bool sound_o
     w->sound_on = sound_on;
     if (w->settings_visible)
         ph_window_redraw(w);
+}
+
+void ph_window_set_sound_mode(ph_window *w, int mode)
+{
+    if (!w || w->sound_mode == mode)
+        return;
+    w->sound_mode = mode;
+    ph_window_redraw(w);
+}
+
+int ph_window_take_sound_mode(ph_window *w)
+{
+    if (!w)
+        return -1;
+    int mode = w->picked_sound_mode;
+    w->picked_sound_mode = -1;
+    return mode;
 }
 
 bool ph_window_media_keys(const ph_window *w)
@@ -3200,6 +3220,7 @@ static void draw_workspace(ph_window *w, SDL_Rect area, ph_workspace_view page)
                               .release_blur = w->release_blur,
                               .relative = w->next_relative,
                               .sound = w->sound_on,
+                              .sound_mode = w->sound_mode,
                               .recording = w->recording,
                               .share_checked = w->share_checked,
                               .share_available = w->share_available,
@@ -3410,6 +3431,14 @@ static void dispatch_workspace_action(ph_window *w)
         break;
     case PH_WORKSPACE_SOUND:
         w->pending_action = PH_WINDOW_ACTION_MUTE;
+        break;
+    case PH_WORKSPACE_SOUND_MODE:
+        /* Settings lists PC, Both, iPhone: ph_sound_mode 2, 1, 0. */
+        if (item <= 2) {
+            w->picked_sound_mode = 2 - (int)item;
+            w->sound_mode = w->picked_sound_mode;
+            w->pending_action = PH_WINDOW_ACTION_SOUND_MODE;
+        }
         break;
     case PH_WORKSPACE_FEED:
         w->pending_action = PH_WINDOW_ACTION_FEED;

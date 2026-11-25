@@ -777,6 +777,12 @@ bool ph_hid_link_sync(ph_hid_link *l, uint32_t id)
     return send_frame(l, PH_LINK_SYNC, r, sizeof r);
 }
 
+bool ph_hid_link_phone_audio(ph_hid_link *l, bool on)
+{
+    uint8_t r[1] = {on ? 1 : 0};
+    return send_frame(l, PH_LINK_PHONE_AUDIO, r, sizeof r);
+}
+
 bool ph_hid_link_delay(ph_hid_link *l, uint16_t milliseconds)
 {
     uint8_t r[2] = {(uint8_t)milliseconds, (uint8_t)(milliseconds >> 8)};

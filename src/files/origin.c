@@ -65,10 +65,10 @@ struct ph_origin {
         time_t since;
     } failures[16];
     ph_control_policy control;
-    /* The phone's "Include app audio": -1 not told, 0 off, 1 on. It follows
-     * the PC's sound switch too: audio_push sends the PC's change to the phone
-     * (once it says it understands AUDIO), and the phone's own changes bump
-     * audio_serial for the app to apply. */
+    /* Where the phone's sound plays while sharing (ph_sound_mode), chosen on
+     * either device: audio_push sends the PC's choice to the phone once it says
+     * it understands SOUND, and the phone's own choices bump audio_serial for
+     * the app to apply. */
     int phone_audio;
     bool audio_capable, audio_push;
     unsigned audio_serial;
@@ -518,24 +518,25 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
         int len = snprintf(reply, sizeof reply, "INPUT OK %s %u %u\n", id, enabled, screen_only);
         return send_all(fd, reply, (size_t)len);
     }
-    if (!strncmp(line, "AUDIO ", 6)) {
-        unsigned enabled;
-        char id[37], extra, reply[64];
+    if (!strncmp(line, "SOUND ", 6)) {
+        char id[37], word[8], extra, reply[80];
         *consumed = true;
-        if (sscanf(line, "AUDIO %36s %u %c", id, &enabled, &extra) != 2 || !request_id(id) ||
-            enabled > 1)
+        if (sscanf(line, "SOUND %36s %7s %c", id, word, &extra) != 2 || !request_id(id))
+            return false;
+        int mode = ph_sound_mode_parse(word);
+        if (mode < 0)
             return false;
         pthread_mutex_lock(&o->lock);
         o->audio_capable = true;
-        bool pc_wins = o->audio_push; /* changed on the PC since the phone last heard */
+        bool pc_wins = o->audio_push; /* chosen on the PC since the phone last heard */
         if (!pc_wins) {
-            o->phone_audio = (int)enabled;
+            o->phone_audio = mode;
             o->audio_serial++;
         }
         pthread_mutex_unlock(&o->lock);
         if (!pc_wins)
-            PH_LOGI("iPhone app audio for screen sharing: %s", enabled ? "on" : "off");
-        int n = snprintf(reply, sizeof reply, "AUDIO OK %s %u\n", id, enabled);
+            PH_LOGI("sound while sharing set on the iPhone: %s", ph_sound_mode_name(mode));
+        int n = snprintf(reply, sizeof reply, "SOUND OK %s %s\n", id, ph_sound_mode_name(mode));
         return send_all(fd, reply, (size_t)n);
     }
     if (!strncmp(line, "SYNC ", 5)) {
@@ -1073,21 +1074,23 @@ static bool service_idle(ph_origin *o, int fd)
            send_outgoing(o, fd);
 }
 
-/* The PC's sound switch changed: tell a phone that understands AUDIO. */
+/* The sound choice changed on the PC: tell a phone that understands SOUND. */
 static bool send_audio_set(ph_origin *o, int fd)
 {
-    int value = -1;
+    int mode = -1;
 
     pthread_mutex_lock(&o->lock);
     if (o->audio_push && o->audio_capable && o->phone_audio >= 0) {
         o->audio_push = false;
-        value = o->phone_audio;
+        mode = o->phone_audio;
     }
     pthread_mutex_unlock(&o->lock);
-    if (value < 0)
+    if (mode < 0)
         return true;
-    PH_LOGI("iPhone app audio set from the PC: %s", value ? "on" : "off");
-    return send_all(fd, value ? "AUDIO SET 1\n" : "AUDIO SET 0\n", 12);
+    char line[32];
+    int n = snprintf(line, sizeof line, "SOUND SET %s\n", ph_sound_mode_name(mode));
+    PH_LOGI("sound while sharing set on the PC: %s", ph_sound_mode_name(mode));
+    return send_all(fd, line, (size_t)n);
 }
 
 /* One line. A phone that does not know CLIP? ignores it. */
@@ -1247,7 +1250,7 @@ static void serve_client(ph_origin *o, int fd)
     EVP_EncodeBlock((unsigned char *)encoded, (const unsigned char *)hostname,
                     (int)strlen(hostname));
     int welcome_len =
-        snprintf(welcome, sizeof welcome, "OK %s %s\nSYNC READY\nINPUT READY\nAUDIO READY\n", ticket,
+        snprintf(welcome, sizeof welcome, "OK %s %s\nSYNC READY\nINPUT READY\nSOUND READY\n", ticket,
                  encoded);
     if (!send_all(fd, welcome, (size_t)welcome_len))
         goto done;
@@ -2297,18 +2300,32 @@ ph_control_policy ph_origin_control_policy(ph_origin *o)
     return policy;
 }
 
-void ph_origin_set_phone_audio(ph_origin *o, bool enabled)
+const char *ph_sound_mode_name(int mode)
 {
-    if (!o)
+    return mode == PH_SOUND_PC ? "pc" : mode == PH_SOUND_BOTH ? "both"
+           : mode == PH_SOUND_IPHONE ? "iphone" : "unknown";
+}
+
+int ph_sound_mode_parse(const char *word)
+{
+    if (!word)
+        return -1;
+    return !strcmp(word, "pc") ? PH_SOUND_PC : !strcmp(word, "both") ? PH_SOUND_BOTH
+           : !strcmp(word, "iphone") ? PH_SOUND_IPHONE : -1;
+}
+
+void ph_origin_set_sound_mode(ph_origin *o, int mode)
+{
+    if (!o || mode < PH_SOUND_IPHONE || mode > PH_SOUND_PC)
         return;
     pthread_mutex_lock(&o->lock);
-    o->phone_audio = enabled ? 1 : 0;
+    o->phone_audio = mode;
     o->audio_push = true;
     pthread_cond_broadcast(&o->cond);
     pthread_mutex_unlock(&o->lock);
 }
 
-unsigned ph_origin_phone_audio_serial(ph_origin *o)
+unsigned ph_origin_sound_serial(ph_origin *o)
 {
     if (!o)
         return 0;
@@ -2318,14 +2335,14 @@ unsigned ph_origin_phone_audio_serial(ph_origin *o)
     return serial;
 }
 
-int ph_origin_phone_audio(ph_origin *o)
+int ph_origin_sound_mode(ph_origin *o)
 {
     if (!o)
         return -1;
     pthread_mutex_lock(&o->lock);
-    int audio = o->phone_audio;
+    int mode = o->phone_audio;
     pthread_mutex_unlock(&o->lock);
-    return audio;
+    return mode;
 }
 
 ph_control_policy ph_origin_broadcast_control_policy(ph_origin *o)

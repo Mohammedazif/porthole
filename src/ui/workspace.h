@@ -65,12 +65,14 @@ typedef enum ph_workspace_action {
     PH_WORKSPACE_CLEAR_ALL_CLIPBOARD,
     PH_WORKSPACE_ADD_PHONE,
     PH_WORKSPACE_RETRY_PAIRING,
-    PH_WORKSPACE_ALWAYS_ON_TOP
+    PH_WORKSPACE_ALWAYS_ON_TOP,
+    PH_WORKSPACE_SOUND_MODE /* item: 0 PC, 1 Both, 2 iPhone */
 } ph_workspace_action;
 typedef struct ph_workspace_live {
     char bluetooth_peer[128];
     bool paired, connected, mirroring, controls, paused, feed, toolbar, ctrl_command, media_keys,
         release_blur, relative, sound, recording;
+    int sound_mode; /* where the iPhone's sound plays: 0 iPhone, 1 Both, 2 PC */
     bool waiting_for_phone;
     bool share_checked, share_available, clipboard_available, modal;
     ph_origin_start_status pairing_status;

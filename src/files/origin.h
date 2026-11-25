@@ -150,13 +150,21 @@ bool ph_origin_clip_waiting(ph_origin *origin);
 /* Phone preferences negotiated over the authenticated photo/file connection. */
 ph_control_policy ph_origin_control_policy(ph_origin *origin);
 ph_control_policy ph_origin_broadcast_control_policy(ph_origin *origin);
-/* The phone's "Include app audio" for screen sharing: 1 on, 0 off, -1 not told
- * (an older phone, or none connected since sharing last ended). */
-int ph_origin_phone_audio(ph_origin *origin);
-/* Bumped each time the phone reports its setting, so the PC's sound switch can follow. */
-unsigned ph_origin_phone_audio_serial(ph_origin *origin);
-/* The PC's sound switch changed. The phone's setting follows when it next
- * hears from the PC, and a phone that reconnects takes the PC's choice. */
-void ph_origin_set_phone_audio(ph_origin *origin, bool enabled);
+/* Where the phone's sound plays while it shares its screen. Chosen on either
+ * device and kept the same on both. */
+typedef enum ph_sound_mode {
+    PH_SOUND_IPHONE = 0, /* the phone only */
+    PH_SOUND_BOTH = 1,   /* the phone, and this PC from screen sharing */
+    PH_SOUND_PC = 2      /* this PC only; the phone plays through it as a speaker */
+} ph_sound_mode;
+const char *ph_sound_mode_name(int mode);
+int ph_sound_mode_parse(const char *word);
+/* The current choice, or -1 before a phone has said (older phones never do). */
+int ph_origin_sound_mode(ph_origin *origin);
+/* Bumped each time the phone reports its choice, so the PC can follow it. */
+unsigned ph_origin_sound_serial(ph_origin *origin);
+/* Chosen on the PC. The phone follows when it next hears from the PC, and a
+ * phone that reconnects takes the PC's choice. */
+void ph_origin_set_sound_mode(ph_origin *origin, int mode);
 
 #endif

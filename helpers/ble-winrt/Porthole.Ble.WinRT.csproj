@@ -26,6 +26,7 @@
     <Compile Include="RawSessionRegistry.cs" />
     <Compile Include="RetiringPeerCleanup.cs" />
     <Compile Include="WinRtHidPeripheral.cs" />
+    <Compile Include="PhoneAudioReceiver.cs" />
     <ProjectReference Include="Core/Porthole.Ble.Core.csproj" AdditionalProperties="DebugType=embedded" />
   </ItemGroup>
   <Target Name="PortholePublishNotices" AfterTargets="Publish">

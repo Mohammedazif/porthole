@@ -379,6 +379,8 @@ void ph_window_keep_aspect(ph_window *w) { (void)w; }
 void ph_window_display_changed(ph_window *w) { (void)w; }
 void ph_window_set_live_state(ph_window *w, bool feed, bool paused, bool sound_on)
 { (void)w; (void)feed; (void)paused; (void)sound_on; }
+void ph_window_set_sound_mode(ph_window *w, int mode) { (void)w; (void)mode; }
+int ph_window_take_sound_mode(ph_window *w) { (void)w; return -1; }
 bool ph_window_media_keys(const ph_window *w) { (void)w; return true; }
 void ph_window_set_media_keys(ph_window *w, bool on) { (void)w; (void)on; }
 void ph_window_set_pc_name(ph_window *w, const char *name) { (void)w; (void)name; }
@@ -1258,6 +1260,13 @@ bool ph_hid_link_consumer(ph_hid_link *l, uint16_t usage)
         modal_leaks++;
     return true;
 }
+bool ph_hid_link_phone_audio(ph_hid_link *l, bool on)
+{
+    (void)l;
+    (void)on;
+    return true;
+}
+
 bool ph_hid_link_delay(ph_hid_link *l, uint16_t milliseconds)
 {
     (void)l, (void)milliseconds;

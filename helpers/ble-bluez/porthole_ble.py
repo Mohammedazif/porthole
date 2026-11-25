@@ -59,6 +59,9 @@ FRAME_KEYBOARD, FRAME_MOUSE, FRAME_CONSUMER = 1, 2, 3
 FRAME_ABS_MOUSE = 4  # experimental: [buttons][x lo][x hi][y lo][y hi][wheel], x/y 0..32767
 FRAME_SYNC, FRAME_INTERVAL = 16, 17
 FRAME_DELAY = 18
+FRAME_PHONE_AUDIO = 19  # 1 byte: 1 = the phone plays its sound through this PC, 0 = on the phone
+A2DP_SOURCE_UUID = "0000110a-0000-1000-8000-00805f9b34fb"  # the phone's audio, as a remote profile
+MEDIA_TRANSPORT_IFACE = "org.bluez.MediaTransport1"
 KEY_LANE = (FRAME_KEYBOARD, FRAME_CONSUMER)
 
 DEFAULT_DESCRIPTOR_SOURCE = Path(__file__).resolve().parents[2] / "src" / "hid" / "hid_reports.c"
@@ -331,7 +334,7 @@ def build_hid(bus, app, descriptor, ids, absolute=None):
 # --------------------------------------------------------------------------- stdin protocol
 
 EXPECTED_LEN = {FRAME_KEYBOARD: 8, FRAME_MOUSE: 7, FRAME_ABS_MOUSE: 6, FRAME_CONSUMER: 2, FRAME_SYNC: 4,
-                FRAME_INTERVAL: 2, FRAME_DELAY: 2}
+                FRAME_INTERVAL: 2, FRAME_DELAY: 2, FRAME_PHONE_AUDIO: 1}
 
 
 def read_exact(stream, n):
@@ -372,7 +375,8 @@ def stdin_reader(out_queue, key_queue=None):
     out_queue.put(None)
 
 
-def sender(in_queue, reports, loop, quit_at_eof=True, wait_for=None, stopping=None):
+def sender(in_queue, reports, loop, quit_at_eof=True, wait_for=None, stopping=None,
+           on_phone_audio=None):
     """Sends one lane's queued reports; waits for the other lane before quitting."""
     interval = 0.015
     while True:
@@ -394,6 +398,9 @@ def sender(in_queue, reports, loop, quit_at_eof=True, wait_for=None, stopping=No
             interval = max(0.005, struct.unpack("<H", payload)[0] / 1000.0)
         elif ftype == FRAME_DELAY:
             time.sleep(struct.unpack("<H", payload)[0] / 1000.0)
+        elif ftype == FRAME_PHONE_AUDIO:
+            if on_phone_audio is not None:
+                GLib.idle_add(on_phone_audio, payload[0] == 1)
         elif ftype not in reports:
             continue  # e.g. a relative mouse report while the absolute map is active
         else:
@@ -692,6 +699,8 @@ def main():
                     report.subscribed_at = 0.0
                 subscription_peer[0] = None
             emit("connected")
+            if phone_audio[0]:
+                GLib.timeout_add(1500, apply_phone_audio)  # once the phone link settles
             # Only the same bonded peer can reuse this service's enabled CCCDs.
             if (service_registered[0] and subscription_peer[0] == path and reports_subscribed(reports)
                     and bonded_and_trusted(path)):
@@ -734,9 +743,49 @@ def main():
         # Device1 object arrived already connected, without a property delta.
         on_device_changed(DEVICE_IFACE, {"Connected": True}, [], path=path)
 
+    # ---- the phone's sound through this PC (BlueZ with PipeWire plays it) ----
+    phone_audio = [None]  # None until Porthole says; then True (play here) or False
+
+    def audio_phone_path():
+        """A paired phone that can send audio here, the connected one first."""
+        candidates = []
+        for path, properties in devices.items():
+            uuids = {str(uuid).lower() for uuid in properties.get("UUIDs", [])}
+            if selected_adapter(path) and properties.get("Paired") and A2DP_SOURCE_UUID in uuids:
+                candidates.append((path != connected_path[0], path))
+        return min(candidates)[1] if candidates else None
+
+    def apply_phone_audio():
+        wanted, path = phone_audio[0], audio_phone_path()
+        if wanted is None or path is None:
+            return False
+        device = dbus.Interface(bus.get_object(BLUEZ, path), DEVICE_IFACE)
+        action = "connect" if wanted else "disconnect"
+
+        def failed(error):
+            name = error.get_dbus_name() if hasattr(error, "get_dbus_name") else str(error)
+            if not name.endswith(("AlreadyConnected", "NotConnected", "InProgress")):
+                log(f"phone audio {action}: {name}")
+
+        call = device.ConnectProfile if wanted else device.DisconnectProfile
+        call(A2DP_SOURCE_UUID, reply_handler=lambda: log(f"phone audio {action}ed"),
+             error_handler=failed)
+        return False
+
+    def set_phone_audio(wanted):
+        changed = phone_audio[0] != wanted
+        phone_audio[0] = wanted
+        if changed:
+            apply_phone_audio()
+        return False
+
     def on_device_added(path, interfaces):
         if DEVICE_IFACE in interfaces:
             on_device_changed(DEVICE_IFACE, interfaces[DEVICE_IFACE], [], path=path)
+        # The phone may start its audio by itself (it reconnects known speakers);
+        # keep it on the phone unless Porthole chose this PC.
+        if MEDIA_TRANSPORT_IFACE in interfaces and phone_audio[0] is False and selected_adapter(path):
+            GLib.timeout_add(500, apply_phone_audio)
 
     def on_device_removed(path, interfaces):
         path = str(path)
@@ -771,7 +820,8 @@ def main():
                                   kwargs={"stopping": stopping}, daemon=True)
     key_sender.start()
     threading.Thread(target=sender, args=(frames, reports, loop),
-                     kwargs={"wait_for": key_sender, "stopping": stopping}, daemon=True).start()
+                     kwargs={"wait_for": key_sender, "stopping": stopping,
+                             "on_phone_audio": set_phone_audio}, daemon=True).start()
     for sig in (signal.SIGINT, signal.SIGTERM):
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, loop.quit)
 
