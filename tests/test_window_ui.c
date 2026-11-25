@@ -18,6 +18,7 @@
 #include "core/config.h"
 #include "core/secure_link.h"
 #include "core/upath.h"
+#include "files/hostclip.h"
 #include "files/places.h"
 #include "temp_path.h"
 #include "core/version.h"
