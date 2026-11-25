@@ -324,6 +324,18 @@ int main(int argc, char **argv)
     sync_queue(audio);
     ph_audio_flush(audio);
     uint8_t pcm[4096] = {1};
+    const uint64_t first_picture = 1000000000ULL;
+    ph_audio_note_broadcast_video(audio, 0);
+    CHECK(ph_audio_push_broadcast_timed(audio, pcm, sizeof pcm, first_picture) == 0);
+    ph_audio_note_broadcast_video_received(audio, first_picture);
+    ph_audio_note_broadcast_video(audio, first_picture);
+    CHECK(ph_audio_push_broadcast_timed(audio, pcm, sizeof pcm, first_picture) == 1024);
+    ph_audio_note_broadcast_video_received(audio, first_picture + 40000000ULL);
+    SDL_Delay(260);
+    CHECK(ph_audio_push_broadcast_timed(audio, pcm, sizeof pcm, first_picture + 260000000ULL) == 0);
+    ph_audio_note_broadcast_video(audio, first_picture + 40000000ULL);
+    CHECK(ph_audio_push_broadcast_timed(audio, pcm, sizeof pcm, first_picture + 40000000ULL) == 1024);
+    ph_audio_note_broadcast_video(audio, 0);
     CHECK(ph_audio_push_broadcast(audio, pcm, 5) < 0);
     CHECK(ph_audio_push_broadcast(audio, pcm, sizeof pcm) == 1024);
     CHECK(ph_audio_queued_ms(audio) > 0);

@@ -20,6 +20,7 @@ int ph_audio_push(ph_audio *audio, unsigned char compression, const uint8_t *dat
 /* 44.1 kHz stereo signed 16-bit little-endian ReplayKit application audio. */
 int ph_audio_push_broadcast(ph_audio *audio, const uint8_t *pcm, size_t len);
 int ph_audio_push_broadcast_timed(ph_audio *audio, const uint8_t *pcm, size_t len, uint64_t pts_ns);
+void ph_audio_note_broadcast_video_received(ph_audio *audio, uint64_t pts_ns);
 void ph_audio_note_broadcast_video(ph_audio *audio, uint64_t pts_ns);
 void ph_audio_set_volume(ph_audio *audio, float decibels);
 void ph_audio_flush(ph_audio *audio);

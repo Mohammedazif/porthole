@@ -57,6 +57,7 @@ struct ph_audio {
     size_t hold_bytes;
     bool clock_valid;
     uint64_t clock_ms;
+    uint64_t broadcast_received_pts, broadcast_pending_at_ms;
     uint64_t broadcast_video_pts, broadcast_video_at_ms;
     uint8_t *pcm_scratch;
     int pcm_capacity;
@@ -300,22 +301,30 @@ int ph_audio_push_broadcast_timed(ph_audio *a, const uint8_t *pcm, size_t len, u
         SDL_UnlockMutex(a->lock);
         return 0;
     }
-    if (a->compression != 1) {
-        flush_locked(a);
-        avcodec_free_context(&a->codec);
-        a->compression = 1;
-        a->warned = false;
+    uint64_t now = ph_metrics_now_ms();
+    if (pts_ns && a->broadcast_received_pts > a->broadcast_video_pts &&
+        now - a->broadcast_pending_at_ms >= 240 && now - a->broadcast_video_at_ms >= 240) {
+        if (a->compression == 1 && (a->playing || a->hold_head))
+            flush_locked(a);
+        SDL_UnlockMutex(a->lock);
+        return 0;
     }
     ph_sync_action action = {PH_SYNC_PLAY, 0, 0, false};
     if (pts_ns) {
         int offset = SDL_clamp(a->sync_offset_ms, -150, 150);
         action = ph_sync_broadcast_audio_at(a->broadcast_video_pts, a->broadcast_video_at_ms,
-                                            pts_ns, ph_metrics_now_ms(), device_queued_ms_locked(a),
+                                            pts_ns, now, a->compression == 1 ? device_queued_ms_locked(a) : 0,
                                             offset);
     }
     if (action.kind == PH_SYNC_DROP) {
         SDL_UnlockMutex(a->lock);
         return 0;
+    }
+    if (a->compression != 1) {
+        flush_locked(a);
+        avcodec_free_context(&a->codec);
+        a->compression = 1;
+        a->warned = false;
     }
     bool had_output = a->device != 0;
     if (!open_output(a)) {
@@ -577,6 +586,17 @@ int ph_audio_push_timed(ph_audio *a, unsigned char compression, const uint8_t *d
     return push_outer(a, compression, data, len, true, pts_ns);
 }
 
+void ph_audio_note_broadcast_video_received(ph_audio *a, uint64_t pts_ns)
+{
+    if (!a || !pts_ns)
+        return;
+    SDL_LockMutex(a->lock);
+    if (a->broadcast_received_pts <= a->broadcast_video_pts)
+        a->broadcast_pending_at_ms = ph_metrics_now_ms();
+    a->broadcast_received_pts = pts_ns;
+    SDL_UnlockMutex(a->lock);
+}
+
 void ph_audio_note_broadcast_video(ph_audio *a, uint64_t pts_ns)
 {
     if (!a)
@@ -588,6 +608,10 @@ void ph_audio_note_broadcast_video(ph_audio *a, uint64_t pts_ns)
         int64_t display_step = (int64_t)(now - a->broadcast_video_at_ms);
         if (!pts_ns || capture_step < -100 || display_step - capture_step > 180)
             flush_locked(a);
+    }
+    if (!pts_ns) {
+        a->broadcast_received_pts = 0;
+        a->broadcast_pending_at_ms = 0;
     }
     a->broadcast_video_pts = pts_ns;
     a->broadcast_video_at_ms = now;

@@ -445,6 +445,7 @@ static void screen_video(void *user, const uint8_t *annexb, size_t len, bool key
             PH_LOGI("showing the broadcast screen");
         }
         ph_polish_on_video(a->polish, PH_SRC_BROADCAST, annexb, len, 0);
+        ph_audio_note_broadcast_video_received(a->audio, pts_ns);
         ph_decoder_push_timestamped(a->screen_dec, annexb, len, pts_ns);
     }
     pthread_mutex_unlock(&a->src_lock);
