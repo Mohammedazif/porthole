@@ -111,6 +111,7 @@ void ph_window_set_prefs(ph_window *w, bool ctrl, bool blur, bool relative)
 void ph_window_note_transfer(ph_window *w, const char *line) { (void)w; (void)line; }
 void ph_window_copy_pairing(ph_window *w) { (void)w; }
 void ph_window_keep_aspect(ph_window *w) { (void)w; }
+void ph_window_display_changed(ph_window *w) { (void)w; }
 void ph_window_set_live_state(ph_window *w, bool feed, bool paused, bool sound_on)
 { (void)w; (void)feed; (void)paused; (void)sound_on; }
 bool ph_window_media_keys(const ph_window *w) { (void)w; return true; }
