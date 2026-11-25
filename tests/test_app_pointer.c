@@ -1094,6 +1094,11 @@ void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len)
 {
     (void)d, (void)data, (void)len;
 }
+void ph_decoder_push_timestamped(ph_decoder *d, const uint8_t *data, size_t len, uint64_t pts_ns)
+{
+    (void)pts_ns;
+    ph_decoder_push(d, data, len);
+}
 void ph_decoder_reset(ph_decoder *d) { (void)d; }
 
 bool ph_decoder_latest(ph_decoder *d, AVFrame *dst, uint64_t *seq)

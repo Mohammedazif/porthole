@@ -130,6 +130,26 @@ ph_sync_action ph_sync_audio_at(ph_sync *sync, uint64_t audio_pts_ns, uint32_t d
     return decide(audio_pts_ns, video_now, sync->offset_ms);
 }
 
+ph_sync_action ph_sync_broadcast_audio_at(uint64_t video_pts_ns, uint64_t video_at_ms,
+                                          uint64_t audio_pts_ns, uint64_t now_ms,
+                                          uint32_t queued_ms, int offset_ms)
+{
+    ph_sync_action action = {PH_SYNC_DROP, 0, 0, false};
+    if (!video_pts_ns || !audio_pts_ns || video_pts_ns > INT64_MAX || audio_pts_ns > INT64_MAX)
+        return action;
+    int64_t elapsed = now_ms >= video_at_ms ? (int64_t)(now_ms - video_at_ms) : 0;
+    int64_t lead = ((int64_t)audio_pts_ns - (int64_t)video_pts_ns) / 1000000LL
+                   - elapsed - queued_ms + offset_ms;
+    action.have_lead = true;
+    action.lead_ms = lead < INT_MIN ? INT_MIN : lead > INT_MAX ? INT_MAX : (int)lead;
+    if (lead < -90 || lead > HOLD_MAX_MS + 60)
+        return action;
+    action.kind = lead > 20 ? PH_SYNC_HOLD : PH_SYNC_PLAY;
+    if (action.kind == PH_SYNC_HOLD)
+        action.hold_or_drop_ms = lead > HOLD_MAX_MS ? HOLD_MAX_MS : (int)lead;
+    return action;
+}
+
 ph_sync_action ph_sync_audio(ph_sync *sync, uint64_t audio_pts_ns, uint32_t duration_ms)
 {
     return ph_sync_audio_at(sync, audio_pts_ns, duration_ms, 0);

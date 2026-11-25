@@ -81,7 +81,7 @@ static int read_hello(ph_screen *s, int fd)
         line[n++] = c;
     }
     line[n] = 0;
-    return !strcmp(line, "PSCR 2") ? 2 : !strcmp(line, "PSCR 1") ? 1 : 0;
+    return !strcmp(line, "PSCR 3") ? 3 : !strcmp(line, "PSCR 2") ? 2 : !strcmp(line, "PSCR 1") ? 1 : 0;
 }
 
 static void serve(ph_screen *s, int fd, const char *address)
@@ -114,14 +114,27 @@ static void serve(ph_screen *s, int fd, const char *address)
             PH_LOGW("screen broadcast: bad frame header, closing");
             break;
         }
-        if (!read_all(s, fd, frame, len, ph_metrics_now_ms() + 5000))
+        uint64_t deadline = ph_metrics_now_ms() + 5000;
+        uint64_t pts_ns = 0;
+        if (version == 3) {
+            uint8_t timestamp[8];
+            if (!read_all(s, fd, timestamp, sizeof timestamp, deadline))
+                break;
+            for (size_t i = 0; i < sizeof timestamp; i++)
+                pts_ns = (pts_ns << 8) | timestamp[i];
+            if (!pts_ns || pts_ns > INT64_MAX) {
+                PH_LOGW("screen broadcast: invalid capture time, closing");
+                break;
+            }
+        }
+        if (!read_all(s, fd, frame, len, deadline))
             break;
         if (type == 3) {
             if (frames && s->cb.audio)
-                s->cb.audio(s->cb.user, frame, len);
+                s->cb.audio(s->cb.user, frame, len, pts_ns);
         } else {
             if (s->cb.video)
-                s->cb.video(s->cb.user, frame, len, type == 2);
+                s->cb.video(s->cb.user, frame, len, type == 2, pts_ns);
             frames++;
         }
         /* The sender limits outstanding packets using these acknowledgements. */

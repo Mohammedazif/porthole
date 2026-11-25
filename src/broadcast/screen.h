@@ -8,7 +8,9 @@
  * Wire format, after the client's "PSCR 1\n" line: frames of a 4-byte big-endian
  * payload length, a 1-byte type and the payload. Type 1 is H.264 Annex-B video,
  * type 2 the same for a keyframe (SPS and PPS first). The PC answers each frame it has
- * taken with one byte, 'A'. With PSCR 2, type 3 carries 44.1 kHz stereo PCM16LE. */
+ * taken with one byte, 'A'. With PSCR 2, type 3 carries 44.1 kHz stereo PCM16LE.
+ * PSCR 3 puts an 8-byte big-endian capture time in nanoseconds after the type.
+ * The length still describes only the media payload. */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -26,8 +28,8 @@ typedef struct ph_screen_callbacks {
     bool (*allow)(void *user, const char *address);
     bool (*authorize)(void *user, const char *ticket);
     void (*connected)(void *user, const char *address);
-    void (*video)(void *user, const uint8_t *annexb, size_t len, bool keyframe);
-    void (*audio)(void *user, const uint8_t *pcm, size_t len);
+    void (*video)(void *user, const uint8_t *annexb, size_t len, bool keyframe, uint64_t pts_ns);
+    void (*audio)(void *user, const uint8_t *pcm, size_t len, uint64_t pts_ns);
     void (*disconnected)(void *user);
 } ph_screen_callbacks;
 

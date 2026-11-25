@@ -22,7 +22,7 @@
 typedef struct packet {
     struct packet *next;
     size_t len;
-    uint64_t received_ms;
+    uint64_t received_ms, capture_pts_ns;
     uint64_t generation;
     uint8_t *data; /* av_malloc, owned until av_packet_from_data */
 } packet;
@@ -92,6 +92,7 @@ static AVCodecContext *open_codec(enum AVCodecID codec_id)
         return NULL;
     ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
     ctx->max_pixels = MAX_CODED_PIXELS;
+    ctx->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
     ctx->thread_type = FF_THREAD_SLICE; /* frame threading would add a frame of latency each */
     ctx->thread_count = 4; /* one picture; do not spawn one thread per core */
     /* PTS carries local packet provenance only. Rendering remains immediate;
@@ -257,6 +258,11 @@ static void *decode_thread(void *arg)
         if (av_packet_from_data(pkt, p->data, (int)p->len) == 0) {
             p->data = NULL;
             pkt->pts = (int64_t)p->received_ms;
+            if (p->capture_pts_ns) {
+                pkt->opaque_ref = av_buffer_alloc(sizeof p->capture_pts_ns);
+                if (pkt->opaque_ref)
+                    memcpy(pkt->opaque_ref->data, &p->capture_pts_ns, sizeof p->capture_pts_ns);
+            }
             if (avcodec_send_packet(ctx, pkt) < 0)
                 PH_LOGD("decoder rejected a packet (waiting for the next keyframe)");
             av_packet_unref(pkt);
@@ -266,6 +272,8 @@ static void *decode_thread(void *arg)
         while (avcodec_receive_frame(ctx, frame) == 0) {
             uint64_t decoded_ms = ph_metrics_now_ms();
             ph_frame_timing timing = {.decoded_ms = decoded_ms};
+            if (frame->opaque_ref && frame->opaque_ref->size == sizeof timing.capture_pts_ns)
+                memcpy(&timing.capture_pts_ns, frame->opaque_ref->data, sizeof timing.capture_pts_ns);
             if (frame->pts != AV_NOPTS_VALUE && frame->pts > 0
                 && (uint64_t)frame->pts <= decoded_ms) {
                 timing.received_ms = (uint64_t)frame->pts;
@@ -338,6 +346,11 @@ void ph_decoder_limit_edge(ph_decoder *d, int long_edge)
 
 void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len)
 {
+    ph_decoder_push_timestamped(d, data, len, 0);
+}
+
+void ph_decoder_push_timestamped(ph_decoder *d, const uint8_t *data, size_t len, uint64_t capture_pts_ns)
+{
     uint8_t *copy;
     packet *p;
 
@@ -357,6 +370,7 @@ void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len)
     p->data = copy;
     pthread_mutex_lock(&d->lock);
     p->received_ms = ph_metrics_now_ms();
+    p->capture_pts_ns = capture_pts_ns;
     d->stats.packets_received++;
     if (d->queued >= PH_DECODER_MAX_QUEUED ||
         len > PH_DECODER_MAX_QUEUED_BYTES - d->queued_bytes ||

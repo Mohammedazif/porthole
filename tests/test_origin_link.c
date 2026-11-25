@@ -315,17 +315,28 @@ static bool verify_broadcast_key(void *origin, const char *key)
 }
 
 static atomic_int screen_audio_frames;
+static _Atomic uint64_t screen_audio_time, screen_video_time;
 
-static void accept_screen_audio(void *user, const uint8_t *pcm, size_t len)
+static void accept_screen_video(void *user, const uint8_t *video, size_t len, bool keyframe, uint64_t pts_ns)
 {
     (void)user;
-    if (len == 4 && memcmp(pcm, "TEST", 4) == 0)
+    if (keyframe && len == 2 && video[0] == 0x65)
+        atomic_store(&screen_video_time, pts_ns);
+}
+
+static void accept_screen_audio(void *user, const uint8_t *pcm, size_t len, uint64_t pts_ns)
+{
+    (void)user;
+    if (len == 4 && memcmp(pcm, "TEST", 4) == 0) {
+        atomic_store(&screen_audio_time, pts_ns);
         atomic_fetch_add(&screen_audio_frames, 1);
+    }
 }
 
 static void test_screen_channel(ph_origin *origin)
 {
-    ph_screen_callbacks cb = {.user = origin, .authorize = verify_ticket, .audio = accept_screen_audio};
+    ph_screen_callbacks cb = {.user = origin, .authorize = verify_ticket,
+                              .video = accept_screen_video, .audio = accept_screen_audio};
     ph_screen *server = ph_screen_start(&cb);
     CHECK(server);
     int fd = open_channel(PH_SCREEN_PORT,
@@ -357,7 +368,18 @@ static void test_screen_channel(ph_origin *origin)
     CHECK(read_peer(fd, &ack, 1, 0) == 1 && ack == 'A');
     CHECK(SSL_write(peer_ssl(fd), audio, sizeof audio) == sizeof audio);
     CHECK(read_peer(fd, &ack, 1, 0) == 1 && ack == 'A');
-    CHECK(atomic_load(&screen_audio_frames) == 1);
+    CHECK(atomic_load(&screen_audio_frames) == 1 && !atomic_load(&screen_audio_time));
+    close_peer(fd);
+    fd = channel(PH_SCREEN_PORT);
+    say(fd, "PSCR 3\n");
+    const uint8_t timed_frame[] = {0, 0, 0, 2, 2, 0, 0, 0, 1, 0x87, 0x65, 0x43, 0x21, 0x65, 0x07};
+    const uint8_t timed_audio[] = {0, 0, 0, 4, 3, 0, 0, 0, 1, 0x88, 0x65, 0x43, 0x21, 'T', 'E', 'S', 'T'};
+    CHECK(SSL_write(peer_ssl(fd), timed_frame, sizeof timed_frame) == sizeof timed_frame);
+    CHECK(read_peer(fd, &ack, 1, 0) == 1 && ack == 'A');
+    CHECK(atomic_load(&screen_video_time) == 0x187654321ULL);
+    CHECK(SSL_write(peer_ssl(fd), timed_audio, sizeof timed_audio) == sizeof timed_audio);
+    CHECK(read_peer(fd, &ack, 1, 0) == 1 && ack == 'A');
+    CHECK(atomic_load(&screen_audio_frames) == 2 && atomic_load(&screen_audio_time) == 0x188654321ULL);
     close_peer(fd);
     ph_screen_stop(server);
 }
@@ -754,9 +776,9 @@ int main(int argc, char **argv)
     test_resume_send(o, path_b, key);
     phone = reconnect_phone(key);
     char capability[96];
-    say(phone, "SCREEN?\nSCREEN? 2\nIV?\n");
+    say(phone, "SCREEN?\nSCREEN? 3\nIV?\n");
     line(phone, capability, sizeof capability);
-    CHECK(!strcmp(capability, "SCREEN 2"));
+    CHECK(!strcmp(capability, "SCREEN 3"));
     line(phone, capability, sizeof capability);
     CHECK(!strncmp(capability, "SCREENKEY ", 10) && strlen(capability + 10) == 64);
     line(phone, capability, sizeof capability);

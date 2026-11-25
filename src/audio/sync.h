@@ -42,4 +42,9 @@ ph_sync_action ph_sync_audio_at(ph_sync *sync, uint64_t audio_pts_ns, uint32_t d
 void ph_sync_note_video(ph_sync *sync, uint64_t pts_ns);
 ph_sync_action ph_sync_audio(ph_sync *sync, uint64_t audio_pts_ns, uint32_t duration_ms);
 
+/* Time a ReplayKit audio packet against the last picture actually presented. */
+ph_sync_action ph_sync_broadcast_audio_at(uint64_t video_pts_ns, uint64_t video_at_ms,
+                                          uint64_t audio_pts_ns, uint64_t now_ms,
+                                          uint32_t queued_ms, int offset_ms);
+
 #endif

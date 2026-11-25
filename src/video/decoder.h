@@ -17,6 +17,7 @@ typedef struct ph_frame_timing {
     /* Local monotonic receipt of the access unit and completion of its decode.
      * These are not iPhone capture timestamps or synchronized AirPlay NTP time. */
     uint64_t received_ms, decoded_ms;
+    uint64_t capture_pts_ns; /* zero for streams without capture times */
 } ph_frame_timing;
 
 /* Past this many waiting access units the queue is dropped and decoding resumes
@@ -36,6 +37,7 @@ ph_decoder *ph_decoder_start(void (*on_frame)(void *user), void *user);
 
 /* Copies one access unit and queues it. Safe to call from any thread. */
 void ph_decoder_push(ph_decoder *d, const uint8_t *data, size_t len);
+void ph_decoder_push_timestamped(ph_decoder *d, const uint8_t *data, size_t len, uint64_t capture_pts_ns);
 
 /* Pictures whose longer side is above this are scaled down before display.
  * 0 leaves the decoded size unchanged. Safe to call from any thread. */

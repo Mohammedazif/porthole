@@ -57,6 +57,7 @@ struct ph_audio {
     size_t hold_bytes;
     bool clock_valid;
     uint64_t clock_ms;
+    uint64_t broadcast_video_pts, broadcast_video_at_ms;
     uint8_t *pcm_scratch;
     int pcm_capacity;
     struct {
@@ -281,7 +282,14 @@ static int queue_pcm(ph_audio *a, uint8_t *pcm, int count, bool own)
     return count;
 }
 
+static int hold_pcm(ph_audio *a, uint8_t *pcm, int count, int hold_ms);
+
 int ph_audio_push_broadcast(ph_audio *a, const uint8_t *pcm, size_t len)
+{
+    return ph_audio_push_broadcast_timed(a, pcm, len, 0);
+}
+
+int ph_audio_push_broadcast_timed(ph_audio *a, const uint8_t *pcm, size_t len, uint64_t pts_ns)
 {
     if (!a || !pcm || !len || len > 8192 || len % 4)
         return -1;
@@ -298,6 +306,17 @@ int ph_audio_push_broadcast(ph_audio *a, const uint8_t *pcm, size_t len)
         a->compression = 1;
         a->warned = false;
     }
+    ph_sync_action action = {PH_SYNC_PLAY, 0, 0, false};
+    if (pts_ns) {
+        int offset = SDL_clamp(a->sync_offset_ms, -150, 150);
+        action = ph_sync_broadcast_audio_at(a->broadcast_video_pts, a->broadcast_video_at_ms,
+                                            pts_ns, ph_metrics_now_ms(), device_queued_ms_locked(a),
+                                            offset);
+    }
+    if (action.kind == PH_SYNC_DROP) {
+        SDL_UnlockMutex(a->lock);
+        return 0;
+    }
     bool had_output = a->device != 0;
     if (!open_output(a)) {
         a->warned = true;
@@ -310,7 +329,13 @@ int ph_audio_push_broadcast(ph_audio *a, const uint8_t *pcm, size_t len)
         int value = pcm[2 * i] | (int)pcm[2 * i + 1] << 8;
         samples[i] = (value < 32768 ? value : value - 65536) / 32768.0f;
     }
-    int result = queue_pcm(a, (uint8_t *)samples, frames, false);
+    int result;
+    if (action.kind == PH_SYNC_HOLD || (pts_ns && a->hold_head)) {
+        uint8_t *copy = av_memdup(samples, (size_t)frames * CHANNELS * sizeof(float));
+        result = copy && hold_pcm(a, copy, frames, action.hold_or_drop_ms) == 0 ? frames : -1;
+    } else {
+        result = queue_pcm(a, (uint8_t *)samples, frames, false);
+    }
     SDL_UnlockMutex(a->lock);
     return result;
 }
@@ -550,6 +575,23 @@ int ph_audio_push_timed(ph_audio *a, unsigned char compression, const uint8_t *d
                         uint64_t pts_ns)
 {
     return push_outer(a, compression, data, len, true, pts_ns);
+}
+
+void ph_audio_note_broadcast_video(ph_audio *a, uint64_t pts_ns)
+{
+    if (!a)
+        return;
+    SDL_LockMutex(a->lock);
+    uint64_t now = ph_metrics_now_ms();
+    if (a->compression == 1 && a->broadcast_video_pts) {
+        int64_t capture_step = ((int64_t)pts_ns - (int64_t)a->broadcast_video_pts) / 1000000LL;
+        int64_t display_step = (int64_t)(now - a->broadcast_video_at_ms);
+        if (!pts_ns || capture_step < -100 || display_step - capture_step > 180)
+            flush_locked(a);
+    }
+    a->broadcast_video_pts = pts_ns;
+    a->broadcast_video_at_ms = now;
+    SDL_UnlockMutex(a->lock);
 }
 
 void ph_audio_note_video_pts(ph_audio *a, uint64_t pts_ns)

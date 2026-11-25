@@ -74,7 +74,7 @@ int main(int argc, char **argv)
     ph_decoder_push(decoder, black_idr, sizeof black_idr);
     CHECK(wait_frames(&frames, 1));
     CHECK(ph_decoder_latest_timed(decoder, frame, &sequence, &timing));
-    CHECK(frame->width == 32 && frame->height == 32);
+    CHECK(frame->width == 32 && frame->height == 32 && timing.capture_pts_ns == 0);
     CHECK(timing.valid && timing.received_ms >= began);
     CHECK(timing.decoded_ms >= timing.received_ms && timing.decoded_ms <= ph_metrics_now_ms());
     CHECK(sequence == 1 && frame->pts == (int64_t)timing.received_ms);
@@ -86,10 +86,11 @@ int main(int argc, char **argv)
     av_usleep(10000);
     began = ph_metrics_now_ms();
     for (unsigned int i = 0; i < 3; i++)
-        ph_decoder_push(decoder, black_idr, sizeof black_idr);
+        ph_decoder_push_timestamped(decoder, black_idr, sizeof black_idr, 1000000000ULL + i);
     CHECK(wait_frames(&frames, 4));
     CHECK(ph_decoder_latest_timed(decoder, frame, &sequence, &timing));
     CHECK(sequence == 4 && timing.valid && timing.received_ms >= began);
+    CHECK(timing.capture_pts_ns == 1000000002ULL);
     CHECK(timing.decoded_ms >= timing.received_ms);
     ph_decoder_get_stats(decoder, &stats);
     CHECK(stats.packets_received == 4 && stats.frames_decoded == 4);

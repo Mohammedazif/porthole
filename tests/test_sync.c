@@ -103,6 +103,18 @@ int main(void)
     ph_sync_set_offset_ms(sync, 0);
     expect(sync, t + 541 * ns, PH_SYNC_HOLD, 200);
 
+    action = ph_sync_broadcast_audio_at(t, 1000, t + 50 * ns, 1010, 15, 0);
+    CHECK(action.kind == PH_SYNC_HOLD && action.hold_or_drop_ms == 25);
+    action = ph_sync_broadcast_audio_at(t, 1000, t + 50 * ns, 1010, 35, 0);
+    CHECK(action.kind == PH_SYNC_PLAY); /* the speaker queue already covers the lead */
+    action = ph_sync_broadcast_audio_at(t, 1000, t, 1200, 0, 0);
+    CHECK(action.kind == PH_SYNC_DROP); /* do not replay audio after the picture stalls */
+    action = ph_sync_broadcast_audio_at(t, 1000, t + 500 * ns, 1500, 0, 0);
+    CHECK(action.kind == PH_SYNC_PLAY); /* a still screen does not require fresh frames */
+    action = ph_sync_broadcast_audio_at(t, 1000, t + 500 * ns, 1010, 0, 0);
+    CHECK(action.kind == PH_SYNC_DROP); /* audio cannot run far ahead of the picture */
+    CHECK(ph_sync_broadcast_audio_at(0, 0, t, 1000, 0, 0).kind == PH_SYNC_DROP);
+
     ph_sync_note_video(NULL, t);
     ph_sync_reset(NULL);
     ph_sync_set_offset_ms(NULL, 10);

@@ -432,7 +432,7 @@ static void screen_connected(void *user, const char *address)
     }
 }
 
-static void screen_video(void *user, const uint8_t *annexb, size_t len, bool keyframe)
+static void screen_video(void *user, const uint8_t *annexb, size_t len, bool keyframe, uint64_t pts_ns)
 {
     app *a = user;
     pthread_mutex_lock(&a->src_lock);
@@ -445,18 +445,18 @@ static void screen_video(void *user, const uint8_t *annexb, size_t len, bool key
             PH_LOGI("showing the broadcast screen");
         }
         ph_polish_on_video(a->polish, PH_SRC_BROADCAST, annexb, len, 0);
-        ph_decoder_push(a->screen_dec, annexb, len);
+        ph_decoder_push_timestamped(a->screen_dec, annexb, len, pts_ns);
     }
     pthread_mutex_unlock(&a->src_lock);
 }
 
-static void screen_audio(void *user, const uint8_t *pcm, size_t len)
+static void screen_audio(void *user, const uint8_t *pcm, size_t len, uint64_t pts_ns)
 {
     app *a = user;
     pthread_mutex_lock(&a->src_lock);
     if (a->src.current == PH_SRC_BROADCAST &&
-        (!a->last_airplay_audio_ms || ph_metrics_now_ms() - a->last_airplay_audio_ms >= 750))
-        ph_audio_push_broadcast(a->audio, pcm, len);
+        (!a->last_airplay_audio_ms || ph_metrics_now_ms() - a->last_airplay_audio_ms >= 2500))
+        ph_audio_push_broadcast_timed(a->audio, pcm, len, pts_ns);
     pthread_mutex_unlock(&a->src_lock);
 }
 
@@ -468,6 +468,7 @@ static void screen_disconnected(void *user)
     pthread_mutex_lock(&a->src_lock);
     if (a->src.current == PH_SRC_BROADCAST)
         ph_audio_flush(a->audio);
+    ph_audio_note_broadcast_video(a->audio, 0);
     atomic_store(&a->screen_on, false);
     ph_src next = ph_src_switch_broadcast_lost(&a->src, ph_metrics_now_ms());
     if (a->screen_dec)
@@ -2398,7 +2399,9 @@ static void show_frame(app *a, const AVFrame *f)
             PH_LOGD("phone screen aspect %.4f", aspect);
         a->portrait_aspect = aspect;
     }
-    ph_rect screen = ph_video_content_rect_stable(&planes, a->portrait_aspect, &a->crop);
+    /* ReplayKit sends the actual screen bounds. Its dark content is part of the picture. */
+    ph_rect screen = a->frame_timing.capture_pts_ns ? (ph_rect){0, 0, f->width, f->height}
+                        : ph_video_content_rect_stable(&planes, a->portrait_aspect, &a->crop);
     bool presentation = !ph_video_matches_phone_screen(screen, a->portrait_aspect);
     if (presentation != a->presentation_mode) {
         av_frame_unref(a->pointer_reference);
@@ -2483,6 +2486,12 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
             pthread_mutex_unlock(&a->src_lock);
             if (received) {
                 show_frame(a, frame);
+                if (broadcast && a->frame_timing.capture_pts_ns) {
+                    pthread_mutex_lock(&a->src_lock);
+                    if (a->src.current == PH_SRC_BROADCAST)
+                        ph_audio_note_broadcast_video(a->audio, a->frame_timing.capture_pts_ns);
+                    pthread_mutex_unlock(&a->src_lock);
+                }
                 av_frame_unref(frame);
             }
         }

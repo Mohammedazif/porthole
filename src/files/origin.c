@@ -550,11 +550,11 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
         *consumed = true;
         return send_all(fd, "INBOX 3\n", 8);
     }
-    if (!strcmp(line, "SHARE?") || !strcmp(line, "SCREEN? 2")) {
-        bool sharing = !strcmp(line, "SCREEN? 2");
+    if (!strcmp(line, "SHARE?") || !strcmp(line, "SCREEN? 2") || !strcmp(line, "SCREEN? 3")) {
+        bool sharing = strcmp(line, "SHARE?") != 0;
         char reply[90];
         *consumed = true;
-        if (sharing && !send_all(fd, "SCREEN 2\n", 9))
+        if (sharing && !send_all(fd, !strcmp(line, "SCREEN? 3") ? "SCREEN 3\n" : "SCREEN 2\n", 9))
             return false;
         pthread_mutex_lock(&o->lock);
         const char *key = sharing ? o->screen_key : o->share_key;
