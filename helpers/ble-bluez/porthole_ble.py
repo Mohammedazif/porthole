@@ -179,6 +179,19 @@ class Service(dbus.service.Object):
         return chrc
 
 
+class NotPermitted(dbus.exceptions.DBusException):
+    _dbus_error_name = "org.bluez.Error.NotPermitted"
+
+
+def refuse_classic_link(options):
+    """HID over GATT is an LE profile. BlueZ also serves GATT over the Classic
+    link that carries the phone's sound, and an iPhone paired for sound reads
+    the keyboard there, subscribes, then ignores its input. Refusing that link
+    makes the iPhone use LE for the mouse and keyboard."""
+    if str(options.get("link", "")) == "BR/EDR":
+        raise NotPermitted("The keyboard and mouse use Bluetooth LE")
+
+
 class Characteristic(dbus.service.Object):
     def __init__(self, service, uuid, flags, value, name):
         self.path = f"{service.path}/char{len(service.characteristics)}"
@@ -214,11 +227,13 @@ class Characteristic(dbus.service.Object):
 
     @dbus.service.method(GATT_CHRC_IFACE, in_signature="a{sv}", out_signature="ay")
     def ReadValue(self, options):
+        refuse_classic_link(options)
         self.observe_device(options)
         return dbus.Array(self.value[int(options.get("offset", 0)):], signature="y")
 
     @dbus.service.method(GATT_CHRC_IFACE, in_signature="aya{sv}")
     def WriteValue(self, value, options):
+        refuse_classic_link(options)
         self.observe_device(options)
         self.value = bytes(value)
 
@@ -276,6 +291,7 @@ class Descriptor(dbus.service.Object):
 
     @dbus.service.method(GATT_DESC_IFACE, in_signature="a{sv}", out_signature="ay")
     def ReadValue(self, options):
+        refuse_classic_link(options)
         return dbus.Array(self.value[int(options.get("offset", 0)):], signature="y")
 
 
