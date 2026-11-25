@@ -70,6 +70,7 @@ void ph_window_set_prefs(ph_window *w, bool ctrl_command, bool release_blur, boo
 void ph_window_note_transfer(ph_window *w, const char *line);
 /* After the user resized the phone window, fit the other side to the phone's shape. */
 void ph_window_keep_aspect(ph_window *w);
+void ph_window_display_changed(ph_window *w);
 
 /* Feed scrolling, paused controls and PC sound, shown in Settings. */
 void ph_window_set_live_state(ph_window *w, bool feed, bool paused, bool sound_on);

@@ -112,6 +112,36 @@ static void test_scaled_corners_and_icons(SDL_Surface *surface, SDL_Renderer *re
     CHECK(SDL_RenderSetClipRect(renderer, NULL) == 0);
 }
 
+static void workspace_click(ph_workspace *workspace, int x, int y)
+{
+    SDL_Event event = {0};
+    event.type = SDL_MOUSEBUTTONDOWN;
+    event.button.button = SDL_BUTTON_LEFT;
+    event.button.x = x;
+    event.button.y = y;
+    CHECK(ph_workspace_event(workspace, &event, 1.0f));
+    event.type = SDL_MOUSEBUTTONUP;
+    CHECK(ph_workspace_event(workspace, &event, 1.0f));
+}
+
+static void test_short_settings_menu(ph_workspace *workspace, SDL_Renderer *renderer,
+                                     const ph_workspace_live *live)
+{
+    SDL_Rect area = {0, 0, 640, 235};
+    ph_workspace_open_section(workspace, 0);
+    ph_workspace_draw(workspace, renderer, area, PH_WORKSPACE_SETTINGS, live);
+    workspace_click(workspace, 45, 20);
+    ph_workspace_draw(workspace, renderer, area, PH_WORKSPACE_SETTINGS, live);
+
+    SDL_Event end = {0};
+    end.type = SDL_KEYDOWN;
+    end.key.keysym.sym = SDLK_END;
+    CHECK(ph_workspace_event(workspace, &end, 1.0f));
+    ph_workspace_draw(workspace, renderer, area, PH_WORKSPACE_SETTINGS, live);
+    workspace_click(workspace, 60, area.h - 20);
+    CHECK(ph_workspace_current_section(workspace) == PH_SETTINGS_ABOUT);
+}
+
 static void test_scaled_workspace(ph_history *history, const char *dir)
 {
     ph_workspace *workspace = ph_workspace_create();
@@ -146,6 +176,7 @@ static void test_scaled_workspace(ph_history *history, const char *dir)
         SDL_RenderPresent(renderer);
         snprintf(label, sizeof label, "connected-%d-percent", percent);
         screenshot_renderer(renderer, dir, label);
+        test_short_settings_menu(workspace, renderer, &live);
         ph_ui_release_drawing(renderer);
         ph_icon_release(renderer);
         ph_text_detach(renderer);

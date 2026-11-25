@@ -2825,7 +2825,9 @@ static bool handle_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_t *s
             break;
         if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
             ph_window_keep_aspect(a->win);
-        if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+        if (e->window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED)
+            ph_window_display_changed(a->win);
+        else if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
             e->window.event == SDL_WINDOWEVENT_EXPOSED ||
             e->window.event == SDL_WINDOWEVENT_FOCUS_GAINED)
             ph_window_redraw(a->win);

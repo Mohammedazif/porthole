@@ -10,6 +10,7 @@
 #include <libswscale/swscale.h>
 
 #include "core/log.h"
+#include "ui/display_scale.h"
 #include "ui/text.h"
 #include "ui/window.h"
 
@@ -34,6 +35,7 @@ struct ph_drag_ghost {
     SDL_Window *window;
     SDL_Renderer *renderer;
     SDL_Texture *texture;
+    float content_scale;
     int img_w, img_h;
     int win_w, win_h;
     int mx, my;
@@ -98,19 +100,18 @@ static SDL_Rect display_bounds(int x, int y)
 static void place(ph_drag_ghost *g)
 {
     SDL_Rect bounds = display_bounds(g->mx, g->my);
-    int x = g->mx + 16;
-    int y = g->my + 20;
-
     if (g->win_w < 1 || g->win_h < 1)
         return;
-    if (x + g->win_w > bounds.x + bounds.w)
-        x = g->mx - g->win_w - 16;
-    if (y + g->win_h > bounds.y + bounds.h)
-        y = g->my - g->win_h - 20;
-    if (g->mx >= x && g->mx < x + g->win_w && g->my >= y && g->my < y + g->win_h) {
-        x = g->mx - g->win_w - 16;
-        y = g->my - g->win_h - 20;
-    }
+    int width = ph_display_units(g->win_w, g->content_scale);
+    int height = ph_display_units(g->win_h, g->content_scale);
+    int offset_x = ph_display_units(16, g->content_scale);
+    int offset_y = ph_display_units(20, g->content_scale);
+    int x = g->mx + offset_x;
+    int y = g->my + offset_y;
+    if (x + width > bounds.x + bounds.w)
+        x = g->mx - width - offset_x;
+    if (y + height > bounds.y + bounds.h)
+        y = g->my - height - offset_y;
     SDL_SetWindowPosition(g->window, x, y);
 }
 
@@ -128,7 +129,8 @@ static void layout(ph_drag_ghost *g)
         return;
     g->win_w = card_w;
     g->win_h = card_h;
-    SDL_SetWindowSize(g->window, card_w, card_h);
+    SDL_SetWindowSize(g->window, ph_display_units(card_w, g->content_scale),
+                      ph_display_units(card_h, g->content_scale));
     SDL_RenderSetViewport(g->renderer, NULL);
 }
 
@@ -142,13 +144,10 @@ static void paint(ph_drag_ghost *g)
         return;
     SDL_SetRenderDrawColor(g->renderer, 28, 28, 30, 255);
     SDL_RenderClear(g->renderer);
-    /* Draw in window points; at 150% or 200% the window has more pixels than that. */
-    {
-        int ww = 0, wh = 0, ow = 0, oh = 0;
-        SDL_GetWindowSize(g->window, &ww, &wh);
-        if (ww > 0 && wh > 0 && SDL_GetRendererOutputSize(g->renderer, &ow, &oh) == 0 && ow > 0)
-            SDL_RenderSetScale(g->renderer, (float)ow / (float)ww, (float)oh / (float)wh);
-    }
+    int ow = 0, oh = 0;
+    if (g->win_w > 0 && g->win_h > 0 &&
+        SDL_GetRendererOutputSize(g->renderer, &ow, &oh) == 0 && ow > 0 && oh > 0)
+        SDL_RenderSetScale(g->renderer, (float)ow / g->win_w, (float)oh / g->win_h);
     frame = (SDL_Rect){0, 0, g->win_w, g->win_h};
     SDL_SetRenderDrawColor(g->renderer, 92, 92, 96, 255);
     SDL_RenderDrawRect(g->renderer, &frame);
@@ -239,7 +238,7 @@ ph_drag_ghost *ph_drag_ghost_create(void)
 {
     ph_drag_ghost *g = calloc(1, sizeof *g);
     Uint32 flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_BORDERLESS | SDL_WINDOW_ALWAYS_ON_TOP
-                   | SDL_WINDOW_SKIP_TASKBAR | SDL_WINDOW_TOOLTIP;
+                   | SDL_WINDOW_SKIP_TASKBAR | SDL_WINDOW_TOOLTIP | SDL_WINDOW_ALLOW_HIGHDPI;
 
     if (!g)
         return NULL;
@@ -303,6 +302,10 @@ bool ph_drag_ghost_show(ph_drag_ghost *g, const struct AVFrame *frame, ph_rect r
     av_frame_free(&rgb);
     g->img_w = dw;
     g->img_h = dh;
+    float scale = ph_display_content_scale(g->window);
+    if (scale != g->content_scale)
+        g->win_w = 0;
+    g->content_scale = scale;
     snprintf(g->caption, sizeof g->caption, "Drag onto the desktop or a folder");
     g->aimed = false;
     layout(g);

@@ -93,6 +93,7 @@ if(PORTHOLE_WITH_AIRPLAY)
         audio/player.c
         hid/link.c
         ui/window.c
+        ui/display_scale.c
         ui/control_icons.c
         ui/drawing.c
         ui/workspace.c

@@ -1,6 +1,7 @@
 #include "ui/workspace.h"
 #include "ui/clipboard_preview.h"
 #include "ui/control_icons.h"
+#include "ui/display_scale.h"
 #include "ui/drawing.h"
 #include "ui/text.h"
 #include "ui/vendor/qrcodegen.h"
@@ -2243,6 +2244,17 @@ static const char *const setting_sections[] = {
     "Help and shortcuts", "Connection statistics", "Devices", "About"
 };
 
+static void settings_scrollbar(ph_workspace *u, SDL_Rect viewport)
+{
+    if (u->scroll_limit <= 0 || viewport.h <= 0)
+        return;
+    int thumb = SDL_clamp(viewport.h * viewport.h / (u->scroll_limit + viewport.h),
+                          SDL_min(30, viewport.h), viewport.h);
+    int offset = (viewport.h - thumb) * u->scroll / u->scroll_limit;
+    rounded(u, (SDL_Rect){viewport.x + viewport.w - 7, viewport.y + offset, 3, thumb},
+            2, u->border);
+}
+
 static void settings_navigation(ph_workspace *u, SDL_Rect box, bool compact, bool menu)
 {
     const ph_control_icon icons[] = {PH_ICON_SUN, PH_ICON_PHONE, PH_ICON_MOUSE, PH_ICON_ARROWS,
@@ -2252,11 +2264,21 @@ static void settings_navigation(ph_workspace *u, SDL_Rect box, bool compact, boo
     int pad = compact ? 10 : 15, top = box.y + (compact ? 15 : 18);
     bool footer = !menu && box.h > 400;
     int bottom = box.y + box.h - (footer ? 41 : 10);
-    int step = SDL_min(41, (bottom - top) / (int)SDL_arraysize(setting_sections));
+    int count = (int)SDL_arraysize(setting_sections);
+    int step = SDL_min(41, (bottom - top) / count);
+    SDL_Rect clip = {box.x, box.y, box.w, bottom - box.y};
+    if (menu) {
+        step = SDL_max(34, step);
+        u->scroll_limit = SDL_max(0, top + count * step - bottom);
+        top -= u->scroll;
+        SDL_RenderSetClipRect(u->renderer, &clip);
+    }
     for (size_t i = 0; i < SDL_arraysize(setting_sections); i++) {
         SDL_Rect row = {box.x + pad, top + (int)i * step, box.w - 2 * pad, step - 3};
-        if (row.h < 20 || row.y + row.h > bottom)
+        if (row.h < 20 || row.y >= bottom)
             break;
+        if (row.y + row.h <= box.y)
+            continue;
         bool selected = u->section == (int)i;
         if (selected)
             rounded(u, row, 7, u->selected_bg);
@@ -2268,6 +2290,10 @@ static void settings_navigation(ph_workspace *u, SDL_Rect box, bool compact, boo
         fitted_label(u, setting_sections[i], label_x, row.y + (row.h - 18) / 2,
                      row.x + row.w - label_x - 6, compact ? 11 : 12, selected, ink);
         hit(u, row, UI_SECTION + (int)i, 0, setting_sections[i]);
+    }
+    if (menu) {
+        SDL_RenderSetClipRect(u->renderer, NULL);
+        settings_scrollbar(u, clip);
     }
     if (footer)
         text(u, "Porthole " PORTHOLE_VERSION " · GPL-3.0", box.x + 27, box.y + box.h - 31,
@@ -2317,7 +2343,7 @@ static void settings(ph_workspace *u)
 {
     SDL_Rect b = u->rect;
     bool inline_settings = u->live.mirroring;
-    bool narrow = b.w < (inline_settings ? 510 : 600);
+    bool narrow = b.w < (inline_settings ? 510 : 600) || b.h < (inline_settings ? 320 : 286);
     int nav = narrow ? 0 : inline_settings ? 180 : 224;
     int pad = narrow ? 16 : inline_settings ? 23 : 44;
     int width = SDL_min(b.w - nav - 2 * pad, 860);
@@ -2373,13 +2399,8 @@ static void settings(ph_workspace *u)
         }
         }
         SDL_RenderSetClipRect(u->renderer, NULL);
-        int visible = bottom - top;
         u->scroll_limit = SDL_max(0, y + u->scroll + 16 - bottom);
-        if (u->scroll_limit && visible > 0) {
-            int thumb = SDL_max(30, visible * visible / (u->scroll_limit + visible));
-            int dy = (visible - thumb) * u->scroll / u->scroll_limit;
-            rounded(u, (SDL_Rect){b.x + b.w - 7, top + dy, 3, thumb}, 2, u->border);
-        }
+        settings_scrollbar(u, clip);
     }
     if (inline_settings) {
         rect(u, (SDL_Rect){b.x, bottom, b.w, 34}, u->surface);
@@ -2596,6 +2617,7 @@ static void activate(ph_workspace *u, ui_hit h)
     }
     if (a == UI_SECTION_MENU) {
         u->section_menu = !u->section_menu;
+        u->scroll = 0;
         return;
     }
     if (a == UI_HELP_GUIDE && h.id < SDL_arraysize(help_guides)) {
@@ -2892,7 +2914,7 @@ static void edit_key(ph_workspace *u, char *field, size_t capacity, const SDL_Ke
     }
 }
 
-bool ph_workspace_event(ph_workspace *u, const SDL_Event *event)
+bool ph_workspace_event(ph_workspace *u, const SDL_Event *event, float content_scale)
 {
     if (!u)
         return false;
@@ -2970,6 +2992,8 @@ bool ph_workspace_event(ph_workspace *u, const SDL_Event *event)
 #else
         SDL_GetMouseState(&x, &y);
 #endif
+        x = ph_display_point(x, content_scale);
+        y = ph_display_point(y, content_scale);
         if (!SDL_PointInRect(&(SDL_Point){x, y}, &u->rect))
             return false;
         int amount = SDL_clamp(event->wheel.y, -20, 20);

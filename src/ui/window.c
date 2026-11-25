@@ -16,14 +16,18 @@
 #include "ui/text.h"
 #include "ui/brand_art.h"
 #include "ui/control_icons.h"
+#include "ui/display_scale.h"
 #include "ui/drawing.h"
 #include "ui/accessibility.h"
 #include "ui/placement.h"
 #include "ui/vendor/qrcodegen.h"
 
 #define RESIZE_SETTLE_MS 400 /* a new picture size must last this long before resizing */
+#define SCALE_POLL_MS 2000
 #define WAITING_W 1024
 #define WAITING_H 680
+#define MIN_WINDOW_W 320
+#define MIN_WINDOW_H 480
 #define RESIZE_EDGE_PX 12
 #define RAIL_W 60
 #define TRANSFERS_W 300
@@ -31,6 +35,8 @@
 struct ph_window {
     SDL_Window *window;
     SDL_Renderer *renderer;
+    float content_scale;
+    Uint64 next_scale_check;
     ph_workspace *workspace;
 #ifdef _WIN32
     ph_accessibility *accessibility;
@@ -919,20 +925,20 @@ static void draw_help(ph_window *w, int width, int height, int top)
     draw_text(w->renderer, "Porthole v" PORTHOLE_VERSION, left, height - 28, content_w, 1, color_muted);
 }
 
-/* Setup: a numbered step list on the left when wide, the step's content beside it. */
+/* Setup uses a side step list when there is room for it. */
 typedef struct setup_frame {
     bool wide;
     SDL_Rect rail;     /* step list; empty when narrow */
     int left, width;   /* content column */
 } setup_frame;
 
-static setup_frame setup_layout(int width)
+static setup_frame setup_layout(int width, int height)
 {
     setup_frame f;
     int outer = width - (width < 400 ? 40 : 56);
 
     memset(&f, 0, sizeof f);
-    f.wide = width >= 760;
+    f.wide = width >= 760 && height >= 370;
     if (outer > 980) outer = 980;
     f.left = (width - outer) / 2;
     f.width = outer;
@@ -946,7 +952,7 @@ static setup_frame setup_layout(int width)
 
 static void setup_buttons(int width, int height, SDL_Rect buttons[3])
 {
-    setup_frame f = setup_layout(width);
+    setup_frame f = setup_layout(width, height);
     int button_width = SDL_min(132, (f.width - 10) / 2);
     int x = f.left + f.width - 2 * button_width - 10;
     buttons[0] = (SDL_Rect){width - 40, PH_WINDOW_BAR_PX + 8, 32, 32};
@@ -984,7 +990,7 @@ static void draw_setup(ph_window *w, int width, int height, int top)
 {
     dialog_colors ui = dialog_theme(w);
     const ph_setup *s = &w->setup;
-    setup_frame frame = setup_layout(width);
+    setup_frame frame = setup_layout(width, height);
     int margin = frame.left, content_width = frame.width;
     rounded(w->renderer, (SDL_Rect){0, top, width, height - top}, 0, ui.bg);
     SDL_Rect buttons[3];
@@ -1251,15 +1257,17 @@ static SDL_Texture *brand_on_dark(SDL_Renderer *renderer, const unsigned char *p
     return texture;
 }
 
-static int bar_output_px(const ph_window *w, int out_h)
+static void layout_size(const ph_window *w, int *width, int *height)
 {
-    int win_w = 1, win_h = 1, bar;
+    int ww, wh;
+    SDL_GetWindowSize(w->window, &ww, &wh);
+    *width = ph_display_units(ww, 1.0f / w->content_scale);
+    *height = ph_display_units(wh, 1.0f / w->content_scale);
+}
 
-    SDL_GetWindowSize(w->window, &win_w, &win_h);
-    (void)win_w;
-    if (win_h < 1)
-        win_h = 1;
-    bar = PH_WINDOW_BAR_PX * out_h / win_h;
+static int bar_output_px(int layout_h, int out_h)
+{
+    int bar = PH_WINDOW_BAR_PX * out_h / SDL_max(1, layout_h);
     if (bar < 1)
         bar = 1;
     if (out_h > 4 && bar > out_h - 4)
@@ -1770,7 +1778,7 @@ static void push_shortcut(ph_window *w, SDL_Scancode key, SDL_Keymod mod)
     SDL_PushEvent(&event);
 }
 
-static void flip_panel(ph_window *w, bool *flag, int width_px)
+static void flip_panel(ph_window *w, bool *flag, int points)
 {
     int *expansion = flag == &w->settings_visible ? &w->settings_expansion
                      : flag == &w->rail_open      ? &w->rail_expansion
@@ -1779,15 +1787,17 @@ static void flip_panel(ph_window *w, bool *flag, int width_px)
     int ww, wh;
 
     *flag = !*flag;
-    int delta = *flag ? width_px : -*expansion;
+    int delta = *flag ? ph_display_units(points, w->content_scale) : -*expansion;
     if ((flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) == 0) {
         SDL_GetWindowSize(w->window, &ww, &wh);
-        int width = SDL_max(320, ww + delta);
+        int min_w;
+        SDL_GetWindowMinimumSize(w->window, &min_w, NULL);
+        int width = SDL_max(min_w, ww + delta);
         SDL_Rect usable;
         if (SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(w->window), &usable) == 0) {
             int x, y;
             SDL_GetWindowPosition(w->window, &x, &y);
-            width = SDL_max(320, SDL_min(width, usable.w));
+            width = SDL_min(width, usable.w);
             x = SDL_clamp(x, usable.x, usable.x + SDL_max(0, usable.w - width));
             SDL_SetWindowPosition(w->window, x, y);
         }
@@ -1824,6 +1834,7 @@ ph_window *ph_window_create(const char *title)
     snprintf(w->title, sizeof w->title, "%s", title ? title : "Porthole");
     if (!w->window)
         goto fail;
+    w->content_scale = ph_display_content_scale(w->window);
     /* No vsync: presenting a frame must not block this thread, which also forwards
      * mouse and keyboard input, for up to a whole display refresh. */
 #if !defined(_WIN32)
@@ -1867,7 +1878,6 @@ ph_window *ph_window_create(const char *title)
             SDL_FreeSurface(icon);
         }
     }
-    SDL_SetWindowMinimumSize(w->window, 320, 480);
     place_waiting(w);
     if (SDL_SetWindowHitTest(w->window, hit_edges, w) != 0)
         PH_LOGW("window edges cannot resize: %s", SDL_GetError());
@@ -2030,11 +2040,11 @@ bool ph_window_settings_target(ph_window *w, int row, int side, int *x, int *y)
     if (!w || !x || !y || row < -1 || row >= SET_ROWS)
         return false;
     load_save_place(w);
-    SDL_GetWindowSize(w->window, &width, &height);
+    layout_size(w, &width, &height);
     if (row == -1) {
         SDL_Rect done = settings_done_box(width);
-        *x = done.x + done.w / 2;
-        *y = done.y + done.h / 2;
+        *x = ph_display_units(done.x + done.w / 2, w->content_scale);
+        *y = ph_display_units(done.y + done.h / 2, w->content_scale);
         return true;
     }
     top = settings_top() - w->modal_scroll;
@@ -2042,9 +2052,10 @@ bool ph_window_settings_target(ph_window *w, int row, int side, int *x, int *y)
         setting_box b = setting_layout(w, width, i, &top);
         if (i == row) {
             SDL_Rect c = setting_rows[i].kind == SET_CHOICE ? (side ? b.right : b.left) : b.control;
-            *x = c.x + c.w / 2;
-            *y = c.y + c.h / 2;
-            return *y < height;
+            int cy = c.y + c.h / 2;
+            *x = ph_display_units(c.x + c.w / 2, w->content_scale);
+            *y = ph_display_units(cy, w->content_scale);
+            return cy < height;
         }
     }
     return false;
@@ -2088,7 +2099,7 @@ bool ph_window_connect_target(ph_window *w, ph_window_target target, int *x, int
 
     if (!w || !x || !y || w->has_picture)
         return false;
-    SDL_GetWindowSize(w->window, &width, &height);
+    layout_size(w, &width, &height);
     g = connect_layout(width, height, PH_WINDOW_BAR_PX);
     switch (target) {
     case PH_TARGET_COPY: box = g.copy; break;
@@ -2098,8 +2109,8 @@ bool ph_window_connect_target(ph_window *w, ph_window_target target, int *x, int
     case PH_TARGET_STATS: box = g.stats; break;
     default: box = g.gear; break;
     }
-    *x = box.x + box.w / 2;
-    *y = box.y + box.h / 2;
+    *x = ph_display_units(box.x + box.w / 2, w->content_scale);
+    *y = ph_display_units(box.y + box.h / 2, w->content_scale);
     return true;
 }
 
@@ -2123,11 +2134,12 @@ static void set_settings(ph_window *w, bool open)
     if (mirror_chrome(w)) {
         int width, height;
         SDL_Rect bounds;
-        SDL_GetWindowSize(w->window, &width, &height);
+        layout_size(w, &width, &height);
         int previous = w->transfers_open ? TRANSFERS_W : 0;
         if (open) {
             int display = SDL_GetWindowDisplayIndex(w->window);
-            int available = SDL_GetDisplayUsableBounds(display, &bounds) == 0 ? bounds.w : 1280;
+            int available = SDL_GetDisplayUsableBounds(display, &bounds) == 0
+                                ? ph_display_units(bounds.w, 1.0f / w->content_scale) : 1280;
             w->settings_width = SDL_max(380, SDL_min(760, available - width + previous));
         }
         flip_panel(w, &w->settings_visible, w->settings_width - previous);
@@ -2365,10 +2377,11 @@ ph_setup_action ph_window_setup_click(const ph_window *w, int x, int y)
     if (!w->setup.visible)
         return PH_SETUP_ACTION_NONE;
     int width, height;
-    SDL_GetWindowSize(w->window, &width, &height);
+    layout_size(w, &width, &height);
     if (width <= 0 || height <= 0)
         return PH_SETUP_ACTION_NONE;
-    SDL_Point point = {x, y};
+    SDL_Point point = {ph_display_point(x, w->content_scale),
+                       ph_display_point(y, w->content_scale)};
     SDL_Rect buttons[3];
     setup_buttons(width, height, buttons);
     if (SDL_PointInRect(&point, &buttons[0]))
@@ -2456,11 +2469,72 @@ static void usable_bounds(SDL_Window *window, SDL_Rect *usable)
     }
 }
 
+static void set_minimum_size(ph_window *w, SDL_Rect usable)
+{
+    SDL_SetWindowMinimumSize(
+        w->window, SDL_min(ph_display_units(MIN_WINDOW_W, w->content_scale), SDL_max(1, usable.w)),
+        SDL_min(ph_display_units(MIN_WINDOW_H, w->content_scale), SDL_max(1, usable.h)));
+}
+
+static void resize_to_display(ph_window *w, SDL_Rect usable, float ratio)
+{
+    int old_w, old_h;
+    SDL_GetWindowSize(w->window, &old_w, &old_h);
+    set_minimum_size(w, usable);
+    if (SDL_GetWindowFlags(w->window) &
+        (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MINIMIZED))
+        return;
+    if (ratio == 1.0f && old_w <= usable.w && old_h <= usable.h)
+        return;
+
+    int old_x, old_y, x, y, min_w, min_h;
+    SDL_GetWindowPosition(w->window, &old_x, &old_y);
+    SDL_GetWindowMinimumSize(w->window, &min_w, &min_h);
+    const ph_window_insets insets = frame_insets(w->window);
+    int width = SDL_clamp(ph_display_units(old_w, ratio), min_w, SDL_max(min_w, usable.w));
+    int height = SDL_clamp(ph_display_units(old_h, ratio), min_h, SDL_max(min_h, usable.h));
+    ph_chrome_place_client(width, height, usable.x, usable.y, usable.w, usable.h, &insets,
+                           old_x, old_y, old_w, old_h, false, &x, &y);
+    w->sized_w = width;
+    w->sized_h = height;
+    SDL_SetWindowSize(w->window, width, height);
+    SDL_SetWindowPosition(w->window, x, y);
+}
+
+void ph_window_display_changed(ph_window *w)
+{
+    SDL_Rect usable;
+    usable_bounds(w->window, &usable);
+    resize_to_display(w, usable, 1.0f);
+    ph_window_redraw(w);
+}
+
+static void refresh_content_scale(ph_window *w, Uint64 now)
+{
+    if (now < w->next_scale_check)
+        return;
+    w->next_scale_check = now + SCALE_POLL_MS;
+    float scale = ph_display_content_scale(w->window);
+    if (scale == w->content_scale)
+        return;
+
+    float ratio = scale / w->content_scale;
+    w->content_scale = scale;
+    w->settings_expansion = ph_display_units(w->settings_expansion, ratio);
+    w->rail_expansion = ph_display_units(w->rail_expansion, ratio);
+    w->transfers_expansion = ph_display_units(w->transfers_expansion, ratio);
+
+    SDL_Rect usable;
+    usable_bounds(w->window, &usable);
+    resize_to_display(w, usable, ratio);
+    ph_window_redraw(w);
+}
+
 static void place_waiting(ph_window *w)
 {
     SDL_Rect usable;
-    int client_w = WAITING_W;
-    int client_h = WAITING_H;
+    int client_w = ph_display_units(WAITING_W, w->content_scale);
+    int client_h = ph_display_units(WAITING_H, w->content_scale);
     int x, y;
 
     usable_bounds(w->window, &usable);
@@ -2468,6 +2542,7 @@ static void place_waiting(ph_window *w)
         usable.w = client_w;
     if (usable.h < 1)
         usable.h = client_h;
+    set_minimum_size(w, usable);
     if (client_w > usable.w)
         client_w = usable.w;
     if (client_h > usable.h)
@@ -2489,18 +2564,26 @@ static void place_window(ph_window *w, int pic_w, int pic_h, bool center)
         return;
     usable_bounds(w->window, &usable);
     insets = frame_insets(w->window);
+    const float scale = w->content_scale;
+    const int bar = ph_display_units(PH_WINDOW_BAR_PX, scale);
     {
-        int limit_h = usable.h - PH_WINDOW_BAR_PX;
+        int limit_h = usable.h - bar;
         if (limit_h < 1)
             limit_h = 1;
         if (w->settings_visible && !w->settings_width)
-            w->settings_width = SDL_min(720, usable.w / 2);
-        int panels = SDL_min(side_panels_w(w), SDL_max(0, usable.w - 160));
-        ph_chrome_fit_client(pic_w, pic_h, usable.w - panels, limit_h, &insets, &client_w,
-                             &client_h);
+            w->settings_width = SDL_min(720, ph_display_units(usable.w / 2, 1.0f / scale));
+        int panels = SDL_min(ph_display_units(side_panels_w(w), scale),
+                             SDL_max(0, usable.w - ph_display_units(160, scale)));
+        ph_chrome_fit_client(ph_display_units(pic_w, scale), ph_display_units(pic_h, scale),
+                             usable.w - panels, limit_h, &insets, &client_w, &client_h);
         client_w += panels;
     }
-    client_h += PH_WINDOW_BAR_PX;
+    client_h += bar;
+    set_minimum_size(w, usable);
+    int min_w, min_h;
+    SDL_GetWindowMinimumSize(w->window, &min_w, &min_h);
+    client_w = SDL_max(client_w, min_w);
+    client_h = SDL_max(client_h, min_h);
     SDL_GetWindowPosition(w->window, &cur_x, &cur_y);
     SDL_GetWindowSize(w->window, &cur_w, &cur_h);
     ph_chrome_place_client(client_w, client_h, usable.x, usable.y, usable.w, usable.h, &insets,
@@ -2539,18 +2622,25 @@ void ph_window_keep_aspect(ph_window *w)
         w->sized_h = wh;
         return;
     }
-    panels = side_panels_w(w);
+    if (ww == w->sized_w && wh == w->sized_h)
+        return;
+    panels = ph_display_units(side_panels_w(w), w->content_scale);
+    int bar = ph_display_units(PH_WINDOW_BAR_PX, w->content_scale);
     width_moved = w->sized_w && abs(ww - w->sized_w) > abs(wh - w->sized_h);
     if (width_moved) {
         content_w = ww - panels;
         content_h = (int)lround((double)content_w * w->screen.h / w->screen.w);
-        wh = content_h + PH_WINDOW_BAR_PX;
+        wh = content_h + bar;
     } else {
-        content_h = wh - PH_WINDOW_BAR_PX;
+        content_h = wh - bar;
         content_w = (int)lround((double)content_h * w->screen.w / w->screen.h);
         ww = content_w + panels;
     }
-    if (ww < 320 || wh < 480)
+    int min_w, min_h;
+    SDL_Rect usable;
+    SDL_GetWindowMinimumSize(w->window, &min_w, &min_h);
+    usable_bounds(w->window, &usable);
+    if (ww < min_w || wh < min_h || ww > usable.w || wh > usable.h)
         return;
     {
         int cw, ch;
@@ -2571,23 +2661,24 @@ static SDL_HitTestResult hit_edges(SDL_Window *window, const SDL_Point *p, void 
     int ww, wh;
     bool left, right, top, bottom;
 
-    if (!p || (SDL_GetWindowFlags(window) &
+    if (!w || !p || (SDL_GetWindowFlags(window) &
                (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)))
         return SDL_HITTEST_NORMAL;
     SDL_GetWindowSize(window, &ww, &wh);
     if (ww < 1 || wh < 1)
         return SDL_HITTEST_NORMAL;
-    right = p->x >= ww - RESIZE_EDGE_PX;
-    bottom = p->y >= wh - RESIZE_EDGE_PX;
-    if (w && mirror_chrome(w)) {
+    int edge = ph_display_units(RESIZE_EDGE_PX, w->content_scale);
+    right = p->x >= ww - edge;
+    bottom = p->y >= wh - edge;
+    if (mirror_chrome(w)) {
         if (right && bottom)
             return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
-        if (right && p->y >= PH_WINDOW_BAR_PX)
+        if (right && p->y >= ph_display_units(PH_WINDOW_BAR_PX, w->content_scale))
             return SDL_HITTEST_RESIZE_RIGHT;
         return SDL_HITTEST_NORMAL;
     }
-    left = p->x < RESIZE_EDGE_PX;
-    top = p->y < RESIZE_EDGE_PX;
+    left = p->x < edge;
+    top = p->y < edge;
     if (top && left)
         return SDL_HITTEST_RESIZE_TOPLEFT;
     if (top && right)
@@ -2663,7 +2754,9 @@ void ph_window_present(ph_window *w, const AVFrame *f, const ph_rect *screen)
 
 void ph_window_tick(ph_window *w)
 {
-    if (w->notice_until && SDL_GetTicks64() >= w->notice_until) {
+    const Uint64 now = SDL_GetTicks64();
+    refresh_content_scale(w, now);
+    if (w->notice_until && now >= w->notice_until) {
         w->notice_until = 0;
         ph_window_redraw(w);
     }
@@ -2671,12 +2764,12 @@ void ph_window_tick(ph_window *w)
         w->dark = ph_workspace_dark(w->workspace);
         ph_window_redraw(w);
     }
-    if (w->copied_until && SDL_GetTicks64() >= w->copied_until) {
+    if (w->copied_until && now >= w->copied_until) {
         w->copied_until = 0;
         ph_window_redraw(w);
     }
     if (!w->pairing_visible && w->pending_w &&
-        SDL_GetTicks64() - w->pending_since >= RESIZE_SETTLE_MS) {
+        now - w->pending_since >= RESIZE_SETTLE_MS) {
         fit_window_to_picture(w, w->pending_w, w->pending_h);
         ph_window_redraw(w);
     }
@@ -3142,9 +3235,9 @@ void ph_window_redraw(ph_window *w)
     SDL_RenderClear(w->renderer);
     if (SDL_GetRendererOutputSize(w->renderer, &out_w, &out_h) != 0)
         return;
-    SDL_GetWindowSize(w->window, &width, &height);
+    layout_size(w, &width, &height);
     if (width < 1 || height < 1) return;
-    top = bar_output_px(w, out_h);
+    top = bar_output_px(height, out_h);
     if (w->has_picture && w->texture && !w->pairing_visible) {
         int pic_out_w = (int)(picture_column_w(w, width) * ((float)out_w / (float)width) + 0.5f);
         if (pic_out_w > 0) {
@@ -3228,22 +3321,25 @@ static bool picture_point(const ph_window *w, int x, int y, double *vx, double *
 {
     int win_w, win_h;
     SDL_Rect r;
+    const double point_x = (x + 0.5) / w->content_scale;
+    const double point_y = (y + 0.5) / w->content_scale;
 
     if (!w->has_picture || w->setup.visible ||
         (ph_window_help_visible(w) && !(allow_settings_preview && settings_preview(w))))
         return false;
-    if (y < PH_WINDOW_BAR_PX)
+    if (point_y < PH_WINDOW_BAR_PX)
         return false;
-    SDL_GetWindowSize(w->window, &win_w, &win_h);
+    layout_size(w, &win_w, &win_h);
     if (win_h - PH_WINDOW_BAR_PX < 1)
         return false;
     win_w = picture_column_w(w, win_w);
     r = fit_rect(win_w, win_h - PH_WINDOW_BAR_PX, w->screen.w, w->screen.h);
     r.y += PH_WINDOW_BAR_PX;
-    if (r.w <= 0 || r.h <= 0 || x < r.x || y < r.y || x >= r.x + r.w || y >= r.y + r.h)
+    if (r.w <= 0 || r.h <= 0 || point_x < r.x || point_y < r.y ||
+        point_x >= r.x + r.w || point_y >= r.y + r.h)
         return false;
-    *vx = (x - r.x + 0.5) / r.w;
-    *vy = (y - r.y + 0.5) / r.h;
+    *vx = (point_x - r.x) / r.w;
+    *vy = (point_y - r.y) / r.h;
     return true;
 }
 
@@ -3354,9 +3450,23 @@ static void accessible_action(void *context)
 bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
 {
     int win_w = 1, win_h = 1, x, y, hit;
+    SDL_Event pointer;
 
     if (!w || !event)
         return false;
+    if (w->content_scale != 1.0f) {
+        if (event->type == SDL_MOUSEMOTION) {
+            pointer = *event;
+            pointer.motion.x = ph_display_point(event->motion.x, w->content_scale);
+            pointer.motion.y = ph_display_point(event->motion.y, w->content_scale);
+            event = &pointer;
+        } else if (event->type == SDL_MOUSEBUTTONDOWN || event->type == SDL_MOUSEBUTTONUP) {
+            pointer = *event;
+            pointer.button.x = ph_display_point(event->button.x, w->content_scale);
+            pointer.button.y = ph_display_point(event->button.y, w->content_scale);
+            event = &pointer;
+        }
+    }
     if (w->pairing_visible && !w->settings_visible && !w->setup.visible &&
         w->page == PH_WORKSPACE_HOME && event->type == SDL_KEYDOWN &&
         event->key.keysym.scancode == SDL_SCANCODE_ESCAPE &&
@@ -3365,7 +3475,8 @@ bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
         ph_window_redraw(w);
         return true;
     }
-    if (w->workspace_drawn && !w->chrome_down && ph_workspace_event(w->workspace, event)) {
+    if (w->workspace_drawn && !w->chrome_down &&
+        ph_workspace_event(w->workspace, event, w->content_scale)) {
         dispatch_workspace_action(w);
         if (event->type != SDL_MOUSEMOTION)
             ph_window_redraw(w);
@@ -3401,7 +3512,7 @@ bool ph_window_chrome_event(ph_window *w, const SDL_Event *event)
             return true;
         }
     }
-    SDL_GetWindowSize(w->window, &win_w, &win_h);
+    layout_size(w, &win_w, &win_h);
     if (w->diagnostics_visible && !w->setup.visible && !w->help_visible) {
         if (event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) {
             SDL_Scancode key = event->key.keysym.scancode;

@@ -106,7 +106,7 @@ void ph_workspace_set_history(ph_workspace *ui, ph_history *history);
 void ph_workspace_draw(ph_workspace *ui, SDL_Renderer *renderer, SDL_Rect rect,
                        ph_workspace_view view, const ph_workspace_live *live);
 /* Handles only the rendered local region; never injects phone input. */
-bool ph_workspace_event(ph_workspace *ui, const SDL_Event *event);
+bool ph_workspace_event(ph_workspace *ui, const SDL_Event *event, float content_scale);
 bool ph_workspace_owns_keyboard(const ph_workspace *ui);
 ph_workspace_action ph_workspace_take_action(ph_workspace *ui, uint64_t *item);
 bool ph_workspace_dark(ph_workspace *ui);

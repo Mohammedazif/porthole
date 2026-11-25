@@ -12,6 +12,7 @@
 #include "files/places.h"
 #include "ui/brand_art.h"
 #include "ui/control_icons.h"
+#include "ui/display_scale.h"
 #include "ui/drawing.h"
 #include "ui/text.h"
 
@@ -49,6 +50,7 @@ enum { PHASE_HIDDEN, PHASE_IN, PHASE_HOLD, PHASE_OUT };
 struct ph_transfer_card {
     SDL_Window *window;
     SDL_Renderer *renderer;
+    float content_scale;
     SDL_Texture *logo, *light_logo;
     int shaped_w; /* pixel width the Windows corner region was cut for */
     SDL_Cursor *hand;
@@ -122,7 +124,7 @@ static void shape_window(SDL_Window *window)
 #if defined(PH_HAVE_X11) && defined(PH_HAVE_XSHAPE)
     SDL_SysWMinfo info;
     Region region;
-    int base = 0, err = 0, y;
+    int base = 0, err = 0, width, height;
 
     SDL_VERSION(&info.version);
     if (!window || !SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_X11
@@ -133,22 +135,24 @@ static void shape_window(SDL_Window *window)
     region = XCreateRegion();
     if (!region)
         return;
-    for (y = 0; y < CARD_H; y++) {
+    SDL_GetWindowSize(window, &width, &height);
+    int radius = ph_display_units(CARD_R, (float)height / CARD_H);
+    for (int y = 0; y < height; y++) {
         int inset = 0, dy = -1;
         XRectangle row;
-        if (y < CARD_R)
-            dy = CARD_R - 1 - y;
-        else if (y >= CARD_H - CARD_R)
-            dy = y - (CARD_H - CARD_R);
+        if (y < radius)
+            dy = radius - 1 - y;
+        else if (y >= height - radius)
+            dy = y - (height - radius);
         if (dy >= 0)
-            inset = CARD_R - isqrt_int(CARD_R * CARD_R - dy * dy);
+            inset = radius - isqrt_int(radius * radius - dy * dy);
         if (inset < 0)
             inset = 0;
-        if (CARD_W - 2 * inset <= 0)
+        if (width - 2 * inset <= 0)
             continue;
         row.x = (short)inset;
         row.y = (short)y;
-        row.width = (unsigned short)(CARD_W - 2 * inset);
+        row.width = (unsigned short)(width - 2 * inset);
         row.height = 1;
         XUnionRectWithRegion(&row, region, region);
     }
@@ -187,8 +191,15 @@ static void rest_on_display(ph_transfer_card *c)
     SDL_Rect bounds;
     SDL_GetGlobalMouseState(&mx, &my);
     bounds = display_bounds(mx, my);
-    c->rest_x = SDL_max(bounds.x, bounds.x + bounds.w - CARD_W - 24);
-    c->rest_y = SDL_max(bounds.y, bounds.y + bounds.h - CARD_H - 24);
+    float fit_x = (float)SDL_max(1, bounds.w) / CARD_W;
+    float fit_y = (float)SDL_max(1, bounds.h) / CARD_H;
+    c->content_scale = SDL_min(ph_display_content_scale(c->window), SDL_min(fit_x, fit_y));
+    int width = SDL_max(1, ph_display_units(CARD_W, c->content_scale));
+    int height = SDL_max(1, ph_display_units(CARD_H, c->content_scale));
+    int margin = ph_display_units(24, c->content_scale);
+    SDL_SetWindowSize(c->window, width, height);
+    c->rest_x = SDL_max(bounds.x, bounds.x + bounds.w - width - margin);
+    c->rest_y = SDL_max(bounds.y, bounds.y + bounds.h - height - margin);
 }
 
 /* One line. A long name keeps its ending, so the extension stays visible. */
@@ -268,17 +279,15 @@ static void paint(ph_transfer_card *c, Uint64 now)
     SDL_Renderer *r = c->renderer;
     SDL_SetRenderDrawColor(r, bg.r, bg.g, bg.b, 255);
     SDL_RenderClear(r);
-    /* Lay out in window points: on a 150% or 200% display the window has more pixels
-     * than points, and drawing 1:1 left the card small in its top-left corner. */
+    /* Render the fixed point layout at the actual drawable density. */
     {
-        int ww = 0, wh = 0, ow = 0, oh = 0;
-        SDL_GetWindowSize(c->window, &ww, &wh);
-        if (ww > 0 && wh > 0 && SDL_GetRendererOutputSize(c->renderer, &ow, &oh) == 0 && ow > 0) {
-            SDL_RenderSetScale(c->renderer, (float)ow / (float)ww, (float)oh / (float)wh);
+        int ow = 0, oh = 0;
+        if (SDL_GetRendererOutputSize(c->renderer, &ow, &oh) == 0 && ow > 0 && oh > 0) {
+            SDL_RenderSetScale(c->renderer, (float)ow / CARD_W, (float)oh / CARD_H);
 #ifdef _WIN32
             if (ow != c->shaped_w) {
                 SDL_SysWMinfo info;
-                int radius = CARD_R * ow / ww;
+                int radius = CARD_R * ow / CARD_W;
                 SDL_VERSION(&info.version);
                 if (SDL_GetWindowWMInfo(c->window, &info) && info.subsystem == SDL_SYSWM_WINDOWS) {
                     HRGN round = CreateRoundRectRgn(0, 0, ow + 1, oh + 1, 2 * radius, 2 * radius);
@@ -537,9 +546,9 @@ void ph_transfer_card_show(ph_transfer_card *c, const char *path, int done, int 
         c->phase = PHASE_IN;
         c->phase_at = now;
         c->placed_y = -100000;
+        place_opacity(c, c->rest_y + ph_display_units(SLIDE_PX, c->content_scale), 0);
         SDL_ShowWindow(c->window);
         shape_window(c->window);
-        place_opacity(c, c->rest_y + SLIDE_PX, 0);
     }
     paint(c, now);
     if (c->received)
@@ -568,7 +577,7 @@ void ph_transfer_card_tick(ph_transfer_card *c, Uint64 now)
         return;
     if (c->phase == PHASE_IN) {
         t = ease(now - c->phase_at, IN_MS);
-        y = c->rest_y + (int)((1.0f - t) * SLIDE_PX);
+        y = c->rest_y + (int)((1.0f - t) * SLIDE_PX * c->content_scale);
         opacity = t;
         if (now - c->phase_at >= IN_MS) {
             c->phase = PHASE_HOLD;
@@ -578,7 +587,7 @@ void ph_transfer_card_tick(ph_transfer_card *c, Uint64 now)
         }
     } else if (c->phase == PHASE_OUT) {
         t = ease(now - c->phase_at, OUT_MS);
-        y = c->rest_y + (int)(t * SLIDE_PX);
+        y = c->rest_y + (int)(t * SLIDE_PX * c->content_scale);
         opacity = 1.0f - t;
         if (now - c->phase_at >= OUT_MS) {
             hide_card(c);
@@ -657,6 +666,8 @@ bool ph_transfer_card_event(ph_transfer_card *c, const SDL_Event *event, Uint64 
         x = event->button.x;
         y = event->button.y;
     }
+    x = ph_display_point(x, c->content_scale);
+    y = ph_display_point(y, c->content_scale);
     c->inside = true;
     c->touch = now;
     open = hit(c->open_r, x, y);
