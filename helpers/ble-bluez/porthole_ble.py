@@ -615,6 +615,12 @@ def main():
         the same phone returning from a different one without logging addresses."""
         emit("peer-id " + hashlib.sha256(str(path).encode()).hexdigest()[:16])
         emit("subscribed")
+        # Ask for the phone's sound only once the mouse and keyboard are up.
+        # Asking on every connection looped: each Classic attempt briefly
+        # connects the phone, which read as the phone connecting again.
+        reset_phone_audio_retry()
+        if phone_audio[0]:
+            GLib.timeout_add(1500, apply_phone_audio)  # once the phone link settles
 
     def on_subscribe():
         if (service_registered[0] and connected_path[0]
@@ -708,9 +714,6 @@ def main():
                     report.subscribed_at = 0.0
                 subscription_peer[0] = None
             emit("connected")
-            reset_phone_audio_retry()
-            if phone_audio[0]:
-                GLib.timeout_add(1500, apply_phone_audio)  # once the phone link settles
             # Only the same bonded peer can reuse this service's enabled CCCDs.
             if (service_registered[0] and subscription_peer[0] == path and reports_subscribed(reports)
                     and bonded_and_trusted(path)):
@@ -726,6 +729,7 @@ def main():
         if "Connected" in changed and not changed["Connected"] and path == connected_path[0]:
             connection_generation[0] += 1
             connected_path[0] = None
+            reset_phone_audio_retry()
             emit("disconnected")
         if path == connected_path[0] and any(key in changed for key in ("Alias", "Name", "Connected")):
             device_name = str(properties.get("Alias") or properties.get("Name") or "")
@@ -806,7 +810,7 @@ def main():
         def again():
             audio_retry[0] = None
             path = audio_phone_path()
-            if (phone_audio[0] and connected_path[0] and path
+            if (phone_audio[0] and path and subscription_peer[0] == connected_path[0] == path
                     and not any(t.startswith(path + "/") for t in transports)):
                 apply_phone_audio()
             return False
