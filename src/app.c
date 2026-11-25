@@ -143,6 +143,7 @@ typedef struct app {
 
     char phone_name[128];      /* from the mirroring session; empty when not mirroring */
     char ble_status[64];       /* last state reported by the Bluetooth helper */
+    char ble_peer_name[64];
     ph_input input;
     ph_pointer pointer;
     ph_abs abs; /* used instead of `pointer` in absolute mode */
@@ -306,7 +307,8 @@ static void on_connected(void *user, const char *name, const char *model)
     app *a = user;
     (void)model;
     atomic_store(&a->airplay_on, true);
-    push_event(user, EV_CONNECTED, strdup(name && *name ? name : "iPhone"));
+    if (!atomic_load(&a->screen_on))
+        push_event(user, EV_CONNECTED, strdup(name && *name ? name : "iPhone"));
 }
 
 static void on_audio(void *user, unsigned char compression, const uint8_t *data, size_t len,
@@ -314,7 +316,7 @@ static void on_audio(void *user, unsigned char compression, const uint8_t *data,
 {
     app *a = user;
     pthread_mutex_lock(&a->src_lock);
-    if (a->audio && ph_audio_push_timed(a->audio, compression, data, len, timestamp_ns) >= 0)
+    if (a->audio && ph_audio_push_timed(a->audio, compression, data, len, timestamp_ns) > 0)
         a->last_airplay_audio_ms = ph_metrics_now_ms();
     pthread_mutex_unlock(&a->src_lock);
 }
@@ -322,28 +324,30 @@ static void on_audio(void *user, unsigned char compression, const uint8_t *data,
 static void on_audio_format(void *user, unsigned char compression, unsigned short samples)
 {
     app *a = user;
-    ph_audio_configure(a->audio, compression, samples);
+    ph_audio_set_airplay_format(a->audio, compression, samples);
 }
 
 static void on_audio_volume(void *user, float decibels)
 {
     app *a = user;
-    ph_audio_set_volume(a->audio, decibels);
+    ph_audio_set_airplay_volume(a->audio, decibels);
 }
 
 static void on_audio_flush(void *user)
 {
     app *a = user;
-    ph_audio_flush(a->audio);
+    ph_audio_flush_airplay(a->audio);
 }
 
 static void on_disconnected(void *user)
 {
     app *a = user;
     on_audio_flush(user);
-    atomic_store(&a->airplay_on, false);
     pthread_mutex_lock(&a->src_lock);
+    atomic_store(&a->airplay_on, false);
     a->last_airplay_audio_ms = 0;
+    ph_audio_set_airplay_format(a->audio, 0, 0);
+    ph_audio_set_airplay_volume(a->audio, 0);
     a->airplay_selected = false;
     ph_src_switch_wifi_lost(&a->src, ph_metrics_now_ms());
     pthread_mutex_unlock(&a->src_lock);
@@ -417,7 +421,7 @@ static void screen_connected(void *user, const char *address)
     bool started = a->screen_dec != NULL;
     if (started)
         atomic_store(&a->screen_on, true);
-    bool announce = started && a->src.current != PH_SRC_USB && !atomic_load(&a->airplay_on);
+    bool announce = started && a->src.current != PH_SRC_USB && !a->src.have_wifi;
     pthread_mutex_unlock(&a->src_lock);
     if (started)
         ph_origin_screen_live(a->origin, channel_epoch, true);
@@ -469,7 +473,7 @@ static void screen_disconnected(void *user)
     if (a->screen_dec)
         ph_decoder_reset(a->screen_dec); /* the next broadcast starts clean */
     pthread_mutex_unlock(&a->src_lock);
-    if (next == PH_SRC_NONE && !atomic_load(&a->airplay_on))
+    if (next == PH_SRC_NONE)
         push_event(user, EV_DISCONNECTED, NULL);
 }
 
@@ -564,12 +568,12 @@ static bool start_control_gesture(app *a, ph_gesture_kind kind,
 static void handle_ble_status(app *a, const char *line)
 {
     if (!strncmp(line, "peer-name ", 10)) {
-        if (!a->link_stopping)
-            ph_window_set_bluetooth_peer(a->win, line + 10);
+        if (!a->link_stopping && strlen(line + 10) < sizeof a->ble_peer_name)
+            snprintf(a->ble_peer_name, sizeof a->ble_peer_name, "%s", line + 10);
         return;
     }
     if (!strcmp(line, "disconnected") || !strcmp(line, "exited"))
-        ph_window_set_bluetooth_peer(a->win, "");
+        a->ble_peer_name[0] = 0;
     const char *state = NULL;
     bool was_on = !strcmp(a->ble_status, "on");
 
@@ -2499,7 +2503,7 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
     case EV_DISCONNECTED: {
         pthread_mutex_lock(&a->src_lock);
         bool showing_other = a->src.current == PH_SRC_USB || atomic_load(&a->screen_on)
-                             || atomic_load(&a->airplay_on);
+                             || a->src.have_wifi;
         pthread_mutex_unlock(&a->src_lock);
         if (showing_other)
             break;
@@ -2942,8 +2946,7 @@ static void usb_unplugged(app *a)
     if (was_usb && a->dec)
         ph_decoder_reset(a->dec);
     pthread_mutex_unlock(&a->src_lock);
-    if (was_usb && after == PH_SRC_NONE && !atomic_load(&a->screen_on) &&
-        !atomic_load(&a->airplay_on))
+    if (was_usb && after == PH_SRC_NONE && !atomic_load(&a->screen_on))
         push_event(a, EV_DISCONNECTED, NULL);
     if (after == PH_SRC_WIFI)
         PH_LOGI("USB unplugged; showing Wi-Fi");
@@ -3654,8 +3657,11 @@ int ph_app_run(const ph_app_options *opt)
             PH_LOGW("invalid pointer calibration; using the default movement model");
     }
     ph_codec_advertise picture = ph_codec_advertise_for(opt->four_k);
+    char pc_name[48], receiver_name[64];
+    ph_origin_pc_name(pc_name, sizeof pc_name);
+    snprintf(receiver_name, sizeof receiver_name, "Porthole (%s)", pc_name);
     ph_receiver_options rx_opt = {
-        .name = opt->name,
+        .name = !strcmp(opt->name, PORTHOLE_NAME) ? receiver_name : opt->name,
         .width = picture.width,
         .height = picture.height,
         .max_fps = picture.max_fps,
@@ -3822,7 +3828,22 @@ int ph_app_run(const ph_app_options *opt)
             break;
         if (SDL_GetTicks64() - a.session_poll >= 250) {
             ph_session_state state;
+            if (!strcmp(a.ble_status, "on") &&
+                ph_origin_remember_verified_phone_name(a.origin, a.ble_peer_name)) {
+                char name[128];
+                ph_origin_phone_name(a.origin, name, sizeof name);
+                ph_window_set_phone_name(a.win, name);
+            }
             ph_polish_sessions(a.polish, &state);
+            pthread_mutex_lock(&a.src_lock);
+            bool airplay_video = a.src.have_wifi;
+            pthread_mutex_unlock(&a.src_lock);
+            int count = 0;
+            for (int i = 0; i < state.count; i++)
+                if (state.devices[i].usb || (airplay_video && state.devices[i].connected))
+                    state.devices[count++] = state.devices[i];
+            memset(&state.devices[count], 0, (PH_SESSION_DEVICE_MAX - count) * sizeof state.devices[0]);
+            state.count = count;
             ph_origin_sessions(a.origin, &state);
             if (ph_workspace_set_sessions(ph_window_workspace(a.win), &state)) {
                 if (state.request_id[0] && strcmp(state.request_id, a.request_id)) {

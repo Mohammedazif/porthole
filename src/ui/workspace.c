@@ -1994,24 +1994,20 @@ static int device_row(ph_workspace *u, int x, int y, int width, int index)
     bool companion = !d || d->companion;
     const char *name = d ? d->name : u->live.phone;
     bool connected = d ? d->connected : u->live.connected;
-    const char *bluetooth_name = companion && (!d || d->active) && u->live.bluetooth_peer[0]
-                                 ? u->live.bluetooth_peer : NULL;
-    char connection[160];
-    if (bluetooth_name)
-        snprintf(connection, sizeof connection, "Bluetooth · %s", bluetooth_name);
+    bool sharing = d && d->screen_sharing;
     int h = width < 420 ? 148 : 126;
     card(u, (SDL_Rect){x, y, width, h});
     text(u, *name ? name : "iPhone", x + 14, y + 10, width - 28, 15, true, u->ink);
     text(u,
-         bluetooth_name ? connection
+         sharing && !connected ? "iPhone app inactive"
          : companion ? "Porthole companion · Files and clipboard"
          : d->usb  ? "USB · Screen only"
                    : "AirPlay · Screen only",
          x + 14, y + 35, width - 28, 12, false, u->muted);
-    const char *status = connected ? "Connected" : companion && d && !d->active ? "Saved"
-                                                                              : "Disconnected";
+    const char *status = connected ? "Connected" : sharing ? "Screen sharing"
+                       : companion && d && !d->active ? "Saved" : "Disconnected";
     text(u, status, x + 14, y + 56, width - 28, 11, false,
-         connected ? u->positive : u->muted);
+         connected || sharing ? u->positive : u->muted);
     int dx = x + 12, dy = y + 83;
     if (d && (companion || d->usb || connected)) {
         const char *action = d->active ? "Selected" : companion ? "Select iPhone"
@@ -2026,7 +2022,7 @@ static int device_row(ph_workspace *u, int x, int y, int width, int index)
     } else {
         button(u, (SDL_Rect){dx, dy, 66, 28}, "Rename", UI_RENAME, index, false, true);
         dx += 72;
-        if (connected) {
+        if (connected || sharing) {
             if (dx + 94 > x + width) {
                 dx = x + 12;
                 dy += 32;
@@ -2287,19 +2283,12 @@ static int device_settings(ph_workspace *u, int x, int y, int width)
         button(u, (SDL_Rect){x + 118, y, 90, 34}, "Reject", UI_REJECT, 0, false, true);
         y += 54;
     }
-    bool registry = false, selected = false;
-    for (int i = 0; i < u->sessions.count; i++) {
-        if (u->sessions.devices[i].companion) {
-            registry = true;
-            selected = selected || u->sessions.devices[i].active;
-        }
-    }
+    bool registry = false;
+    for (int i = 0; i < u->sessions.count; i++)
+        registry |= u->sessions.devices[i].companion;
     if (u->live.address[0]) {
         button(u, (SDL_Rect){x, y, 118, 32}, registry || u->live.paired ? "Add iPhone" : "Pair iPhone",
                PH_WORKSPACE_ADD_PHONE, 0, true, true);
-        if (u->live.paired && (selected || !registry) && width >= 246)
-            button(u, (SDL_Rect){x + 128, y, 118, 32}, "New code", PH_WORKSPACE_NEW_CODE,
-                   0, false, true);
         y += 44;
         if (registry)
             y = text(u, "Pair another iPhone and switch between saved devices here.",
@@ -2312,11 +2301,16 @@ static int device_settings(ph_workspace *u, int x, int y, int width)
     if (!registry && u->live.paired)
         y = device_row(u, x, y, width, 0);
     for (int i = 0; i < u->sessions.count; i++)
-        y = device_row(u, x, y, width, i + 1);
+        if (u->sessions.devices[i].companion)
+            y = device_row(u, x, y, width, i + 1);
     setting_row approval = toggle_row("Require local approval",
                                        "Verify a PIN on this PC before admitting a new Screen Mirroring device.",
                                        PH_WORKSPACE_PIN_REQUIRED, u->sessions.pin_required);
-    return setting_group(u, x, y, width, "SCREEN MIRRORING", &approval, 1);
+    y = setting_group(u, x, y, width, "SCREEN MIRRORING", &approval, 1);
+    for (int i = 0; i < u->sessions.count; i++)
+        if (!u->sessions.devices[i].companion)
+            y = device_row(u, x, y, width, i + 1);
+    return y;
 }
 
 static void settings(ph_workspace *u)

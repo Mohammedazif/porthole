@@ -44,7 +44,10 @@ struct ph_audio {
     int input_format, input_rate, input_channels;
     unsigned char compression;
     unsigned short samples;
+    unsigned char airplay_compression;
+    unsigned short airplay_samples;
     float gain;
+    float airplay_gain;
     float volume_db;
     bool muted;
     int sync_offset_ms;
@@ -254,8 +257,9 @@ static int queue_pcm(ph_audio *a, uint8_t *pcm, int count, bool own)
         return -1;
     }
     values = (float *)pcm;
+    float gain = a->gain * (a->compression == 1 ? 1.f : a->airplay_gain);
     for (int i = 0; i < count * CHANNELS; i++)
-        values[i] *= a->gain;
+        values[i] *= gain;
     bytes = (Uint32)(count * CHANNELS * sizeof(float));
     uint32_t backlog = device_queued_ms_locked(a);
     if (backlog > a->stats.backlog_max)
@@ -368,6 +372,7 @@ ph_audio *ph_audio_create(void)
         return NULL;
     }
     a->gain = 1;
+    a->airplay_gain = 1;
     a->lock = SDL_CreateMutex();
     a->packet = av_packet_alloc();
     a->frame = av_frame_alloc();
@@ -389,6 +394,35 @@ bool ph_audio_configure(ph_audio *a, unsigned char compression, unsigned short s
     return ok;
 }
 
+void ph_audio_set_airplay_format(ph_audio *a, unsigned char compression, unsigned short samples)
+{
+    if (!a)
+        return;
+    SDL_LockMutex(a->lock);
+    a->airplay_compression = compression;
+    a->airplay_samples = samples;
+    SDL_UnlockMutex(a->lock);
+}
+
+void ph_audio_set_airplay_volume(ph_audio *a, float decibels)
+{
+    if (!a || !isfinite(decibels))
+        return;
+    SDL_LockMutex(a->lock);
+    a->airplay_gain = decibels <= -144.f ? 0.f : powf(10.f, fminf(0.f, decibels) / 20.f);
+    SDL_UnlockMutex(a->lock);
+}
+
+void ph_audio_flush_airplay(ph_audio *a)
+{
+    if (!a)
+        return;
+    SDL_LockMutex(a->lock);
+    if (a->compression != 1)
+        flush_locked(a);
+    SDL_UnlockMutex(a->lock);
+}
+
 static int push_locked(ph_audio *a, unsigned char compression, const uint8_t *data, size_t len,
                        bool timed, uint64_t pts_ns)
 {
@@ -396,8 +430,11 @@ static int push_locked(ph_audio *a, unsigned char compression, const uint8_t *da
     ph_sync_action action = {PH_SYNC_PLAY, 0, 0, false};
     int error;
 
-    if ((!a->codec || compression != a->compression)
-        && !configure_locked(a, compression, compression == 2 ? 352 : compression == 8 ? 480 : 1024))
+    bool negotiated = compression == a->airplay_compression && a->airplay_samples;
+    unsigned short packet_samples = negotiated ? a->airplay_samples
+                            : compression == 2 ? 352 : compression == 8 ? 480 : 1024;
+    if ((!a->codec || compression != a->compression || (negotiated && packet_samples != a->samples))
+        && !configure_locked(a, compression, packet_samples))
         goto done;
     if (timed) {
         action = ph_sync_audio_at(a->sync, pts_ns, 0, ph_metrics_now_ms());

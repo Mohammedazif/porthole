@@ -27,7 +27,7 @@ typedef struct ph_device_view {
 
 typedef struct ph_session_device {
     char id[129], name[129];
-    bool connected, active, usb, companion;
+    bool connected, active, usb, companion, screen_sharing;
 } ph_session_device;
 typedef struct ph_session_state {
     ph_session_device devices[PH_SESSION_DEVICE_MAX];
