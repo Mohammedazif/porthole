@@ -242,6 +242,7 @@ class ConnectionTests(unittest.TestCase):
         h.objects = {str(path): {name: dict(properties) for name, properties in interfaces.items()}
                      for path, interfaces in (initial_devices or {}).items()}
         h.devices = {}
+        h.property_sets = []
         h.application = Mock(get_path=lambda: ble.APP_PATH)
         h.threads = Mock()
         h.registration_checks = []
@@ -276,7 +277,10 @@ class ConnectionTests(unittest.TestCase):
             if name == ble.DBUS_PROP_IFACE:
                 if obj == '/adapter':
                     return h.properties
-                return SimpleNamespace(Get=lambda iface, prop: get_property(obj, prop))
+                def set_property(iface, prop, value, obj=obj):
+                    h.property_sets.append((str(obj), prop, bool(value)))
+                    properties_for(obj)[prop] = bool(value)
+                return SimpleNamespace(Get=lambda iface, prop: get_property(obj, prop), Set=set_property)
             if name == ble.DEVICE_IFACE:
                 return device_for(obj)
             return {ble.GATT_MANAGER_IFACE: h.gatt, ble.LE_ADV_MANAGER_IFACE: h.adv,
@@ -545,13 +549,14 @@ class ConnectionTests(unittest.TestCase):
     def test_provider_refresh_requires_current_trust_and_bond(self):
         def scenario(h):
             path = '/adapter/dev_PHONE'
-            h.added(path, {'Connected': True, 'Icon': 'phone', 'Bonded': True,
+            h.added(path, {'Connected': True, 'Icon': 'phone', 'Bonded': False,
                            'Paired': False, 'Trusted': False})
             recovery = h.timer('check_resubscribed')
             h.fire(recovery)
             h.gatt.UnregisterApplication.assert_not_called()
             h.device.Disconnect.assert_not_called()
-            h.objects[path][ble.DEVICE_IFACE]['Trusted'] = True
+            self.assertEqual(h.property_sets, [])  # a phone that never paired is not trusted
+            h.objects[path][ble.DEVICE_IFACE].update(Bonded=True, Trusted=True)
             h.fire(recovery)
             h.gatt.UnregisterApplication.assert_called_once()
             h.fire(next(timer for timer in h.timers if timer[0] == 500))
@@ -563,6 +568,23 @@ class ConnectionTests(unittest.TestCase):
             h.objects[path][ble.DEVICE_IFACE].update(Trusted=True, Bonded=False)
             h.fire(deadline)
             h.device.Disconnect.assert_not_called()
+        self.run_helper(scenario)
+
+    def test_bonded_untrusted_phone_is_trusted_so_a_stale_link_recovers(self):
+        # A fresh pairing from the iPhone leaves it untrusted. When the link
+        # outlives the previous helper, recovery needs trust, or the mouse and
+        # keyboard only came back after forgetting and pairing again.
+        def scenario(h):
+            path = '/adapter/dev_PHONE'
+            h.added(path, {'Connected': True, 'Icon': 'phone', 'Bonded': True,
+                           'Paired': True, 'Trusted': False})
+            self.assertEqual(h.property_sets, [(path, 'Trusted', True)])
+            h.fire(h.timer('check_resubscribed'))
+            h.gatt.UnregisterApplication.assert_called_once()
+            h.fire(next(timer for timer in h.timers if timer[0] == 500))
+            h.registered()
+            h.fire(h.timer('subscription_deadline'))
+            h.device.Disconnect.assert_called_once_with(path)
         self.run_helper(scenario)
 
     def test_one_hundred_same_bond_idle_reconnect_cycles_need_no_new_pairing(self):

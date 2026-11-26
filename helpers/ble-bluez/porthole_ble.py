@@ -619,6 +619,26 @@ def main():
         except dbus.exceptions.DBusException:
             return False
 
+    def trust_paired_phone(path):
+        """Marks a phone already bonded with this PC as trusted. A fresh pairing
+        from the iPhone leaves it untrusted, and BlueZ then blocks the
+        reconnect that recovers the mouse and keyboard when the link outlives
+        this helper, so the only way back was forgetting and pairing again.
+        The bond itself was approved on both devices; trust adds nothing for
+        a phone that was never paired."""
+        try:
+            dev = dbus.Interface(bus.get_object(BLUEZ, path), DBUS_PROP_IFACE)
+            try:
+                bonded = bool(dev.Get(DEVICE_IFACE, "Bonded"))
+            except dbus.exceptions.DBusException:
+                bonded = bool(dev.Get(DEVICE_IFACE, "Paired"))
+            if not bonded or bool(dev.Get(DEVICE_IFACE, "Trusted")):
+                return
+            dev.Set(DEVICE_IFACE, "Trusted", dbus.Boolean(True))
+            log("trusting the paired iPhone so it can reconnect for the mouse and keyboard")
+        except dbus.exceptions.DBusException as error:
+            log(f"couldn't trust the paired iPhone: {error}")
+
     def device_connected(path):
         try:
             dev = dbus.Interface(bus.get_object(BLUEZ, path), DBUS_PROP_IFACE)
@@ -631,6 +651,7 @@ def main():
         the same phone returning from a different one without logging addresses."""
         emit("peer-id " + hashlib.sha256(str(path).encode()).hexdigest()[:16])
         emit("subscribed")
+        trust_paired_phone(path)  # covers a pairing made during this connection
         # Ask for the phone's sound only once the mouse and keyboard are up.
         # Asking on every connection looped: each Classic attempt briefly
         # connects the phone, which read as the phone connecting again.
@@ -730,6 +751,8 @@ def main():
                     report.subscribed_at = 0.0
                 subscription_peer[0] = None
             emit("connected")
+            if properties.get("Bonded") or properties.get("Paired"):
+                trust_paired_phone(path)  # bonded before this connection, so approved already
             # Only the same bonded peer can reuse this service's enabled CCCDs.
             if (service_registered[0] and subscription_peer[0] == path and reports_subscribed(reports)
                     and bonded_and_trusted(path)):
