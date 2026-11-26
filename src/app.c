@@ -531,8 +531,11 @@ static void screen_orientation(void *user, const uint8_t *turn, size_t len)
     a->phone_held = held;
     /* Measured on iOS 26: once iOS has turned its screen, it reports 6 with
      * the phone held top to the right (4) and 8 with it held top to the left
-     * (3). Upright is 1, upside down 3. */
-    int as_turn = held == 1 ? 1 : held == 2 ? 3 : held == 3 ? 8 : held == 4 ? 6 : 0;
+     * (3). Upright is 1, upside down 3. While the screen stays portrait (1)
+     * the pointer goes as shown however the phone is held: measured with
+     * rotation lock on, held sideways both ways (the Home Screen, which does
+     * not turn, is the same case). */
+    int as_turn = turn[0] == 1 ? 0 : held == 1 ? 1 : held == 2 ? 3 : held == 3 ? 8 : held == 4 ? 6 : 0;
     if (!as_turn || as_turn == turn[0]) {
         atomic_store(&a->held_turn, as_turn);
         atomic_store(&a->held_pending, as_turn);
@@ -960,7 +963,8 @@ static void send_abs(void *user, uint8_t buttons, double x, double y)
     pthread_mutex_unlock(&a->src_lock);
     if (broadcast) {
         int held = atomic_load(&a->held_turn), pending = atomic_load(&a->held_pending);
-        if (pending != held && SDL_GetTicks64() - atomic_load(&a->held_pending_ms) >= 1000) {
+        /* Not in the middle of a press or drag: the finger would jump. */
+        if (pending != held && !buttons && SDL_GetTicks64() - atomic_load(&a->held_pending_ms) >= 1000) {
             atomic_store(&a->held_turn, pending);
             held = pending;
             PH_LOGI("pointer: the phone is held as turn %d while its screen shows turn %d",
