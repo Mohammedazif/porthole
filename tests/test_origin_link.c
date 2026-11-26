@@ -700,7 +700,7 @@ int main(int argc, char **argv)
     CHECK(!strcmp(reply, "PAIRED") && !ph_origin_code_open(o));
     say(phone, "NAME Zoë’s iPhone\nNAME iPhone\n");
     /* Volume button presses while sharing add up until the app applies them. */
-    say(phone, "VOLUME up\nVOLUME up\nVOLUME down\nVOLUME up\n");
+    say(phone, "VOLUME note watching at 6%\nVOLUME up\nVOLUME up\nVOLUME down\nVOLUME up\n");
     int volume_steps = 0;
     for (int i = 0; i < 100 && volume_steps < 2; i++) {
         volume_steps += ph_origin_take_volume_steps(o);

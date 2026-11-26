@@ -550,6 +550,17 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
         pthread_mutex_unlock(&o->lock);
         return true;
     }
+    if (!strncmp(line, "VOLUME note ", 12)) {
+        /* What the phone's volume button experiment saw, for this log. */
+        char text[121];
+        size_t n = 0;
+        *consumed = true;
+        for (const char *c = line + 12; *c && n < sizeof text - 1; c++)
+            text[n++] = (*c >= 0x20 && *c < 0x7f) ? *c : '?';
+        text[n] = 0;
+        PH_LOGI("volume buttons (iPhone): %s", text);
+        return true;
+    }
     if (!strcmp(line, "VOLUME stuck")) {
         /* The phone could not put its own volume back after a press. */
         *consumed = true;
