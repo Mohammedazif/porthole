@@ -195,6 +195,9 @@ typedef struct app {
     atomic_int sound_mode;
     /* How the shared screen was turned upright (EXIF orientation; 1 = as mounted). */
     atomic_int phone_orientation;
+    /* Test aid (Ctrl+Alt+R): extra quarter turns on top of the phone's report,
+     * to find which turn iOS expects after a landscape flip. */
+    atomic_int pointer_turn_test;
     int audible_mode; /* the last choice that plays here, for unmuting */
     unsigned sound_serial;
     bool pc_muted_seen;
@@ -500,8 +503,9 @@ static void screen_orientation(void *user, const uint8_t *turn, size_t len)
     app *a = user;
     atomic_store(&a->phone_orientation, turn[0]);
     if (len >= 7)
-        PH_LOGI("shared screen turn: pointer %u, iOS tag %u, picture %u, captured %ux%u", turn[0],
-                turn[1], turn[2], (unsigned)turn[3] << 8 | turn[4], (unsigned)turn[5] << 8 | turn[6]);
+        PH_LOGI("shared screen turn: pointer %u, iOS tag %u, picture %u, captured %ux%u; test turn %d",
+                turn[0], turn[1], turn[2], (unsigned)turn[3] << 8 | turn[4],
+                (unsigned)turn[5] << 8 | turn[6], atomic_load(&a->pointer_turn_test) * 90);
     else
         PH_LOGI("shared screen turn: pointer %u", turn[0]);
 }
@@ -894,8 +898,14 @@ static void send_abs(void *user, uint8_t buttons, double x, double y)
     pthread_mutex_lock(&a->src_lock);
     bool broadcast = a->src.current == PH_SRC_BROADCAST;
     pthread_mutex_unlock(&a->src_lock);
-    if (broadcast)
+    if (broadcast) {
         ph_abs_picture_to_screen(atomic_load(&a->phone_orientation), &x, &y);
+        for (int turn = atomic_load(&a->pointer_turn_test) & 3; turn > 0; turn--) {
+            double px = x;
+            x = 1 - y; /* a quarter turn clockwise */
+            y = px;
+        }
+    }
     if (a->link && ph_hid_link_abs_mouse(a->link, buttons, x, y))
         record_input_handoff(a);
 }
@@ -2147,6 +2157,19 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         a->pull_path[0] = 0;
         ph_input_release_all(&a->input);
         SDL_CaptureMouse(SDL_FALSE);
+        a->gesture_keys[sc] = true;
+        return;
+    }
+    /* Test aid: Ctrl+Alt+R turns the pointer a further quarter turn. */
+    if (down && !e->repeat && sc == SDL_SCANCODE_R && (e->keysym.mod & KMOD_CTRL) &&
+        (e->keysym.mod & KMOD_ALT)) {
+        int turn = (atomic_load(&a->pointer_turn_test) + 1) & 3;
+        char note[64];
+        atomic_store(&a->pointer_turn_test, turn);
+        snprintf(note, sizeof note, "Pointer test turn: %d°", turn * 90);
+        ph_window_set_detail(a->win, note);
+        PH_LOGI("pointer test turn: %d degrees on top of the iPhone's report %d",
+                turn * 90, atomic_load(&a->phone_orientation));
         a->gesture_keys[sc] = true;
         return;
     }
@@ -3982,6 +4005,7 @@ int ph_app_run(const ph_app_options *opt)
             mode = ph_sound_mode_parse(line);
         atomic_init(&a.sound_mode, mode);
         atomic_init(&a.phone_orientation, 1);
+        atomic_init(&a.pointer_turn_test, 0);
         a.audible_mode = mode == PH_SOUND_IPHONE ? PH_SOUND_BOTH : mode;
         a.pc_muted_seen = mode == PH_SOUND_IPHONE;
         if (a.audio)
