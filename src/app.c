@@ -215,6 +215,8 @@ typedef struct app {
     char verified_peer[64];
     bool verified_peer_loaded;
     bool name_lookup_done; /* main thread: asked the network for this connection */
+    unsigned reports_sent;  /* reports handed to the Bluetooth helper since reports_since */
+    uint64_t reports_since;
     int audible_mode; /* the last choice that plays here, for unmuting */
     unsigned sound_serial;
     bool pc_muted_seen;
@@ -904,6 +906,17 @@ static void handle_ble_status(app *a, const char *line)
 
 static void record_input_handoff(app *a)
 {
+    /* Pointer and key reports sent, summed into the normal log every 10 s
+     * while sharing, so a slow pointer shows on Windows without --verbose. */
+    a->reports_sent++;
+    uint64_t now = SDL_GetTicks64();
+    if (!a->reports_since)
+        a->reports_since = now;
+    else if (now - a->reports_since >= 10000) {
+        PH_LOGI("controls health (10 s): %u reports sent to the iPhone", a->reports_sent);
+        a->reports_sent = 0;
+        a->reports_since = now;
+    }
     if (a->input_pending) {
         ph_metrics_input(&a->metrics, a->input_at, ph_metrics_now_ms());
         a->input_pending = false;

@@ -109,6 +109,10 @@ struct ph_audio {
         unsigned int arrived, drawn;
         int64_t capture_gap_max, behind_max; /* ms */
     } vstats;
+    /* Every fifth window's worst also goes to the normal log, which is all a
+     * Windows run keeps, so a slow picture shows without --verbose. */
+    unsigned int vstats_windows;
+    int64_t vstats_worst_behind, vstats_worst_gap;
 };
 
 static const char *format_name(unsigned char compression)
@@ -920,6 +924,16 @@ void ph_audio_note_broadcast_video(ph_audio *a, uint64_t pts_ns)
                     a->vstats.arrived, a->vstats.drawn,
                     (unsigned long long)(now_ms - a->vstats.since_ms),
                     (long long)a->vstats.capture_gap_max, (long long)a->vstats.behind_max);
+            if (a->vstats.behind_max > a->vstats_worst_behind)
+                a->vstats_worst_behind = a->vstats.behind_max;
+            if (a->vstats.capture_gap_max > a->vstats_worst_gap)
+                a->vstats_worst_gap = a->vstats.capture_gap_max;
+            if (++a->vstats_windows % 5 == 0) {
+                PH_LOGI("screen health (10 s): %u frames drawn in the last 2 s; worst capture gap %lld ms; "
+                        "worst capture-to-display %lld ms beyond the quickest trip",
+                        a->vstats.drawn, (long long)a->vstats_worst_gap, (long long)a->vstats_worst_behind);
+                a->vstats_worst_behind = a->vstats_worst_gap = 0;
+            }
             uint64_t keep = a->vstats.last_capture_ns;
             memset(&a->vstats, 0, sizeof a->vstats);
             a->vstats.last_capture_ns = keep;
