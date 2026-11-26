@@ -201,7 +201,8 @@ typedef struct app {
      * to find which turn iOS expects after a landscape flip. */
     atomic_int pointer_turn_test;
     bool turn_logged; /* screen thread only */
-    int phone_held;   /* screen thread only: how the phone is held (turn byte 7) */
+    int phone_held;   /* screen thread only: how the phone is held, as the pointer goes */
+    int phone_gravity; /* screen thread only: turn byte 7, from the motion sensor */
     /* How the phone is held, as the EXIF turn of a screen laid out that way
      * (0 unknown): iOS places the absolute pointer by this. A change that the
      * screen's layout already matches applies at once; any other waits until
@@ -489,6 +490,7 @@ static void screen_connected(void *user, const char *address)
     atomic_store(&a->phone_orientation, 1); /* until the phone says otherwise */
     a->turn_logged = false;
     a->phone_held = 0;
+    a->phone_gravity = 0;
     atomic_store(&a->held_turn, 0);
     atomic_store(&a->held_pending, 0);
     bool announce = started && a->src.current != PH_SRC_USB && !a->src.have_wifi;
@@ -525,10 +527,15 @@ static void screen_orientation(void *user, const uint8_t *turn, size_t len)
 {
     app *a = user;
     /* Newer phones repeat the turn with each keyframe: log changes only. */
-    int held = len >= 8 ? turn[7] : 0;
+    int gravity = len >= 8 ? turn[7] : 0, system = len >= 9 ? turn[8] : 0;
+    /* iOS's own orientation (byte 8) when the phone knows it: with rotation
+     * lock on it stays upright, and so does the pointer, while gravity says
+     * sideways (measured: YouTube landscape under the lock, both sides). */
+    int held = system ? system : gravity;
     int before = atomic_exchange(&a->phone_orientation, turn[0]);
-    bool held_changed = held != a->phone_held;
+    bool held_changed = held != a->phone_held || gravity != a->phone_gravity;
     a->phone_held = held;
+    a->phone_gravity = gravity;
     /* Measured on iOS 26: once iOS has turned its screen, it reports 6 with
      * the phone held top to the right (4) and 8 with it held top to the left
      * (3). Upright is 1, upside down 3. While the screen stays portrait (1)
@@ -547,10 +554,10 @@ static void screen_orientation(void *user, const uint8_t *turn, size_t len)
         return;
     a->turn_logged = true;
     if (len >= 7)
-        PH_LOGI("shared screen turn: pointer %u, iOS tag %u, picture %u, captured %ux%u, held %d; "
-                "pointer %s; test turn %d", turn[0], turn[1], turn[2], (unsigned)turn[3] << 8 | turn[4],
-                (unsigned)turn[5] << 8 | turn[6], held, flip ? "turned to the phone as held (after a second)"
-                                                           : "as shown",
+        PH_LOGI("shared screen turn: pointer %u, iOS tag %u, picture %u, captured %ux%u, held %d "
+                "(sensor %d, iOS %d); pointer %s; test turn %d", turn[0], turn[1], turn[2],
+                (unsigned)turn[3] << 8 | turn[4], (unsigned)turn[5] << 8 | turn[6], held, gravity, system,
+                flip ? "turned to the phone as held (after a second)" : "as shown",
                 atomic_load(&a->pointer_turn_test) * 90);
     else
         PH_LOGI("shared screen turn: pointer %u", turn[0]);
