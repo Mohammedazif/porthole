@@ -39,6 +39,21 @@ void ph_abs_picture_to_screen(int exif_orientation, double *x, double *y)
     }
 }
 
+void ph_abs_screen_to_picture(int exif_orientation, double *x, double *y)
+{
+    /* Each quarter turn is undone by the other one; a half turn by itself. */
+    ph_abs_picture_to_screen(exif_orientation == 6 ? 8 : exif_orientation == 8 ? 6 : exif_orientation, x,
+                             y);
+}
+
+void ph_abs_picture_to_held(int shown, int held, double *x, double *y)
+{
+    if (!held || held == shown)
+        return;
+    ph_abs_picture_to_screen(shown, x, y);
+    ph_abs_screen_to_picture(held, x, y);
+}
+
 static void send(ph_abs *a, uint8_t buttons, double x, double y, uint64_t now_ms)
 {
     x = clamp01(x);

@@ -67,6 +67,34 @@ static int first_with_button(void)
     return -1;
 }
 
+static void test_picture_to_held(void)
+{
+    double x, y;
+    /* Same layout as held, or held unknown: the picture point as is. */
+    x = .2, y = .7;
+    ph_abs_picture_to_held(6, 6, &x, &y);
+    CHECK(x == .2 && y == .7);
+    ph_abs_picture_to_held(8, 0, &x, &y);
+    CHECK(x == .2 && y == .7);
+    /* Landscape layout held the other landscape way: half a turn (measured). */
+    x = .2, y = .7;
+    ph_abs_picture_to_held(6, 8, &x, &y);
+    CHECK(fabs(x - .8) < 1e-9 && fabs(y - .3) < 1e-9);
+    /* Landscape layout with the phone held upright: the mounted screen. */
+    double sx = .2, sy = .7;
+    ph_abs_picture_to_screen(8, &sx, &sy);
+    x = .2, y = .7;
+    ph_abs_picture_to_held(8, 1, &x, &y);
+    CHECK(fabs(x - sx) < 1e-9 && fabs(y - sy) < 1e-9);
+    /* screen_to_picture undoes picture_to_screen for every turn. */
+    for (int o = 1; o <= 8; o++) {
+        x = .3, y = .6;
+        ph_abs_picture_to_screen(o, &x, &y);
+        ph_abs_screen_to_picture(o, &x, &y);
+        CHECK(fabs(x - .3) < 1e-9 && fabs(y - .6) < 1e-9);
+    }
+}
+
 static void test_picture_to_screen(void)
 {
     double x, y;
@@ -98,6 +126,7 @@ int main(void)
     ph_abs a;
 
     test_picture_to_screen();
+    test_picture_to_held();
 
     /* Hover goes straight to the phone, paced to one report per 15 ms with the
      * latest position winning. */

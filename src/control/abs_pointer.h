@@ -57,6 +57,15 @@ void ph_abs_init(ph_abs *a, ph_abs_output output);
  * whichever way it is turned. Maps a position in the upright picture back to
  * that screen, given the EXIF orientation that turned the screen upright. */
 void ph_abs_picture_to_screen(int exif_orientation, double *x, double *y);
+/* The reverse: a position on the screen as mounted, seen turned upright by
+ * that orientation. */
+void ph_abs_screen_to_picture(int exif_orientation, double *x, double *y);
+/* iOS places the absolute pointer on its screen as the phone is held, while
+ * the picture shows the screen as laid out; they differ when iOS leaves its
+ * screen unturned, or an app lays it out landscape with the phone upright.
+ * Maps a position in the upright picture (laid out by `shown`) to the screen
+ * as held (`held` in the same EXIF terms; 0 = unknown, taken as `shown`). */
+void ph_abs_picture_to_held(int shown, int held, double *x, double *y);
 /* PC mouse position over the picture. */
 void ph_abs_move(ph_abs *a, double x, double y, uint64_t now_ms);
 /* A physical button press or release at x/y (HID button bit). */

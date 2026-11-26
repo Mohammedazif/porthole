@@ -200,10 +200,13 @@ typedef struct app {
     atomic_int pointer_turn_test;
     bool turn_logged; /* screen thread only */
     int phone_held;   /* screen thread only: how the phone is held (turn byte 7) */
-    /* Half a turn on the pointer: the phone is held opposite to its screen's
-     * layout (iOS left its screen unturned after a direct landscape flip),
-     * and iOS places the absolute pointer by how the phone is held. */
-    atomic_bool pointer_flip;
+    /* How the phone is held, as the EXIF turn of a screen laid out that way
+     * (0 unknown): iOS places the absolute pointer by this. A change that the
+     * screen's layout already matches applies at once; any other waits until
+     * it has held for a second, since the phone reports a turn about half a
+     * second before iOS turns its screen. */
+    atomic_int held_turn, held_pending;
+    atomic_ullong held_pending_ms;
     const char *control_gate_logged; /* main thread: last reason logged */
     /* "<pairing tag> <Bluetooth peer id>" that verified, kept on disk so the
      * same iPhone's mouse and keyboard work again without the typed code. */
@@ -481,7 +484,8 @@ static void screen_connected(void *user, const char *address)
     atomic_store(&a->phone_orientation, 1); /* until the phone says otherwise */
     a->turn_logged = false;
     a->phone_held = 0;
-    atomic_store(&a->pointer_flip, false);
+    atomic_store(&a->held_turn, 0);
+    atomic_store(&a->held_pending, 0);
     bool announce = started && a->src.current != PH_SRC_USB && !a->src.have_wifi;
     pthread_mutex_unlock(&a->src_lock);
     if (started)
@@ -522,18 +526,22 @@ static void screen_orientation(void *user, const uint8_t *turn, size_t len)
     a->phone_held = held;
     /* Measured on iOS 26: once iOS has turned its screen, it reports 6 with
      * the phone held top to the right (4) and 8 with it held top to the left
-     * (3), about half a second after the phone turns. Held the other
-     * landscape way, iOS left its screen unturned, and the pointer needs half
-     * a turn. Flat or unknown keeps no flip. */
-    bool flip = (turn[0] == 6 && held == 3) || (turn[0] == 8 && held == 4);
-    atomic_store(&a->pointer_flip, flip);
+     * (3). Upright is 1, upside down 3. */
+    int as_turn = held == 1 ? 1 : held == 2 ? 3 : held == 3 ? 8 : held == 4 ? 6 : 0;
+    if (!as_turn || as_turn == turn[0]) {
+        atomic_store(&a->held_turn, as_turn);
+        atomic_store(&a->held_pending, as_turn);
+    } else if (atomic_exchange(&a->held_pending, as_turn) != as_turn) {
+        atomic_store(&a->held_pending_ms, SDL_GetTicks64());
+    }
+    bool flip = as_turn && as_turn != turn[0];
     if (before == turn[0] && !held_changed && a->turn_logged)
         return;
     a->turn_logged = true;
     if (len >= 7)
         PH_LOGI("shared screen turn: pointer %u, iOS tag %u, picture %u, captured %ux%u, held %d; "
                 "pointer %s; test turn %d", turn[0], turn[1], turn[2], (unsigned)turn[3] << 8 | turn[4],
-                (unsigned)turn[5] << 8 | turn[6], held, flip ? "half turn (held opposite the screen)"
+                (unsigned)turn[5] << 8 | turn[6], held, flip ? "turned to the phone as held (after a second)"
                                                            : "as shown",
                 atomic_load(&a->pointer_turn_test) * 90);
     else
@@ -935,10 +943,14 @@ static void send_abs(void *user, uint8_t buttons, double x, double y)
     bool broadcast = a->src.current == PH_SRC_BROADCAST;
     pthread_mutex_unlock(&a->src_lock);
     if (broadcast) {
-        if (atomic_load(&a->pointer_flip)) {
-            x = 1 - x;
-            y = 1 - y;
+        int held = atomic_load(&a->held_turn), pending = atomic_load(&a->held_pending);
+        if (pending != held && SDL_GetTicks64() - atomic_load(&a->held_pending_ms) >= 1000) {
+            atomic_store(&a->held_turn, pending);
+            held = pending;
+            PH_LOGI("pointer: the phone is held as turn %d while its screen shows turn %d",
+                    held, atomic_load(&a->phone_orientation));
         }
+        ph_abs_picture_to_held(atomic_load(&a->phone_orientation), held, &x, &y);
         for (int turn = atomic_load(&a->pointer_turn_test) & 3; turn > 0; turn--) {
             double px = x;
             x = 1 - y; /* a quarter turn clockwise */
@@ -4106,7 +4118,9 @@ int ph_app_run(const ph_app_options *opt)
         atomic_init(&a.sound_mode, mode);
         atomic_init(&a.phone_orientation, 1);
         atomic_init(&a.pointer_turn_test, 0);
-        atomic_init(&a.pointer_flip, false);
+        atomic_init(&a.held_turn, 0);
+        atomic_init(&a.held_pending, 0);
+        atomic_init(&a.held_pending_ms, 0);
         a.audible_mode = mode == PH_SOUND_IPHONE ? PH_SOUND_BOTH : mode;
         a.pc_muted_seen = mode == PH_SOUND_IPHONE;
         if (a.audio)
