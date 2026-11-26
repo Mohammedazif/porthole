@@ -237,6 +237,42 @@ internal static class Program
         Check(failed.Notifier.Sent.TakeLast(3).All(n => !Nonzero(n)), "Failure lost zero releases.");
     }
 
+    private static byte[] Abs(byte buttons, byte x) => Frame(4, buttons, x, 0, 0, 0, 0);
+
+    // While Bluetooth is behind, only the newest absolute position with the
+    // same buttons goes out; button changes and fences are never skipped.
+    private static async Task AbsoluteCoalescing()
+    {
+        bool wasAbsolute = HidDescriptor.Absolute;
+        HidDescriptor.Absolute = true;
+        try { await AbsoluteCoalescingCore(); }
+        finally { HidDescriptor.Absolute = wasAbsolute; }
+    }
+
+    private static async Task AbsoluteCoalescingCore()
+    {
+        using var f = new Fixture(); using var stream = new PushStream();
+        var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Notifier.BeforeSend = async (_, kind, bytes, ct) =>
+        {
+            if (kind == ReportKind.Mouse && bytes[1] == 1) { blocked.TrySetResult(); await release.Task.WaitAsync(ct); }
+            return true;
+        };
+        Task run = f.Runner().RunAsync(stream);
+        byte[] first = Abs(0, 1);
+        byte[] rest = Join(Abs(0, 2), Abs(0, 3), Abs(1, 3), Abs(1, 4), Abs(1, 5), Sync(7), Abs(1, 6), Abs(0, 6));
+        stream.Push(first); await blocked.Task;  // Bluetooth is busy with the first
+        stream.Push(rest);
+        await Until(() => stream.BytesRead == first.Length + rest.Length);
+        release.TrySetResult(); stream.Complete(); await run;
+        var sent = f.Notifier.Sent.Where(n => n.Kind == ReportKind.Mouse && Nonzero(n))
+            .Select(n => $"{n.Value[0]}:{n.Value[1]}").ToArray();
+        Check(string.Join(" ", sent) == "0:1 0:3 1:3 1:5 1:6 0:6",
+            "Absolute positions were not coalesced as expected: " + string.Join(" ", sent));
+        Check(f.Status.Contains("sync 7"), "Fence lost while coalescing.");
+    }
+
     private static async Task EpochIsolation()
     {
         using var f = new Fixture(); using var stream = new PushStream();
@@ -325,6 +361,7 @@ internal static class Program
             ("retiring peer cleanup generations and bounded completion", RetiringCleanupTests.Run),
             ("cached target generation survives raw COM object replacement", ConcurrencyTests.CachedGenerationCannotBleed),
             ("same-bond idle and restored helper lifetimes", ConcurrencyTests.SameBondIdleAndRestoredLifetimes),
+            ("absolute positions coalesce while Bluetooth is behind", AbsoluteCoalescing),
             ("descriptor matches C", Descriptor), ("absolute mouse matches Linux", AbsoluteMouse),
             ("split/complete/malformed framing", Framing),
             ("readiness, stale sessions and pipe lifetime", ReadinessAndPipeLifetime),

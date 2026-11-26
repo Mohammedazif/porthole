@@ -362,7 +362,10 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
             if (pipeLifetime.RestartRequired) return;
             activePeer = gate.Connect(id);
             if (activePeer is PeerSession connected)
+            {
                 _ = ReportPeerNameAsync(connected);
+                _ = RequestFastLinkAsync(connected.ClientId);
+            }
             ClearValuesLocked();
         }
         if (activePeer is not PeerSession peer) return;
@@ -414,6 +417,43 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         if (string.IsNullOrWhiteSpace(name)) return;
         lock (stateLock)
             if (!disposed && activePeer == peer) status("peer-name " + name);
+    }
+
+    /// The iPhone picks the link's pace, often 30 ms between radio slots:
+    /// about 22 pointer reports a second got through. Windows 11 can ask the
+    /// phone for its quickest pace; the phone may grant it or not.
+    private async Task RequestFastLinkAsync(string leDeviceId)
+    {
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) ||
+            !Windows.Foundation.Metadata.ApiInformation.IsMethodPresent(
+                "Windows.Devices.Bluetooth.BluetoothLEDevice", "RequestPreferredConnectionParameters"))
+        {
+            log("Bluetooth link pace: this Windows can't ask for a faster link (Windows 11 needed).");
+            return;
+        }
+        try
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using BluetoothLEDevice? le = await BluetoothLEDevice.FromIdAsync(leDeviceId).AsTask(deadline.Token);
+            if (le is null) return;
+            log("Bluetooth link pace before: " + LinkPace(le));
+            using BluetoothLEPreferredConnectionParametersRequest request =
+                le.RequestPreferredConnectionParameters(BluetoothLEPreferredConnectionParameters.ThroughputOptimized);
+            log($"Bluetooth link pace: asked the phone for its quickest ({request.Status}).");
+            await Task.Delay(TimeSpan.FromSeconds(3), deadline.Token);
+            log("Bluetooth link pace after: " + LinkPace(le));
+        }
+        catch (Exception e) { log("Bluetooth link pace unavailable: " + e.Message); }
+    }
+
+    private static string LinkPace(BluetoothLEDevice le)
+    {
+        try
+        {
+            BluetoothLEConnectionParameters p = le.GetConnectionParameters();
+            return $"{p.ConnectionInterval * 1.25:0.##} ms between radio slots, may skip {p.ConnectionLatency}, timeout {p.LinkTimeout * 10} ms";
+        }
+        catch (Exception e) { return "unknown (" + e.Message + ")"; }
     }
 
     private async Task<string> ClassicNameAsync(string leDeviceId)

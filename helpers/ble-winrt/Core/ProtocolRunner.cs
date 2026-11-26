@@ -154,6 +154,7 @@ public sealed class ProtocolRunner
     private async Task SendLaneAsync(ChannelReader<Envelope> reader, bool motion)
     {
         long epoch = -1;
+        int sentButtons = -1; // buttons of the last absolute report sent
         bool healthy = true;
         int interval = options.IntervalMilliseconds;
         try
@@ -166,6 +167,7 @@ public sealed class ProtocolRunner
                 if (epoch != ticket.Token.Epoch)
                 {
                     epoch = ticket.Token.Epoch;
+                    sentButtons = -1;
                     healthy = true;
                     interval = options.IntervalMilliseconds;
                 }
@@ -177,6 +179,19 @@ public sealed class ProtocolRunner
                         continue;
                     }
                     var frame = envelope.Frame;
+                    // An absolute position only says where the pointer is now:
+                    // while Bluetooth is behind, send the newest one with the
+                    // same buttons instead of every step on the way, so the
+                    // pointer keeps up instead of trailing a growing queue.
+                    // A button change, pause or fence is never skipped: iOS
+                    // presses where the pointer already was, so the press
+                    // goes out as it came.
+                    while (motion && frame.Type == FrameType.AbsMouse && frame.Payload.Length > 0
+                           && frame.Payload[0] == sentButtons && reader.TryPeek(out var next)
+                           && next.Frame.Type == FrameType.AbsMouse && next.Ticket == ticket
+                           && next.Frame.Payload.Length > 0 && frame.Payload.Length > 0
+                           && next.Frame.Payload[0] == frame.Payload[0] && reader.TryRead(out next))
+                        frame = next.Frame;
                     if (frame.Type is FrameType.Mouse or FrameType.AbsMouse or FrameType.Keyboard
                         or FrameType.Consumer)
                     {
@@ -185,12 +200,19 @@ public sealed class ProtocolRunner
                         if ((!healthy || Volatile.Read(ref protocolFaultEpoch) == epoch)
                             && !IsZero(frame.Payload))
                             continue;
+                        if (frame.Type == FrameType.AbsMouse && frame.Payload.Length > 0)
+                            sentButtons = frame.Payload[0];
+                        long began = clock.NowMilliseconds;
                         bool sent = await NotifyAsync(ticket, kind, frame.Payload,
                                                        runCancellation).ConfigureAwait(false);
                         healthy &= sent;
                         if (!sent && gate.IsCurrent(ticket.Token))
                             Fail($"error notifying {kind.ToString().ToLowerInvariant()} report");
-                        await DelayAsync(ticket, interval, runCancellation).ConfigureAwait(false);
+                        // The interval runs from the send: a notification that
+                        // waited for its Bluetooth slot already used part of it.
+                        int left = interval - (int)Math.Max(0, clock.NowMilliseconds - began);
+                        if (left > 0)
+                            await DelayAsync(ticket, left, runCancellation).ConfigureAwait(false);
                     }
                     else if (frame.Type == FrameType.Interval)
                         interval = Math.Max(5, (int)BinaryPrimitives.ReadUInt16LittleEndian(frame.Payload));
