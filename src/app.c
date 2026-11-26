@@ -198,6 +198,7 @@ typedef struct app {
     /* Test aid (Ctrl+Alt+R): extra quarter turns on top of the phone's report,
      * to find which turn iOS expects after a landscape flip. */
     atomic_int pointer_turn_test;
+    bool turn_logged; /* screen thread only */
     int audible_mode; /* the last choice that plays here, for unmuting */
     unsigned sound_serial;
     bool pc_muted_seen;
@@ -468,6 +469,7 @@ static void screen_connected(void *user, const char *address)
     if (started)
         atomic_store(&a->screen_on, true);
     atomic_store(&a->phone_orientation, 1); /* until the phone says otherwise */
+    a->turn_logged = false;
     bool announce = started && a->src.current != PH_SRC_USB && !a->src.have_wifi;
     pthread_mutex_unlock(&a->src_lock);
     if (started)
@@ -501,7 +503,11 @@ static void screen_video(void *user, const uint8_t *annexb, size_t len, bool key
 static void screen_orientation(void *user, const uint8_t *turn, size_t len)
 {
     app *a = user;
-    atomic_store(&a->phone_orientation, turn[0]);
+    /* Newer phones repeat the turn with each keyframe: log changes only. */
+    int before = atomic_exchange(&a->phone_orientation, turn[0]);
+    if (before == turn[0] && a->turn_logged)
+        return;
+    a->turn_logged = true;
     if (len >= 7)
         PH_LOGI("shared screen turn: pointer %u, iOS tag %u, picture %u, captured %ux%u; test turn %d",
                 turn[0], turn[1], turn[2], (unsigned)turn[3] << 8 | turn[4],
