@@ -446,6 +446,7 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
         catch (Exception e) { log("Bluetooth link pace unavailable: " + e.Message); }
     }
 
+    [System.Runtime.Versioning.SupportedOSPlatform("windows10.0.22000")]
     private static string LinkPace(BluetoothLEDevice le)
     {
         try
