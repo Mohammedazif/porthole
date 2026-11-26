@@ -199,6 +199,11 @@ typedef struct app {
      * to find which turn iOS expects after a landscape flip. */
     atomic_int pointer_turn_test;
     bool turn_logged; /* screen thread only */
+    int phone_held;   /* screen thread only: how the phone is held (turn byte 7) */
+    /* Half a turn on the pointer: the phone is held opposite to its screen's
+     * layout (iOS left its screen unturned after a direct landscape flip),
+     * and iOS places the absolute pointer by how the phone is held. */
+    atomic_bool pointer_flip;
     int audible_mode; /* the last choice that plays here, for unmuting */
     unsigned sound_serial;
     bool pc_muted_seen;
@@ -470,6 +475,8 @@ static void screen_connected(void *user, const char *address)
         atomic_store(&a->screen_on, true);
     atomic_store(&a->phone_orientation, 1); /* until the phone says otherwise */
     a->turn_logged = false;
+    a->phone_held = 0;
+    atomic_store(&a->pointer_flip, false);
     bool announce = started && a->src.current != PH_SRC_USB && !a->src.have_wifi;
     pthread_mutex_unlock(&a->src_lock);
     if (started)
@@ -504,14 +511,25 @@ static void screen_orientation(void *user, const uint8_t *turn, size_t len)
 {
     app *a = user;
     /* Newer phones repeat the turn with each keyframe: log changes only. */
+    int held = len >= 8 ? turn[7] : 0;
     int before = atomic_exchange(&a->phone_orientation, turn[0]);
-    if (before == turn[0] && a->turn_logged)
+    bool held_changed = held != a->phone_held;
+    a->phone_held = held;
+    /* The screen turned upright by 6 (a quarter clockwise) has its top at the
+     * phone's left edge, so it matches the phone held top to the left (3);
+     * 8 matches top to the right (4). Held the other landscape way, the
+     * pointer needs half a turn. Flat or unknown keeps no flip. */
+    bool flip = (turn[0] == 6 && held == 4) || (turn[0] == 8 && held == 3);
+    atomic_store(&a->pointer_flip, flip);
+    if (before == turn[0] && !held_changed && a->turn_logged)
         return;
     a->turn_logged = true;
     if (len >= 7)
-        PH_LOGI("shared screen turn: pointer %u, iOS tag %u, picture %u, captured %ux%u; test turn %d",
-                turn[0], turn[1], turn[2], (unsigned)turn[3] << 8 | turn[4],
-                (unsigned)turn[5] << 8 | turn[6], atomic_load(&a->pointer_turn_test) * 90);
+        PH_LOGI("shared screen turn: pointer %u, iOS tag %u, picture %u, captured %ux%u, held %d; "
+                "pointer %s; test turn %d", turn[0], turn[1], turn[2], (unsigned)turn[3] << 8 | turn[4],
+                (unsigned)turn[5] << 8 | turn[6], held, flip ? "half turn (held opposite the screen)"
+                                                           : "as shown",
+                atomic_load(&a->pointer_turn_test) * 90);
     else
         PH_LOGI("shared screen turn: pointer %u", turn[0]);
 }
@@ -911,6 +929,10 @@ static void send_abs(void *user, uint8_t buttons, double x, double y)
     bool broadcast = a->src.current == PH_SRC_BROADCAST;
     pthread_mutex_unlock(&a->src_lock);
     if (broadcast) {
+        if (atomic_load(&a->pointer_flip)) {
+            x = 1 - x;
+            y = 1 - y;
+        }
         for (int turn = atomic_load(&a->pointer_turn_test) & 3; turn > 0; turn--) {
             double px = x;
             x = 1 - y; /* a quarter turn clockwise */
@@ -4017,6 +4039,7 @@ int ph_app_run(const ph_app_options *opt)
         atomic_init(&a.sound_mode, mode);
         atomic_init(&a.phone_orientation, 1);
         atomic_init(&a.pointer_turn_test, 0);
+        atomic_init(&a.pointer_flip, false);
         a.audible_mode = mode == PH_SOUND_IPHONE ? PH_SOUND_BOTH : mode;
         a.pc_muted_seen = mode == PH_SOUND_IPHONE;
         if (a.audio)
