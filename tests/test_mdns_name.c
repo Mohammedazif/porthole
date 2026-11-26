@@ -69,11 +69,22 @@ static void test_device_name(void)
     CHECK(!ph_mdns_device_name("Unknown.local", name, 4));
 }
 
+static void test_host_form(void)
+{
+    CHECK(ph_mdns_host_form_of("John's iPhone", "Johns iPhone"));
+    CHECK(ph_mdns_host_form_of("Unknown", "Unknown"));
+    CHECK(ph_mdns_host_form_of("iPhone 15 - Pro", "iPhone 15 Pro"));
+    CHECK(!ph_mdns_host_form_of("Unknown", "Johns iPhone"));
+    CHECK(!ph_mdns_host_form_of("John's iPhone", "John's iPhone")); /* a chosen name stays */
+    CHECK(!ph_mdns_host_form_of("'", ""));
+}
+
 int main(void)
 {
     test_query();
     test_answer();
     test_device_name();
+    test_host_form();
     if (failures)
         fprintf(stderr, "%d check(s) failed\n", failures);
     return failures ? 1 : 0;

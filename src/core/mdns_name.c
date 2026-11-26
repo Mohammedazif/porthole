@@ -134,6 +134,26 @@ bool ph_mdns_device_name(const char *host, char *out, size_t cap)
     return true;
 }
 
+bool ph_mdns_host_form_of(const char *exact, const char *from_host)
+{
+    /* iOS keeps letters and digits, turns spaces and dashes into "-", and
+     * drops the rest; ph_mdns_device_name turns "-" back into spaces. */
+    char form[64];
+    size_t n = 0;
+    if (!exact || !from_host || !*from_host)
+        return false;
+    for (const unsigned char *c = (const unsigned char *)exact; *c && n + 1 < sizeof form; c++) {
+        if (isalnum(*c))
+            form[n++] = (char)*c;
+        else if ((*c == ' ' || *c == '-') && n && form[n - 1] != ' ')
+            form[n++] = ' ';
+    }
+    while (n && form[n - 1] == ' ')
+        n--;
+    form[n] = 0;
+    return n && !strcmp(form, from_host);
+}
+
 bool ph_mdns_lookup_device_name(const char *ipv4, char *out, size_t cap, int timeout_ms)
 {
     uint8_t query[96], reply[1500];

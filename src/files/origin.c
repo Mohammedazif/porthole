@@ -3,6 +3,7 @@
 #include "core/host.h"
 #include "core/config.h"
 #include "core/log.h"
+#include "core/mdns_name.h"
 #include "core/metrics.h"
 #include "files/clip.h"
 #include "files/digest.h"
@@ -2135,8 +2136,11 @@ bool ph_origin_remember_verified_phone_name(ph_origin *o, const char *name)
     pthread_mutex_lock(&o->lock);
     const ph_paired_phone *phone = ph_paired_phones_selected(&o->phones);
     bool saved = false;
+    /* The Bluetooth name is exact, so it also replaces the network host name's
+     * approximation of it ("Johns iPhone" for "John's iPhone"). */
     if (phone && paired_client(o) && o->controls_verified && strcmp(phone->remote, name) &&
-        (!phone->remote[0] || !strcmp(phone->remote, "iPhone"))) {
+        (!phone->remote[0] || !strcmp(phone->remote, "iPhone") ||
+         ph_mdns_host_form_of(name, phone->remote))) {
         ph_paired_phones next = o->phones;
         snprintf(next.items[next.selected].remote, sizeof next.items[next.selected].remote, "%s", name);
         if (ph_paired_phones_save(&next)) {

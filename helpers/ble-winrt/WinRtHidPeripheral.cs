@@ -398,17 +398,57 @@ internal sealed class WinRtHidPeripheral : IReportNotifier, IAsyncDisposable
 
     private async Task ReportPeerNameAsync(PeerSession peer)
     {
+        string name = "";
         try
         {
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
             DeviceInformation? device = await DeviceInformation.CreateFromIdAsync(peer.ClientId).AsTask(deadline.Token);
-            string name = Program.SingleLine(device?.Name ?? "");
-            if (string.IsNullOrWhiteSpace(name)) return;
-            lock (stateLock)
-                if (!disposed && activePeer == peer) status("peer-name " + name);
+            name = Program.SingleLine(device?.Name ?? "");
         }
         catch (Exception e) { log("Bluetooth device name unavailable: " + e.Message); }
+        // Over Bluetooth LE an iPhone gives its name as "iPhone". Its Classic
+        // Bluetooth side, at the same identity address, answers a name request
+        // with the name set on the phone, exactly, without pairing for sound.
+        string exact = await ClassicNameAsync(peer.ClientId);
+        if (exact.Length > 0) name = exact;
+        if (string.IsNullOrWhiteSpace(name)) return;
+        lock (stateLock)
+            if (!disposed && activePeer == peer) status("peer-name " + name);
     }
+
+    private async Task<string> ClassicNameAsync(string leDeviceId)
+    {
+        try
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using BluetoothLEDevice? le = await BluetoothLEDevice.FromIdAsync(leDeviceId).AsTask(deadline.Token);
+            if (le is null || le.BluetoothAddressType != BluetoothAddressType.Public)
+                return "";  // a random LE address has no Classic side to ask
+            using BluetoothDevice? classic =
+                await BluetoothDevice.FromBluetoothAddressAsync(le.BluetoothAddress).AsTask(deadline.Token);
+            if (classic is null) return "";
+            string name = Program.SingleLine(classic.Name ?? "").Trim();
+            if (!UsableClassicName(name))
+            {
+                // Windows learns an unpaired device's name over a short
+                // Classic connection; asking for its services opens one.
+                await classic.GetRfcommServicesAsync(BluetoothCacheMode.Uncached).AsTask(deadline.Token);
+                name = Program.SingleLine(classic.Name ?? "").Trim();
+            }
+            if (!UsableClassicName(name)) { log("Classic Bluetooth gave no name for the phone."); return ""; }
+            log($"Classic Bluetooth gave the phone's own name ({name.Length} characters).");
+            return name;
+        }
+        catch (Exception e)
+        {
+            log("Classic Bluetooth name unavailable: " + e.Message);
+            return "";
+        }
+    }
+
+    /// Windows names a device it knows only by address "Bluetooth xx:xx:...".
+    private static bool UsableClassicName(string name) =>
+        name.Length > 0 && !name.Contains(':') && !name.Equals("iPhone", StringComparison.Ordinal);
 
     private void CheckPipeLifetimeLocked()
     {

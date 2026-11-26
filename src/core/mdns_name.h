@@ -23,6 +23,10 @@ bool ph_mdns_reverse_answer(const uint8_t *reply, size_t len, char *host, size_t
  * iOS drops some characters (an apostrophe) making the host name, so this is
  * the name as near as the host name keeps it. False if nothing is left. */
 bool ph_mdns_device_name(const char *host, char *out, size_t cap);
+/* True when `from_host` is what ph_mdns_device_name makes of the host name
+ * iOS derives from `exact` ("John's iPhone" -> "Johns iPhone"): the exact
+ * name, from Bluetooth, may replace it. */
+bool ph_mdns_host_form_of(const char *exact, const char *from_host);
 /* Asks the phone at `ipv4`, waiting up to `timeout_ms`. Blocks: call it off
  * the main thread. */
 bool ph_mdns_lookup_device_name(const char *ipv4, char *out, size_t cap, int timeout_ms);
