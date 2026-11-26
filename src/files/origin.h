@@ -55,6 +55,13 @@ bool ph_origin_verifying_controls(ph_origin *origin);
 bool ph_origin_issue_control_proof(ph_origin *origin, const char code[17]);
 bool ph_origin_control_proof_current(ph_origin *origin, const char code[17]);
 bool ph_origin_controls_verified(ph_origin *origin);
+/* A short, non-secret tag for the current pairing (16 hex digits), so the PC
+ * can remember which Bluetooth device this paired iPhone verified. */
+bool ph_origin_pairing_tag(ph_origin *origin, char out[17]);
+/* Marks controls verified without the typed code: only for the Bluetooth
+ * device this same pairing verified before. False while not paired, while
+ * controls are off on the phone, or while a verification is in progress. */
+bool ph_origin_trust_controls(ph_origin *origin);
 void ph_origin_reset_control_verification(ph_origin *origin);
 /* A stable opaque namespace for durable inbox records on this pairing. */
 bool ph_origin_receive_profile(ph_origin *origin, const char *ticket, char out[65]);

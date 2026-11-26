@@ -205,6 +205,10 @@ typedef struct app {
      * and iOS places the absolute pointer by how the phone is held. */
     atomic_bool pointer_flip;
     const char *control_gate_logged; /* main thread: last reason logged */
+    /* "<pairing tag> <Bluetooth peer id>" that verified, kept on disk so the
+     * same iPhone's mouse and keyboard work again without the typed code. */
+    char verified_peer[64];
+    bool verified_peer_loaded;
     int audible_mode; /* the last choice that plays here, for unmuting */
     unsigned sound_serial;
     bool pc_muted_seen;
@@ -2986,6 +2990,33 @@ static const char *control_gate(app *a)
     return "sending";
 }
 
+/* Remembers which Bluetooth device the paired iPhone verified, and trusts
+ * that same device when it returns: a new share, a helper restart, or a PC
+ * restart. A different device, or a new pairing, still has to verify. */
+static void remember_verified_controls(app *a)
+{
+    char tag[17], want[64];
+    if (!a->verified_peer_loaded) {
+        a->verified_peer_loaded = true;
+        if (!ph_config_read_line("verified-bluetooth", a->verified_peer, sizeof a->verified_peer))
+            a->verified_peer[0] = 0;
+    }
+    if (strcmp(a->ble_status, "on") || !a->ble_peer_id[0] || !ph_origin_pairing_tag(a->origin, tag))
+        return;
+    snprintf(want, sizeof want, "%s %s", tag, a->ble_peer_id);
+    if (ph_origin_broadcast_control_policy(a->origin).verified) {
+        if (strcmp(a->verified_peer, want)) {
+            snprintf(a->verified_peer, sizeof a->verified_peer, "%s", want);
+            if (ph_config_write_line("verified-bluetooth", want))
+                PH_LOGI("Bluetooth: remembering this verified iPhone");
+        }
+        return;
+    }
+    if (!strcmp(a->verified_peer, want) && !ph_origin_verifying_controls(a->origin) &&
+        ph_origin_trust_controls(a->origin))
+        PH_LOGI("Bluetooth: the verified iPhone is back; controls work without the code");
+}
+
 static void log_control_gate(app *a)
 {
     const char *gate = control_gate(a);
@@ -4260,6 +4291,7 @@ int ph_app_run(const ph_app_options *opt)
         }
 #endif
         sync_sound_mode(&a);
+        remember_verified_controls(&a);
         log_control_gate(&a);
         if (a.verification_hold_until && SDL_GetTicks64() >= a.verification_hold_until)
             end_verification_hold(&a, false);

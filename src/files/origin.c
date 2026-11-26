@@ -2447,6 +2447,40 @@ bool ph_origin_controls_verified(ph_origin *o)
     return verified;
 }
 
+bool ph_origin_pairing_tag(ph_origin *o, char out[17])
+{
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int length = 0;
+    if (!o || !out)
+        return false;
+    pthread_mutex_lock(&o->lock);
+    bool ok = o->reconnect_key[0] &&
+              EVP_Digest(o->reconnect_key, strlen(o->reconnect_key), digest, &length, EVP_sha256(),
+                         NULL) && length >= 8;
+    pthread_mutex_unlock(&o->lock);
+    if (!ok)
+        return false;
+    for (int i = 0; i < 8; i++)
+        snprintf(out + 2 * i, 3, "%02x", digest[i]);
+    OPENSSL_cleanse(digest, sizeof digest);
+    return true;
+}
+
+bool ph_origin_trust_controls(ph_origin *o)
+{
+    if (!o)
+        return false;
+    pthread_mutex_lock(&o->lock);
+    bool ok = o->reconnect_key[0] && (!o->control.managed || o->control.enabled) &&
+              !o->verification_requested;
+    if (ok) {
+        o->controls_verified = true;
+        o->verification_reset = false;
+    }
+    pthread_mutex_unlock(&o->lock);
+    return ok;
+}
+
 void ph_origin_reset_control_verification(ph_origin *o)
 {
     if (!o)

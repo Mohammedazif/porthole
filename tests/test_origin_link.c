@@ -708,6 +708,12 @@ int main(int argc, char **argv)
             nap(10);
     }
     CHECK(volume_steps == 2 && ph_origin_take_volume_steps(o) == 0);
+    /* The pairing tag is stable, 16 hex digits, and not the key itself. */
+    char tag[17], again[17];
+    CHECK(ph_origin_pairing_tag(o, tag) && ph_origin_pairing_tag(o, again));
+    CHECK(strlen(tag) == 16 && !strcmp(tag, again) && strspn(tag, "0123456789abcdef") == 16);
+    CHECK(!strstr(key, tag));
+    CHECK(!ph_origin_pairing_tag(NULL, tag) && !ph_origin_trust_controls(NULL));
     CHECK(!ph_origin_put_clip(o, 'T', "disabled", 8));
     const char *request = "1eecc050-8818-4079-9fb0-2e0143e55d96";
     snprintf(reply, sizeof reply, "SYNC %s 1\nFILES\n", request);
