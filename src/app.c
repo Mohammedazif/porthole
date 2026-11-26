@@ -617,21 +617,26 @@ static void apply_sound_mode(app *a, int mode, bool from_phone)
 
 /* The choice follows the iPhone, the Settings choice, and the PC's mute
  * shortcuts (which pick iPhone, or the last choice that plays here). */
+/* Porthole's own volume, 3 dB a step, shown in the window. */
+static void change_pc_volume(app *a, int steps, const char *from)
+{
+    struct ph_audio_settings sound;
+    if (!steps || !a->audio)
+        return;
+    ph_audio_adjust_volume_db(a->audio, 3.0f * (float)steps);
+    if (!ph_audio_settings(a->audio, &sound))
+        return;
+    int percent = (int)lroundf(100 * powf(10, sound.volume_db / 20));
+    char note[48];
+    snprintf(note, sizeof note, "PC volume %d%%%s", percent,
+             percent >= 100 ? " (highest)" : sound.volume_db <= -30.f ? " (lowest)" : "");
+    ph_window_set_detail(a->win, note);
+    PH_LOGI("volume: %+d from %s, PC volume %d%%", steps, from, percent);
+}
+
 static void sync_sound_mode(app *a)
 {
-    int steps = ph_origin_take_volume_steps(a->origin);
-    if (steps && a->audio) {
-        struct ph_audio_settings sound;
-        ph_audio_adjust_volume_db(a->audio, 3.0f * (float)steps);
-        if (ph_audio_settings(a->audio, &sound)) {
-            int percent = (int)lroundf(100 * powf(10, sound.volume_db / 20));
-            char note[48];
-            snprintf(note, sizeof note, "PC volume %d%%%s", percent,
-                     percent >= 100 ? " (highest)" : sound.volume_db <= -30.f ? " (lowest)" : "");
-            ph_window_set_detail(a->win, note);
-            PH_LOGI("volume buttons: %+d from the iPhone, PC volume %d%%", steps, percent);
-        }
-    }
+    change_pc_volume(a, ph_origin_take_volume_steps(a->origin), "the iPhone");
     unsigned serial = ph_origin_sound_serial(a->origin);
     if (serial != a->sound_serial) {
         a->sound_serial = serial;
@@ -2143,6 +2148,18 @@ static void handle_key(app *a, const SDL_KeyboardEvent *e)
         ph_input_release_all(&a->input);
         SDL_CaptureMouse(SDL_FALSE);
         a->gesture_keys[sc] = true;
+        return;
+    }
+    /* With sound on "PC" the iPhone holds its own volume at zero, so the
+     * volume shortcuts (Alt+Up/Down, and the keyboard's volume keys) change
+     * this PC's volume instead of the iPhone's. */
+    if (down && atomic_load(&a->sound_mode) == PH_SOUND_PC &&
+        (((sc == SDL_SCANCODE_UP || sc == SDL_SCANCODE_DOWN) && (e->keysym.mod & KMOD_ALT) &&
+          !(e->keysym.mod & (KMOD_SHIFT | KMOD_CTRL | KMOD_GUI))) ||
+         sc == SDL_SCANCODE_VOLUMEUP || sc == SDL_SCANCODE_VOLUMEDOWN)) {
+        bool louder = sc == SDL_SCANCODE_UP || sc == SDL_SCANCODE_VOLUMEUP;
+        change_pc_volume(a, louder ? 1 : -1, "this PC's keys");
+        a->gesture_keys[sc] = true; /* its release goes nowhere, too */
         return;
     }
     /* Eject toggles the iPhone keyboard, and iOS applies it while a text field is focused. */
