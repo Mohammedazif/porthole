@@ -204,6 +204,7 @@ typedef struct app {
      * layout (iOS left its screen unturned after a direct landscape flip),
      * and iOS places the absolute pointer by how the phone is held. */
     atomic_bool pointer_flip;
+    const char *control_gate_logged; /* main thread: last reason logged */
     int audible_mode; /* the last choice that plays here, for unmuting */
     unsigned sound_serial;
     bool pc_muted_seen;
@@ -515,11 +516,12 @@ static void screen_orientation(void *user, const uint8_t *turn, size_t len)
     int before = atomic_exchange(&a->phone_orientation, turn[0]);
     bool held_changed = held != a->phone_held;
     a->phone_held = held;
-    /* The screen turned upright by 6 (a quarter clockwise) has its top at the
-     * phone's left edge, so it matches the phone held top to the left (3);
-     * 8 matches top to the right (4). Held the other landscape way, the
-     * pointer needs half a turn. Flat or unknown keeps no flip. */
-    bool flip = (turn[0] == 6 && held == 4) || (turn[0] == 8 && held == 3);
+    /* Measured on iOS 26: once iOS has turned its screen, it reports 6 with
+     * the phone held top to the right (4) and 8 with it held top to the left
+     * (3), about half a second after the phone turns. Held the other
+     * landscape way, iOS left its screen unturned, and the pointer needs half
+     * a turn. Flat or unknown keeps no flip. */
+    bool flip = (turn[0] == 6 && held == 3) || (turn[0] == 8 && held == 4);
     atomic_store(&a->pointer_flip, flip);
     if (before == turn[0] && !held_changed && a->turn_logged)
         return;
@@ -2959,6 +2961,40 @@ static bool controls_wanted(app *a)
     return ph_control_connection_wanted(policy, sharing, pairing, a->controls_paused);
 }
 
+/* Why the PC is or isn't sending the mouse and keyboard, for the log. */
+static const char *control_gate(app *a)
+{
+    if (!a->link)
+        return "no Bluetooth helper";
+    if (a->link_stopping)
+        return "Bluetooth helper stopping";
+    if (strcmp(a->ble_status, "on"))
+        return "Bluetooth not ready";
+    if (a->controls_paused)
+        return "controls paused on the PC";
+    ph_control_policy policy = ph_origin_broadcast_control_policy(a->origin);
+    if (policy.managed && !policy.connected)
+        return "the iPhone app isn't connected";
+    if (policy.managed && !policy.enabled)
+        return "controls are off in the iPhone app";
+    if (!controls_wanted(a))
+        return "not sharing";
+    if (policy.managed && !policy.verified)
+        return "waiting for the iPhone to verify Bluetooth";
+    if (policy.managed && policy.screen_only && !atomic_load(&a->screen_on))
+        return "controls are set to screen sharing only";
+    return "sending";
+}
+
+static void log_control_gate(app *a)
+{
+    const char *gate = control_gate(a);
+    if (a->control_gate_logged != gate) {
+        a->control_gate_logged = gate;
+        PH_LOGI("controls: %s", gate);
+    }
+}
+
 static bool may_forward_controls(app *a)
 {
     if (!a->link || a->link_stopping || strcmp(a->ble_status, "on") || !controls_wanted(a))
@@ -4224,6 +4260,7 @@ int ph_app_run(const ph_app_options *opt)
         }
 #endif
         sync_sound_mode(&a);
+        log_control_gate(&a);
         if (a.verification_hold_until && SDL_GetTicks64() >= a.verification_hold_until)
             end_verification_hold(&a, false);
         sync_window_state(&a);
