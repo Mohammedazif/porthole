@@ -163,6 +163,9 @@ int ph_sound_mode_parse(const char *word);
 int ph_origin_sound_mode(ph_origin *origin);
 /* Bumped each time the phone reports its choice, so the PC can follow it. */
 unsigned ph_origin_sound_serial(ph_origin *origin);
+/* Volume button presses on the phone since the last call (positive is
+ * louder). Phones send them while sharing with their sound on this PC. */
+int ph_origin_take_volume_steps(ph_origin *origin);
 /* Chosen on the PC. The phone follows when it next hears from the PC, and a
  * phone that reconnects takes the PC's choice. */
 void ph_origin_set_sound_mode(ph_origin *origin, int mode);

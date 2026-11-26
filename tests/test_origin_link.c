@@ -176,6 +176,8 @@ static int reconnect_phone(const char *token)
     CHECK(!strcmp(response, "INPUT READY"));
     line(fd, response, sizeof response);
     CHECK(!strcmp(response, "SOUND READY"));
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "VOLUME READY"));
     say(fd, "FILES 2\nRESUME?\n");
     line(fd, response, sizeof response);
     CHECK(!strcmp(response, "RESUME 2"));
@@ -689,12 +691,23 @@ int main(int argc, char **argv)
     CHECK(!strcmp(reply, "INPUT READY"));
     line(phone, reply, sizeof reply);
     CHECK(!strcmp(reply, "SOUND READY"));
+    line(phone, reply, sizeof reply);
+    CHECK(!strcmp(reply, "VOLUME READY"));
     const char *key = "9b60dadcd5a15f46fd9183e0b144db65";
     snprintf(reply, sizeof reply, "PAIR %s\n", key);
     say(phone, reply);
     line(phone, reply, sizeof reply);
     CHECK(!strcmp(reply, "PAIRED") && !ph_origin_code_open(o));
     say(phone, "NAME Zoë’s iPhone\nNAME iPhone\n");
+    /* Volume button presses while sharing add up until the app applies them. */
+    say(phone, "VOLUME up\nVOLUME up\nVOLUME down\nVOLUME up\n");
+    int volume_steps = 0;
+    for (int i = 0; i < 100 && volume_steps < 2; i++) {
+        volume_steps += ph_origin_take_volume_steps(o);
+        if (volume_steps < 2)
+            nap(10);
+    }
+    CHECK(volume_steps == 2 && ph_origin_take_volume_steps(o) == 0);
     CHECK(!ph_origin_put_clip(o, 'T', "disabled", 8));
     const char *request = "1eecc050-8818-4079-9fb0-2e0143e55d96";
     snprintf(reply, sizeof reply, "SYNC %s 1\nFILES\n", request);

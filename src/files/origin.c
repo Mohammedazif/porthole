@@ -72,6 +72,9 @@ struct ph_origin {
     int phone_audio;
     bool audio_capable, audio_push;
     unsigned audio_serial;
+    /* Volume button presses on the phone while its sound plays here, not yet
+     * applied by the app: positive is louder. */
+    int volume_steps;
     char verification_id[37], verification_code[17];
     uint64_t verification_deadline;
     bool verification_requested, controls_verified, verification_reset;
@@ -538,6 +541,20 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
             PH_LOGI("sound while sharing set on the iPhone: %s", ph_sound_mode_name(mode));
         int n = snprintf(reply, sizeof reply, "SOUND OK %s %s\n", id, ph_sound_mode_name(mode));
         return send_all(fd, reply, (size_t)n);
+    }
+    if (!strcmp(line, "VOLUME up") || !strcmp(line, "VOLUME down")) {
+        *consumed = true;
+        pthread_mutex_lock(&o->lock);
+        if (o->volume_steps > -32 && o->volume_steps < 32)
+            o->volume_steps += line[7] == 'u' ? 1 : -1;
+        pthread_mutex_unlock(&o->lock);
+        return true;
+    }
+    if (!strcmp(line, "VOLUME stuck")) {
+        /* The phone could not put its own volume back after a press. */
+        *consumed = true;
+        PH_LOGW("volume buttons: the iPhone could not put its own volume back");
+        return true;
     }
     if (!strncmp(line, "SYNC ", 5)) {
         unsigned enable;
@@ -1247,13 +1264,13 @@ static void serve_client(ph_origin *o, int fd)
         }
         goto done;
     }
-    char hostname[64], encoded[96], welcome[256];
+    char hostname[64], encoded[96], welcome[320];
     ph_host_name(hostname, sizeof hostname);
     PH_LOGI("photo pull: this PC introduces itself as \"%s\"", hostname);
     EVP_EncodeBlock((unsigned char *)encoded, (const unsigned char *)hostname,
                     (int)strlen(hostname));
     int welcome_len =
-        snprintf(welcome, sizeof welcome, "OK %s %s\nSYNC READY\nINPUT READY\nSOUND READY\n", ticket,
+        snprintf(welcome, sizeof welcome, "OK %s %s\nSYNC READY\nINPUT READY\nSOUND READY\nVOLUME READY\n", ticket,
                  encoded);
     if (!send_all(fd, welcome, (size_t)welcome_len))
         goto done;
@@ -2337,6 +2354,17 @@ unsigned ph_origin_sound_serial(ph_origin *o)
     unsigned serial = o->audio_serial;
     pthread_mutex_unlock(&o->lock);
     return serial;
+}
+
+int ph_origin_take_volume_steps(ph_origin *o)
+{
+    if (!o)
+        return 0;
+    pthread_mutex_lock(&o->lock);
+    int steps = o->volume_steps;
+    o->volume_steps = 0;
+    pthread_mutex_unlock(&o->lock);
+    return steps;
 }
 
 int ph_origin_sound_mode(ph_origin *o)
