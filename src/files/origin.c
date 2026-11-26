@@ -437,6 +437,8 @@ static bool verify_input_line(ph_origin *o, int fd, const char *line)
             clear_verification(o, true);
         }
         pthread_mutex_unlock(&o->lock);
+        PH_LOGI("controls verification: iPhone %s%s", begin ? "began" : "cancelled",
+                begin && !ready ? " (refused: controls off or not paired)" : "");
         if (!begin || ready)
             return true;
         char reply[64];
@@ -450,9 +452,18 @@ static bool verify_input_line(ph_origin *o, int fd, const char *line)
             return false;
         pthread_mutex_lock(&o->lock);
         bool same_request = !strcmp(reference, o->verification_id);
+        bool in_time = ph_metrics_now_ms() < o->verification_deadline;
         bool ok = same_request && o->control.connected && o->control.enabled &&
-                  o->verification_code[0] && ph_metrics_now_ms() < o->verification_deadline &&
+                  o->verification_code[0] && in_time &&
                   !CRYPTO_memcmp(proof, o->verification_code, 16);
+        /* How many digits arrived right, for the log: a dropped key shows as
+         * a shorter run. The digits themselves are never logged. */
+        int matching = 0;
+        while (o->verification_code[0] && matching < 16 && proof[matching] == o->verification_code[matching])
+            matching++;
+        PH_LOGI("controls verification: %s (%d of 16 digits right%s%s%s)", ok ? "OK" : "FAILED", matching,
+                same_request ? "" : ", an older attempt", in_time ? "" : ", too late",
+                o->verification_code[0] ? "" : ", no code typed yet");
         if (same_request) {
             clear_verification(o, false);
             o->controls_verified = ok;
