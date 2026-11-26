@@ -6,6 +6,7 @@ add_library(porthole_core STATIC
     core/config.c
     core/metrics.c
     core/host.c
+    core/mdns_name.c
     control/keyboard.c
     control/input.c
     control/connection_policy.c

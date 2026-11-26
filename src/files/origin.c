@@ -2149,6 +2149,30 @@ bool ph_origin_remember_verified_phone_name(ph_origin *o, const char *name)
     return saved;
 }
 
+bool ph_origin_remember_network_phone_name(ph_origin *o, const char *name)
+{
+    /* From the phone's own answer on the network, at the address of its
+     * authenticated companion connection. Like the Bluetooth name, it only
+     * fills in a phone known as "iPhone"; a name the person chose stays. */
+    if (!o || !name || !*name || strlen(name) >= sizeof o->phone_name || strpbrk(name, "\t\r\n"))
+        return false;
+    pthread_mutex_lock(&o->lock);
+    const ph_paired_phone *phone = ph_paired_phones_selected(&o->phones);
+    bool saved = false;
+    if (phone && paired_client(o) && strcmp(phone->remote, name) &&
+        (!phone->remote[0] || !strcmp(phone->remote, "iPhone"))) {
+        ph_paired_phones next = o->phones;
+        snprintf(next.items[next.selected].remote, sizeof next.items[next.selected].remote, "%s", name);
+        if (ph_paired_phones_save(&next)) {
+            o->phones = next;
+            use_selected_phone(o);
+            saved = true;
+        }
+    }
+    pthread_mutex_unlock(&o->lock);
+    return saved;
+}
+
 bool ph_origin_peer(ph_origin *o, char *address, size_t len)
 {
     bool ok;

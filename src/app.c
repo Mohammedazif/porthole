@@ -30,6 +30,7 @@
 #include "control/setup.h"
 #include "core/config.h"
 #include "core/log.h"
+#include "core/mdns_name.h"
 #include "files/hostclip.h"
 #include "files/inbox.h"
 #include "files/origin.h"
@@ -111,6 +112,7 @@ static void watch_windows_shutdown(SDL_Window *window)
 enum {
     EV_FRAME,
     EV_CONNECTED,
+    EV_PHONE_NETWORK_NAME, /* data: the phone's name from its network host name */
     EV_DISCONNECTED,
     EV_END_BROADCAST_AIRPLAY,
     EV_BLE,
@@ -212,6 +214,7 @@ typedef struct app {
      * same iPhone's mouse and keyboard work again without the typed code. */
     char verified_peer[64];
     bool verified_peer_loaded;
+    bool name_lookup_done; /* main thread: asked the network for this connection */
     int audible_mode; /* the last choice that plays here, for unmuting */
     unsigned sound_serial;
     bool pc_muted_seen;
@@ -2789,6 +2792,19 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
             }
         }
         break;
+    case EV_PHONE_NETWORK_NAME:
+        if (ph_origin_remember_network_phone_name(a->origin, (const char *)e->user.data1)) {
+            char name[128];
+            ph_origin_phone_name(a->origin, name, sizeof name);
+            PH_LOGI("photo pull: the iPhone's name, from its network host name: \"%s\"", name);
+            ph_window_set_phone_name(a->win, name);
+            if (a->phone_name[0]) {
+                snprintf(a->phone_name, sizeof a->phone_name, "%s", name);
+                update_title(a);
+            }
+        }
+        free(e->user.data1);
+        break;
     case EV_CONNECTED:
         clear_view(a);
         ph_pointer_reset(&a->pointer, SDL_GetTicks64());
@@ -3027,6 +3043,50 @@ static void remember_verified_controls(app *a)
     if (!strcmp(a->verified_peer, want) && !ph_origin_verifying_controls(a->origin) &&
         ph_origin_trust_controls(a->origin))
         PH_LOGI("Bluetooth: the verified iPhone is back; controls work without the code");
+}
+
+/* The phone's name from its own network host name, off the main thread. */
+static void *lookup_phone_name(void *arg)
+{
+    char *address = arg, name[64];
+    app *a = *(app **)(address + 64);
+    char *found = ph_mdns_lookup_device_name(address, name, sizeof name, 1500) ? strdup(name) : NULL;
+    free(address);
+    if (found && !push_event(a, EV_PHONE_NETWORK_NAME, found))
+        free(found);
+    return NULL;
+}
+
+/* Over Bluetooth LE an iPhone calls itself "iPhone", and iOS gives the app
+ * its name only with an Apple-granted entitlement, so a phone paired without
+ * Classic Bluetooth stayed "iPhone". Its Wi-Fi host name carries the name. */
+static void learn_phone_name(app *a)
+{
+    char name[128], address[64];
+    if (!ph_origin_companion_connected(a->origin)) {
+        a->name_lookup_done = false;
+        return;
+    }
+    if (a->name_lookup_done)
+        return;
+    a->name_lookup_done = true;
+    ph_origin_phone_name(a->origin, name, sizeof name);
+    if ((name[0] && strcmp(name, "iPhone")) || !ph_origin_peer(a->origin, address, sizeof address))
+        return;
+    char *colon = strchr(address, ':');
+    if (colon && strchr(colon + 1, ':') == NULL)
+        *colon = 0; /* "ip:port" */
+    char *arg = malloc(64 + sizeof(app *));
+    pthread_t thread;
+    if (!arg)
+        return;
+    snprintf(arg, 64, "%s", address);
+    memcpy(arg + 64, &a, sizeof a);
+    if (pthread_create(&thread, NULL, lookup_phone_name, arg) != 0) {
+        free(arg);
+        return;
+    }
+    pthread_detach(thread);
 }
 
 static void log_control_gate(app *a)
@@ -4306,6 +4366,7 @@ int ph_app_run(const ph_app_options *opt)
 #endif
         sync_sound_mode(&a);
         remember_verified_controls(&a);
+        learn_phone_name(&a);
         log_control_gate(&a);
         if (a.verification_hold_until && SDL_GetTicks64() >= a.verification_hold_until)
             end_verification_hold(&a, false);

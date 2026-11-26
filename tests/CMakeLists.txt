@@ -264,6 +264,11 @@ target_link_libraries(test_abs_pointer PRIVATE porthole_core)
 porthole_set_warnings(test_abs_pointer)
 add_test(NAME abs_pointer COMMAND test_abs_pointer)
 
+add_executable(test_mdns_name test_mdns_name.c)
+target_link_libraries(test_mdns_name PRIVATE porthole_core)
+porthole_set_warnings(test_mdns_name)
+add_test(NAME mdns_name COMMAND test_mdns_name)
+
 add_executable(test_paste test_paste.c)
 target_link_libraries(test_paste PRIVATE porthole_core)
 porthole_set_warnings(test_paste)

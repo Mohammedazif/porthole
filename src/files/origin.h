@@ -132,6 +132,9 @@ void ph_origin_phone_name(ph_origin *origin, char *out, size_t len);
 /* IPv4 address of the phone that last gave the right code, kept after it disconnects. */
 bool ph_origin_remember_verified_phone_name(ph_origin *origin, const char *name);
 bool ph_origin_peer(ph_origin *origin, char *address, size_t len);
+/* The phone's name from its own network host name (core/mdns_name.h): fills
+ * in a paired phone known only as "iPhone", as the Bluetooth name does. */
+bool ph_origin_remember_network_phone_name(ph_origin *origin, const char *name);
 
 /* One result for the latest ask. FILE writes the received path. */
 void ph_origin_cancel_pull(ph_origin *origin);
