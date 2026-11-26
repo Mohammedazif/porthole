@@ -900,12 +900,17 @@ static void send_consumer(void *user, uint16_t usage)
 static void send_abs(void *user, uint8_t buttons, double x, double y)
 {
     app *a = user;
-    /* Pointer positions are picture fractions; the phone wants its own screen's. */
+    /* Pointer positions are fractions of the upright picture, and iOS places
+     * the absolute pointer on its screen as shown, in landscape too: measured
+     * on iOS 26 on both landscape sides (entered from portrait), no turn was
+     * right. Turning by the phone's report put it a quarter or half turn off.
+     * When iOS's screen is out of step with how the phone is held (a direct
+     * landscape flip it didn't follow), the picture and pointer disagree by
+     * half a turn until the phone passes through portrait. */
     pthread_mutex_lock(&a->src_lock);
     bool broadcast = a->src.current == PH_SRC_BROADCAST;
     pthread_mutex_unlock(&a->src_lock);
     if (broadcast) {
-        ph_abs_picture_to_screen(atomic_load(&a->phone_orientation), &x, &y);
         for (int turn = atomic_load(&a->pointer_turn_test) & 3; turn > 0; turn--) {
             double px = x;
             x = 1 - y; /* a quarter turn clockwise */
