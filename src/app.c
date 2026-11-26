@@ -509,8 +509,8 @@ static void screen_orientation(void *user, const uint8_t *turn, size_t len)
 static void screen_audio(void *user, const uint8_t *pcm, size_t len, uint64_t pts_ns)
 {
     app *a = user;
-    if (atomic_load(&a->sound_mode) != PH_SOUND_BOTH)
-        return; /* the iPhone plays its own sound, or this PC as its speaker */
+    if (atomic_load(&a->sound_mode) == PH_SOUND_IPHONE)
+        return; /* the iPhone plays its own sound */
     pthread_mutex_lock(&a->src_lock);
     /* The AirPlay route carries the same sound. It arrives about two seconds
      * before it is due, so let it finish before ReplayKit's copy takes over. */
@@ -585,8 +585,12 @@ static const char *sound_mode_label(int mode)
     return mode == PH_SOUND_PC ? "PC" : mode == PH_SOUND_BOTH ? "Both" : "iPhone";
 }
 
-/* Applies a sound choice made on either device:
- *  - PC: the iPhone plays through this PC as a speaker; the shared screen sends no sound.
+/* Applies a sound choice made on either device. The sound always comes with
+ * the shared screen over Wi-Fi, which works with any PC; Bluetooth carries
+ * only the mouse and keyboard (one iPhone can't hold both on one pairing,
+ * and Windows can't hold both links at once).
+ *  - PC: this PC plays the shared screen's sound; the iPhone keeps its own
+ *    volume at zero and its volume buttons change this PC's volume.
  *  - Both: the iPhone plays it, and this PC plays the shared screen's sound.
  *  - iPhone: this PC plays nothing. */
 static void apply_sound_mode(app *a, int mode, bool from_phone)
@@ -599,8 +603,6 @@ static void apply_sound_mode(app *a, int mode, bool from_phone)
     if (a->audio)
         ph_audio_set_muted(a->audio, mode == PH_SOUND_IPHONE);
     a->pc_muted_seen = mode == PH_SOUND_IPHONE;
-    if (a->link && !a->link_stopping)
-        ph_hid_link_phone_audio(a->link, mode == PH_SOUND_PC);
     ph_window_set_sound_mode(a->win, mode);
     if (!from_phone)
         ph_origin_set_sound_mode(a->origin, mode);
@@ -624,7 +626,8 @@ static void sync_sound_mode(app *a)
         if (ph_audio_settings(a->audio, &sound)) {
             int percent = (int)lroundf(100 * powf(10, sound.volume_db / 20));
             char note[48];
-            snprintf(note, sizeof note, "PC volume %d%%", percent);
+            snprintf(note, sizeof note, "PC volume %d%%%s", percent,
+                     percent >= 100 ? " (highest)" : sound.volume_db <= -30.f ? " (lowest)" : "");
             ph_window_set_detail(a->win, note);
             PH_LOGI("volume buttons: %+d from the iPhone, PC volume %d%%", steps, percent);
         }
@@ -759,9 +762,6 @@ static void handle_ble_status(app *a, const char *line)
     const char *state = NULL;
     bool was_on = !strcmp(a->ble_status, "on");
 
-    /* A new helper starts without the phone audio choice. */
-    if (!strcmp(line, "ready") && a->link && !a->link_stopping)
-        ph_hid_link_phone_audio(a->link, atomic_load(&a->sound_mode) == PH_SOUND_PC);
     if (!strcmp(line, "ready"))
 #ifdef _WIN32
         state = "starting Bluetooth advertising";

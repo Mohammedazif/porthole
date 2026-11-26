@@ -155,7 +155,7 @@ ph_control_policy ph_origin_broadcast_control_policy(ph_origin *origin);
 typedef enum ph_sound_mode {
     PH_SOUND_IPHONE = 0, /* the phone only */
     PH_SOUND_BOTH = 1,   /* the phone, and this PC from screen sharing */
-    PH_SOUND_PC = 2      /* this PC only; the phone plays through it as a speaker */
+    PH_SOUND_PC = 2      /* this PC only, from screen sharing; the phone keeps its volume at zero */
 } ph_sound_mode;
 const char *ph_sound_mode_name(int mode);
 int ph_sound_mode_parse(const char *word);
