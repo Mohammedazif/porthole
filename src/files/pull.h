@@ -27,6 +27,10 @@ bool ph_pull_lifts(const ph_pull *p);
 bool ph_pull_motion(ph_pull *p, bool on_picture, int x, int y);
 void ph_pull_release(ph_pull *p);
 
+/* Largest single file either way: no practical limit (free space decides).
+ * The iPhone app accepts the same (TransferStaging.maxFileBytes). */
+#define PH_TRANSFER_MAX_BYTES (1ull << 40)
+
 /* "FILE <bytes> <name>" with a single safe file name. max_bytes rejects a huge claim. */
 bool ph_pull_parse_file(const char *line, unsigned long long max_bytes, unsigned long long *size,
                         char *name, size_t name_len);

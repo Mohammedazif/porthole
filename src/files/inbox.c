@@ -37,9 +37,11 @@ int ph_inbox_parse_hello(const char *line)
 
 #include <openssl/rand.h>
 
-#define INBOX_FILE_MAX (512ULL * 1024 * 1024)
-#define INBOX_STAGING_MAX (2ULL * 1024 * 1024 * 1024)
-#define INBOX_PAIR_STAGING_MAX (1ULL * 1024 * 1024 * 1024)
+#define INBOX_FILE_MAX PH_TRANSFER_MAX_BYTES
+/* Unfinished files left behind by earlier transfers may use this much; the
+ * file arriving now needs only room on the disk. */
+#define INBOX_STAGING_MAX (8ULL * 1024 * 1024 * 1024)
+#define INBOX_PAIR_STAGING_MAX (4ULL * 1024 * 1024 * 1024)
 #define INBOX_FREE_RESERVE (32ULL * 1024 * 1024)
 #define INBOX_PART_MAX_AGE (7 * 24 * 60 * 60)
 #define INBOX_RECEIPT_MAX_AGE (30 * 24 * 60 * 60)
@@ -288,8 +290,8 @@ static bool staging_has_space(const char *folder, const char *current, const cha
         count_staging(folder, item->d_name, current, profile, &used, &pair_used);
     closedir(scan);
 #endif
-    return size <= INBOX_PAIR_STAGING_MAX && pair_used <= INBOX_PAIR_STAGING_MAX - size &&
-           used <= INBOX_STAGING_MAX - size;
+    (void)size; /* the arriving file is checked against free space instead */
+    return pair_used <= INBOX_PAIR_STAGING_MAX && used <= INBOX_STAGING_MAX;
 }
 
 static bool file_matches(ph_inbox *in, const char *path, const char *hash, uint64_t size)

@@ -765,7 +765,7 @@ static bool send_outgoing(ph_origin *o, int fd)
 }
 
 #define PH_PUSH_PORT 47734
-#define PH_PUSH_MAX (512ull * 1024ull * 1024ull)
+#define PH_PUSH_MAX PH_TRANSFER_MAX_BYTES
 
 static bool safe_name(const char *path, char *out, size_t cap)
 {
@@ -1025,7 +1025,7 @@ static bool send_push(ph_origin *o, int fd)
             return true;
         }
         if (sscanf(answer, "OFFSET %32s %llu%c", id, &offset, &extra) != 2 || strcmp(id, ticket) ||
-            offset > left || fseek(file, (long)offset, SEEK_SET) != 0) {
+            offset > left || ph_fseek64(file, offset) != 0) {
             fclose(file);
             push_result(o, PH_SEND_FAILED, &job);
             return false;

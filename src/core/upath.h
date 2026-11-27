@@ -90,6 +90,13 @@ static inline int ph_rmdir(const char *path)
 }
 
 /* Size of a regular file, or -1. */
+/* Seeks to a 64-bit offset: plain fseek takes a 32-bit long on Windows,
+ * so resuming a file past 2 GB failed. */
+static inline int ph_fseek64(FILE *file, unsigned long long offset)
+{
+    return _fseeki64(file, (__int64)offset, SEEK_SET);
+}
+
 static inline long long ph_file_size(const char *path)
 {
     wchar_t *wp = ph_wide(path);
@@ -143,6 +150,11 @@ static inline int ph_mkdir(const char *path)
 static inline int ph_rmdir(const char *path)
 {
     return rmdir(path);
+}
+
+static inline int ph_fseek64(FILE *file, unsigned long long offset)
+{
+    return fseeko(file, (off_t)offset, SEEK_SET);
 }
 
 static inline long long ph_file_size(const char *path)

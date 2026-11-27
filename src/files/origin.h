@@ -6,12 +6,13 @@
 #include <stdint.h>
 
 #include "files/picture_hash.h"
+#include "files/pull.h"
 #include "control/connection_policy.h"
 
 /* The phone app connects here and answers a picture hash with the original file. */
 #define PH_PULL_PORT 47731
 /* A long 4K video can be several gigabytes. */
-#define PH_PULL_MAX_BYTES (16ull * 1024ull * 1024ull * 1024ull)
+#define PH_PULL_MAX_BYTES PH_TRANSFER_MAX_BYTES
 
 typedef struct ph_origin ph_origin;
 
