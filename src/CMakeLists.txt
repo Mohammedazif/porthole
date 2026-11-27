@@ -13,6 +13,7 @@ add_library(porthole_core STATIC
     control/mouse_input.c
     control/gesture.c
     control/abs_pointer.c
+    control/rotation_lock.c
     control/pointer.c
     control/scroll.c
     control/setup.c

@@ -264,6 +264,11 @@ target_link_libraries(test_abs_pointer PRIVATE porthole_core)
 porthole_set_warnings(test_abs_pointer)
 add_test(NAME abs_pointer COMMAND test_abs_pointer)
 
+add_executable(test_rotation_lock test_rotation_lock.c)
+target_link_libraries(test_rotation_lock PRIVATE porthole_core)
+porthole_set_warnings(test_rotation_lock)
+add_test(NAME rotation_lock COMMAND test_rotation_lock)
+
 add_executable(test_mdns_name test_mdns_name.c)
 target_link_libraries(test_mdns_name PRIVATE porthole_core)
 porthole_set_warnings(test_mdns_name)

@@ -25,6 +25,7 @@
 #include "control/gesture.h"
 #include "control/mouse_input.h"
 #include "control/abs_pointer.h"
+#include "control/rotation_lock.h"
 #include "control/pointer.h"
 #include "control/scroll.h"
 #include "control/setup.h"
@@ -203,6 +204,8 @@ typedef struct app {
     bool turn_logged; /* screen thread only */
     int phone_held;   /* screen thread only: how the phone is held, as the pointer goes */
     int phone_gravity; /* screen thread only: turn byte 7, from the motion sensor */
+    ph_rotation_lock rotation; /* screen thread only: Rotation Lock, as learned */
+    int rotation_remembered;   /* the learned lock, kept across shares and runs */
     /* How the phone is held, as the EXIF turn of a screen laid out that way
      * (0 unknown): iOS places the absolute pointer by this. A change that the
      * screen's layout already matches applies at once; any other waits until
@@ -491,6 +494,7 @@ static void screen_connected(void *user, const char *address)
     a->turn_logged = false;
     a->phone_held = 0;
     a->phone_gravity = 0;
+    ph_rotation_lock_begin(&a->rotation, a->rotation_remembered);
     atomic_store(&a->held_turn, 0);
     atomic_store(&a->held_pending, 0);
     bool announce = started && a->src.current != PH_SRC_USB && !a->src.have_wifi;
@@ -536,13 +540,17 @@ static void screen_orientation(void *user, const uint8_t *turn, size_t len)
     bool held_changed = held != a->phone_held || gravity != a->phone_gravity;
     a->phone_held = held;
     a->phone_gravity = gravity;
-    /* Measured on iOS 26: once iOS has turned its screen, it reports 6 with
-     * the phone held top to the right (4) and 8 with it held top to the left
-     * (3). Upright is 1, upside down 3. While the screen stays portrait (1)
-     * the pointer goes as shown however the phone is held: measured with
-     * rotation lock on, held sideways both ways (the Home Screen, which does
-     * not turn, is the same case). */
-    int as_turn = turn[0] == 1 ? 0 : held == 1 ? 1 : held == 2 ? 3 : held == 3 ? 8 : held == 4 ? 6 : 0;
+    /* iOS aims the pointer by its own idea of how the phone is held, which
+     * Rotation Lock keeps upright: learn the lock from how the screen
+     * follows the phone (control/rotation_lock.h). */
+    if (ph_rotation_lock_observe(&a->rotation, turn[0], held, SDL_GetTicks64())) {
+        a->rotation_remembered = a->rotation.lock;
+        ph_config_write_line("rotation-lock", a->rotation.lock ? "on" : "off");
+        PH_LOGI(a->rotation.lock ? "pointer: Rotation Lock looks on (the phone turned to the other side and "
+                                   "its screen stayed): aiming as if upright"
+                                 : "pointer: Rotation Lock looks off (the screen turned with the phone)");
+    }
+    int as_turn = ph_rotation_lock_pointer_turn(&a->rotation, turn[0], held);
     if (!as_turn || as_turn == turn[0]) {
         atomic_store(&a->held_turn, as_turn);
         atomic_store(&a->held_pending, as_turn);
@@ -555,9 +563,12 @@ static void screen_orientation(void *user, const uint8_t *turn, size_t len)
     a->turn_logged = true;
     if (len >= 7)
         PH_LOGI("shared screen turn: pointer %u, iOS tag %u, picture %u, captured %ux%u, held %d "
-                "(sensor %d, iOS %d); pointer %s; test turn %d", turn[0], turn[1], turn[2],
+                "(sensor %d, iOS %d); Rotation Lock %s; pointer %s; test turn %d", turn[0], turn[1], turn[2],
                 (unsigned)turn[3] << 8 | turn[4], (unsigned)turn[5] << 8 | turn[6], held, gravity, system,
-                flip ? "turned to the phone as held (after a second)" : "as shown",
+                a->rotation.lock == 1 ? "on" : a->rotation.lock == 0 ? "off" : "not known yet",
+                flip ? as_turn == 1 ? "aimed as if upright (after a second)"
+                                    : "turned to the phone as held (after a second)"
+                     : "as shown",
                 atomic_load(&a->pointer_turn_test) * 90);
     else
         PH_LOGI("shared screen turn: pointer %u", turn[0]);
@@ -4203,6 +4214,14 @@ int ph_app_run(const ph_app_options *opt)
         atomic_init(&a.phone_orientation, 1);
         atomic_init(&a.pointer_turn_test, 0);
         atomic_init(&a.held_turn, 0);
+        {
+            char lock[8];
+            a.rotation_remembered = !ph_config_read_line("rotation-lock", lock, sizeof lock)
+                                        ? PH_ROTATION_LOCK_UNKNOWN
+                                        : !strcmp(lock, "on") ? 1 : !strcmp(lock, "off") ? 0
+                                                                                        : PH_ROTATION_LOCK_UNKNOWN;
+            ph_rotation_lock_begin(&a.rotation, a.rotation_remembered);
+        }
         atomic_init(&a.held_pending, 0);
         atomic_init(&a.held_pending_ms, 0);
         a.audible_mode = mode == PH_SOUND_IPHONE ? PH_SOUND_BOTH : mode;
