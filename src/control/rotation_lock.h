@@ -14,6 +14,7 @@
  *  - lock on: the phone turns to the other landscape side and the landscape
  *    screen stays where it was (with the lock off iOS would have turned it
  *    before the sensor even reports, which lags by a second).
+ * Until either is seen the pointer is aimed as if upright (see the .c).
  * Turns are EXIF orientations (1 upright, 3 upside down, 6, 8); held is the
  * motion sensor's byte (1 upright, 2 upside down, 3 top left, 4 top right). */
 

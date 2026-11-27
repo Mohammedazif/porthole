@@ -551,7 +551,9 @@ static void screen_orientation(void *user, const uint8_t *turn, size_t len)
                                  : "pointer: Rotation Lock looks off (the screen turned with the phone)");
     }
     int as_turn = ph_rotation_lock_pointer_turn(&a->rotation, turn[0], held);
-    if (!as_turn || as_turn == turn[0]) {
+    /* The second's wait is for the sensor, which lags iOS; aiming as if
+     * upright with the lock on (or not known yet) does not depend on it. */
+    if (!as_turn || as_turn == turn[0] || (as_turn == 1 && a->rotation.lock != 0)) {
         atomic_store(&a->held_turn, as_turn);
         atomic_store(&a->held_pending, as_turn);
     } else if (atomic_exchange(&a->held_pending, as_turn) != as_turn) {
@@ -566,7 +568,7 @@ static void screen_orientation(void *user, const uint8_t *turn, size_t len)
                 "(sensor %d, iOS %d); Rotation Lock %s; pointer %s; test turn %d", turn[0], turn[1], turn[2],
                 (unsigned)turn[3] << 8 | turn[4], (unsigned)turn[5] << 8 | turn[6], held, gravity, system,
                 a->rotation.lock == 1 ? "on" : a->rotation.lock == 0 ? "off" : "not known yet",
-                flip ? as_turn == 1 ? "aimed as if upright (after a second)"
+                flip ? as_turn == 1 ? a->rotation.lock != 0 ? "aimed as if upright" : "aimed as if upright (after a second)"
                                     : "turned to the phone as held (after a second)"
                      : "as shown",
                 atomic_load(&a->pointer_turn_test) * 90);

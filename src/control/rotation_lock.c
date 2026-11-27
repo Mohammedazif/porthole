@@ -55,8 +55,14 @@ int ph_rotation_lock_pointer_turn(const ph_rotation_lock *r, int report, int hel
 {
     if (report == 1 || report == 0)
         return 0; /* a portrait screen: as shown, however the phone is held */
-    if (r->lock == 1)
-        return 1; /* iOS still takes the phone as upright */
+    /* Lock on, or not known yet: iOS takes the phone as upright. Until the
+     * phone turns, upright is the better guess: a phone with the lock off
+     * got to landscape by turning, which proves the lock off at once, and an
+     * app that goes landscape by itself (YouTube full screen) is usually
+     * started upright. A phone lying flat (no sensor reading) keeps what iOS
+     * had, upright again. */
+    if (r->lock != 0 || (held != 2 && held != 3 && held != 4))
+        return 1;
     int turn = turn_for_held(held);
     return turn == report ? 0 : turn;
 }

@@ -50,18 +50,30 @@ static void test_lock_off_follows(void)
     CHECK(ph_rotation_lock_pointer_turn(&r, 6, 3) == 8);
     CHECK(!ph_rotation_lock_observe(&r, 6, 4, 399268));
     CHECK(r.lock == 0 && ph_rotation_lock_pointer_turn(&r, 6, 4) == 0);
-    /* An app landscape with the phone upright: a quarter turn. */
+    /* An app landscape with the phone upright: a quarter turn. Flat on
+     * the desk: what iOS had, upright. */
     CHECK(ph_rotation_lock_pointer_turn(&r, 8, 1) == 1);
+    CHECK(ph_rotation_lock_pointer_turn(&r, 8, 0) == 1);
 }
 
 static void test_no_guess_from_the_start(void)
 {
     ph_rotation_lock r;
     ph_rotation_lock_begin(&r, PH_ROTATION_LOCK_UNKNOWN);
-    /* Sharing begins already in landscape, in step: nothing is learned. */
+    /* Sharing begins already in landscape, in step: nothing is learned,
+     * and the pointer is aimed as if upright until the phone turns. */
     CHECK(!ph_rotation_lock_observe(&r, 6, 4, 1000));
     CHECK(!ph_rotation_lock_observe(&r, 6, 4, 2200));
-    CHECK(r.lock == PH_ROTATION_LOCK_UNKNOWN && ph_rotation_lock_pointer_turn(&r, 6, 4) == 0);
+    CHECK(r.lock == PH_ROTATION_LOCK_UNKNOWN && ph_rotation_lock_pointer_turn(&r, 6, 4) == 1);
+    /* From a real log: the phone lay flat (no sensor reading) when YouTube
+     * went full screen, with the lock not known yet: upright was right. */
+    ph_rotation_lock_begin(&r, PH_ROTATION_LOCK_UNKNOWN);
+    ph_rotation_lock_observe(&r, 1, 0, 12561);
+    CHECK(!ph_rotation_lock_observe(&r, 8, 0, 95051));
+    CHECK(ph_rotation_lock_pointer_turn(&r, 8, 0) == 1);
+    CHECK(!ph_rotation_lock_observe(&r, 8, 3, 104846));
+    CHECK(ph_rotation_lock_pointer_turn(&r, 8, 3) == 1);
+    CHECK(ph_rotation_lock_observe(&r, 8, 4, 109685) && r.lock == 1);
     /* Turned in step long after the screen went landscape: no verdict. */
     ph_rotation_lock_begin(&r, PH_ROTATION_LOCK_UNKNOWN);
     ph_rotation_lock_observe(&r, 1, 1, 1000);
