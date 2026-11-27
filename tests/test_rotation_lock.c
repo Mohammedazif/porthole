@@ -72,12 +72,22 @@ static void test_lock_off_app_does_not_flip(void)
     CHECK(!ph_rotation_lock_observe(&r, 8, 3, 493620 + 500));
     CHECK(!ph_rotation_lock_observe(&r, 8, 4, 497866));
     CHECK(r.lock == 0 && ph_rotation_lock_pointer_turn(&r, 8, 4) == 6);
-    /* Back to portrait and into a landscape the app made by itself: a flip
-     * the screen ignores now does mean the lock is on. */
+    /* From a later log: back to portrait, YouTube full screen tapped
+     * upright (108 s), the phone turned to the side YouTube doesn't follow
+     * (113 s). With the lock off this looks just like the lock on; the
+     * screen turned with the phone earlier in this share, so it stays off. */
     ph_rotation_lock_observe(&r, 1, 1, 600000);
-    ph_rotation_lock_observe(&r, 8, 1, 610000);
-    CHECK(!ph_rotation_lock_observe(&r, 8, 3, 615000));
-    CHECK(ph_rotation_lock_observe(&r, 8, 4, 620000) && r.lock == 1);
+    ph_rotation_lock_observe(&r, 8, 1, 608395);
+    CHECK(!ph_rotation_lock_observe(&r, 8, 4, 613162));
+    CHECK(r.lock == 0 && ph_rotation_lock_pointer_turn(&r, 8, 4) == 6);
+    CHECK(!ph_rotation_lock_observe(&r, 8, 3, 620524));
+    CHECK(r.lock == 0 && ph_rotation_lock_pointer_turn(&r, 8, 3) == 0);
+    /* A new share with the lock off remembered: the same moves with nothing
+     * having turned with the phone yet read as the lock on. */
+    ph_rotation_lock_begin(&r, 0);
+    ph_rotation_lock_observe(&r, 1, 1, 1000);
+    ph_rotation_lock_observe(&r, 8, 1, 5000);
+    CHECK(ph_rotation_lock_observe(&r, 8, 4, 9000) && r.lock == 1);
 }
 
 static void test_no_guess_from_the_start(void)

@@ -35,8 +35,6 @@ bool ph_rotation_lock_observe(ph_rotation_lock *r, int report, int held, uint64_
     if (held_changed)
         r->held_ms = now_ms;
     r->report = report, r->held = held;
-    if (!landscape(report))
-        r->followed = false; /* a new landscape starts from here */
     if (!(report_changed || held_changed) || !landscape(report) || (held != 3 && held != 4))
         return false;
     int verdict = PH_ROTATION_LOCK_UNKNOWN;
