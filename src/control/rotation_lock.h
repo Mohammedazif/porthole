@@ -13,7 +13,10 @@
  *    the motion sensor's reading (either can come first);
  *  - lock on: the phone turns to the other landscape side and the landscape
  *    screen stays where it was (with the lock off iOS would have turned it
- *    before the sensor even reports, which lags by a second).
+ *    before the sensor even reports, which lags by a second) - unless that
+ *    landscape had already turned with the phone: then the lock is off and
+ *    the app just doesn't flip (YouTube, measured), and iOS aims the pointer
+ *    by the phone as held.
  * Until either is seen the pointer is aimed as if upright (see the .c).
  * Turns are EXIF orientations (1 upright, 3 upside down, 6, 8); held is the
  * motion sensor's byte (1 upright, 2 upside down, 3 top left, 4 top right). */
@@ -27,6 +30,7 @@ typedef struct ph_rotation_lock {
     int lock;                 /* 1 on, 0 off, PH_ROTATION_LOCK_UNKNOWN */
     bool seen;                /* a turn message arrived this share */
     int report, held;         /* last seen */
+    bool followed;            /* this landscape turned with the phone */
     uint64_t report_ms, held_ms; /* when each last changed */
 } ph_rotation_lock;
 

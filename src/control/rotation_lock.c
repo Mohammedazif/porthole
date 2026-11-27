@@ -35,14 +35,18 @@ bool ph_rotation_lock_observe(ph_rotation_lock *r, int report, int held, uint64_
     if (held_changed)
         r->held_ms = now_ms;
     r->report = report, r->held = held;
+    if (!landscape(report))
+        r->followed = false; /* a new landscape starts from here */
     if (!(report_changed || held_changed) || !landscape(report) || (held != 3 && held != 4))
         return false;
     int verdict = PH_ROTATION_LOCK_UNKNOWN;
     if (turn_for_held(held) == report) {
         uint64_t apart = r->report_ms > r->held_ms ? r->report_ms - r->held_ms : r->held_ms - r->report_ms;
-        if (r->report_ms && r->held_ms && apart <= FOLLOWED_MS)
+        if (r->report_ms && r->held_ms && apart <= FOLLOWED_MS) {
             verdict = 0; /* the screen turned with the phone */
-    } else if (held_changed && r->report_ms + STAYED_MS <= now_ms) {
+            r->followed = true;
+        }
+    } else if (held_changed && !r->followed && r->report_ms + STAYED_MS <= now_ms) {
         verdict = 1; /* turned to the other side; the screen stayed */
     }
     if (verdict == PH_ROTATION_LOCK_UNKNOWN || verdict == r->lock)

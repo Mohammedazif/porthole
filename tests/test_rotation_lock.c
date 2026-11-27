@@ -56,6 +56,30 @@ static void test_lock_off_follows(void)
     CHECK(ph_rotation_lock_pointer_turn(&r, 8, 0) == 1);
 }
 
+/* Lock off, from a real log: YouTube turned with the phone (174 s), then the
+ * phone flipped and YouTube did not (180 s). The lock is still off; iOS aims
+ * by the phone as held, half a turn from the screen. */
+static void test_lock_off_app_does_not_flip(void)
+{
+    ph_rotation_lock r;
+    ph_rotation_lock_begin(&r, 1);
+    ph_rotation_lock_observe(&r, 1, 1, 169541);
+    CHECK(!ph_rotation_lock_observe(&r, 1, 4, 174120));
+    CHECK(ph_rotation_lock_observe(&r, 6, 4, 174457) && r.lock == 0);
+    CHECK(!ph_rotation_lock_observe(&r, 6, 3, 180337));
+    CHECK(r.lock == 0 && ph_rotation_lock_pointer_turn(&r, 6, 3) == 8);
+    /* Later the screen flips with the phone again, and once more it doesn't. */
+    CHECK(!ph_rotation_lock_observe(&r, 8, 3, 493620 + 500));
+    CHECK(!ph_rotation_lock_observe(&r, 8, 4, 497866));
+    CHECK(r.lock == 0 && ph_rotation_lock_pointer_turn(&r, 8, 4) == 6);
+    /* Back to portrait and into a landscape the app made by itself: a flip
+     * the screen ignores now does mean the lock is on. */
+    ph_rotation_lock_observe(&r, 1, 1, 600000);
+    ph_rotation_lock_observe(&r, 8, 1, 610000);
+    CHECK(!ph_rotation_lock_observe(&r, 8, 3, 615000));
+    CHECK(ph_rotation_lock_observe(&r, 8, 4, 620000) && r.lock == 1);
+}
+
 static void test_no_guess_from_the_start(void)
 {
     ph_rotation_lock r;
@@ -93,6 +117,7 @@ int main(void)
 {
     test_lock_on_youtube();
     test_lock_off_follows();
+    test_lock_off_app_does_not_flip();
     test_no_guess_from_the_start();
     if (failures)
         fprintf(stderr, "%d check(s) failed\n", failures);
