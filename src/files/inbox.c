@@ -35,6 +35,7 @@ int ph_inbox_parse_hello(const char *line)
 #include <sys/statvfs.h>
 #endif
 
+#include <openssl/evp.h>
 #include <openssl/rand.h>
 
 #define INBOX_FILE_MAX PH_TRANSFER_MAX_BYTES
@@ -113,8 +114,10 @@ static bool free_path(const char *folder, const char *name, char *out, size_t le
     return true;
 }
 
+/* `hash`, when given, takes every byte as it arrives: a large file is not
+ * read a second time to check it. */
 static bool receive_file(ph_inbox *in, int fd, const char *path, unsigned long long size,
-                         bool resume)
+                         bool resume, EVP_MD_CTX *hash)
 {
     char chunk[1 << 16];
     FILE *out = ph_fopen(path, resume ? "ab" : "wbx");
@@ -129,6 +132,8 @@ static bool receive_file(ph_inbox *in, int fd, const char *path, unsigned long l
         else if ((got = (int)ph_tls_read(fd, chunk, (int)want)) <= 0)
             ok = false;
         else if (fwrite(chunk, 1, (size_t)got, out) != (size_t)got)
+            ok = false;
+        else if (hash && EVP_DigestUpdate(hash, chunk, (size_t)got) != 1)
             ok = false;
         else {
             size -= (unsigned long long)got;
@@ -329,8 +334,10 @@ static bool receive_resumable(ph_inbox *in, int fd, const char *header, bool ver
         snprintf(file_header, sizeof file_header, "FILE %s", file_info + 65);
         file_info = file_header;
     }
-    if (!ph_pull_parse_file(file_info, INBOX_FILE_MAX, &size, name, sizeof name))
+    if (!ph_pull_parse_file(file_info, INBOX_FILE_MAX, &size, name, sizeof name)) {
+        PH_LOGW("share: refused a file the iPhone described as \"%.80s\"", file_info);
         return false;
+    }
     if (!in->cb.profile || !in->cb.profile(in->cb.user, ph_tls_ticket(), prefix) ||
         strlen(prefix) != 64 || strspn(prefix, "0123456789abcdef") != 64)
         return false;
@@ -360,28 +367,71 @@ static bool receive_resumable(ph_inbox *in, int fd, const char *header, bool ver
     }
     long long existing = ph_file_size(part);
     unsigned long long offset = existing < 0 ? 0 : (unsigned long long)existing;
-    if (offset > size)
+    if (offset > size) {
+        PH_LOGW("share: %s: %llu bytes kept, more than the %llu announced", name, offset, size);
         return false;
+    }
     if (!staging_has_space(in->dir, part, prefix, size) ||
         !volume_has_space(in->dir, size - offset + INBOX_FREE_RESERVE)) {
+        PH_LOGW("share: %s (%llu bytes): not enough space on this PC", name, size);
         snprintf(in->item.message, sizeof in->item.message,
                  "Receive storage limit reached. Free space and retry from your iPhone.");
         return false;
     }
     if (!described && !write_line_file(descriptor, meta))
         return false;
+    /* The checksum runs as the bytes arrive; on a resume it first takes in
+     * what was kept, read once. */
+    EVP_MD_CTX *hash = verify_digest ? EVP_MD_CTX_new() : NULL;
+    bool hashing = !verify_digest || (hash && EVP_DigestInit_ex(hash, EVP_sha256(), NULL) == 1);
+    if (hashing && hash && offset) {
+        FILE *kept = ph_fopen(part, "rb");
+        char chunk[1 << 16];
+        unsigned long long left = offset;
+        hashing = kept != NULL;
+        while (hashing && left) {
+            size_t n = fread(chunk, 1, left < sizeof chunk ? (size_t)left : sizeof chunk, kept);
+            hashing = n > 0 && EVP_DigestUpdate(hash, chunk, n) == 1;
+            left -= n;
+        }
+        if (kept)
+            fclose(kept);
+    }
+    if (!hashing) {
+        EVP_MD_CTX_free(hash);
+        return false;
+    }
+    if (offset)
+        PH_LOGI("share: %s (%llu bytes): continuing from %llu", name, size, offset);
+    else
+        PH_LOGI("share: %s (%llu bytes): receiving", name, size);
     snprintf(info, sizeof info, "OFFSET %llu\n", offset);
     in->item.bytes = offset;
     if (in->cb.item)
         in->cb.item(in->cb.user, &in->item);
-    if (!send_text(fd, info) || !receive_file(in, fd, part, size - offset, true))
+    if (!send_text(fd, info) || !receive_file(in, fd, part, size - offset, true, hash)) {
+        EVP_MD_CTX_free(hash);
+        long long kept = ph_file_size(part);
+        PH_LOGW("share: %s: the iPhone stopped sending at %lld of %llu bytes (kept, it continues from there)",
+                name, kept, size);
         return false;
-    if (verify_digest && !file_matches(in, part, digest, size)) {
-        ph_remove(part);
-        in->item.bytes = 0;
-        snprintf(in->item.message, sizeof in->item.message,
-                 "File integrity check failed. Retry from your iPhone.");
-        return false;
+    }
+    if (verify_digest) {
+        unsigned char sum[EVP_MAX_MD_SIZE];
+        unsigned int sum_len = 0;
+        char hex[65];
+        bool done = EVP_DigestFinal_ex(hash, sum, &sum_len) == 1 && sum_len == 32;
+        EVP_MD_CTX_free(hash);
+        for (unsigned int i = 0; done && i < 32; i++)
+            snprintf(hex + i * 2, 3, "%02x", sum[i]);
+        if (!done || strcmp(hex, digest)) {
+            ph_remove(part);
+            in->item.bytes = 0;
+            PH_LOGW("share: %s: the received file doesn't match the iPhone's checksum; removed", name);
+            snprintf(in->item.message, sizeof in->item.message,
+                     "File integrity check failed. Retry from your iPhone.");
+            return false;
+        }
     }
     char folder[1024], temporary[1100];
     if (!ph_place_save_dir(folder, sizeof folder)) {
@@ -430,11 +480,20 @@ static bool receive_resumable(ph_inbox *in, int fd, const char *header, bool ver
                                     folder, prefix, id, i) >= (int)sizeof temporary)
                 return false;
         }
-        if (!free_path(folder, name, location, sizeof location) ||
-            !write_line_file(plan, location) || !copy_complete(part, temporary))
+        if (!free_path(folder, name, location, sizeof location) || !write_line_file(plan, location))
             return false;
+        /* Moved into the folder when it is on the same drive (instant, no
+         * second copy of a large file); copied otherwise. */
+        bool moved = ph_rename(part, temporary) == 0;
+        if (!moved && !copy_complete(part, temporary)) {
+            PH_LOGW("share: %s: could not write it into the receive folder", name);
+            return false;
+        }
         if (!ph_tls_authorized() || !ph_publish_new(temporary, location)) {
-            ph_remove(temporary);
+            if (moved)
+                ph_rename(temporary, part); /* keep it for the retry */
+            else
+                ph_remove(temporary);
             return false;
         }
     }
@@ -448,6 +507,7 @@ static bool receive_resumable(ph_inbox *in, int fd, const char *header, bool ver
         in->cb.item(in->cb.user, &in->item);
     if (in->cb.saved)
         in->cb.saved(in->cb.user, location);
+    PH_LOGI("share: %s (%llu bytes) saved", name, size);
     return send_text(fd, "OK\n");
 }
 
@@ -514,7 +574,7 @@ static void serve(ph_inbox *in, int fd, const char *address)
             snprintf(item.id + i * 2, 3, "%02x", nonce[i]);
         char staged[640];
         snprintf(staged, sizeof staged, "%s/transfer-%s.part", in->dir, item.id);
-        if (!receive_file(in, fd, staged, size, false))
+        if (!receive_file(in, fd, staged, size, false, NULL))
             break;
         bool saved = ph_tls_authorized() &&
                      ph_place_copy_unique(staged, folder, name, path, sizeof path);
