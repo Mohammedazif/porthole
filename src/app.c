@@ -267,6 +267,8 @@ typedef struct app {
     char notified_file[1024];
     /* The batch arriving from the iPhone's Share Sheet or Send. */
     int inbox_done, inbox_total, inbox_saved;
+    /* The link whose interrupted sends were already continued. */
+    unsigned resumed_generation;
     int place_x, place_y;
     Uint64 place_at;
     _Atomic(ph_origin *) origin;
@@ -3756,6 +3758,35 @@ static bool retry_history_file(app *a, const ph_file_entry *entry, bool restart)
     return true;
 }
 
+/* When the iPhone comes back, files to it that stopped partway (Wi-Fi
+ * dropped, the iPhone locked) continue from where they stopped, without
+ * being sent again. Once per link; from the last day only. */
+static void resume_interrupted_sends(app *a)
+{
+    if (!a->origin || !a->history || !ph_origin_resume_ready(a->origin))
+        return;
+    unsigned generation = ph_origin_generation(a->origin, NULL);
+    if (!generation || generation == a->resumed_generation)
+        return;
+    a->resumed_generation = generation;
+    int64_t now = (int64_t)time(NULL);
+    int resumed = 0;
+    for (size_t i = 0; i < ph_history_file_count(a->history) && resumed < 16; i++) {
+        const ph_file_entry *entry = ph_history_file(a->history, i);
+        /* The iPhone keeps what arrived and says where to continue from. */
+        if (entry->incoming || entry->state != PH_TRANSFER_FAILED || !entry->bytes ||
+            !entry->transfer_id[0] || now - entry->time > 86400)
+            continue;
+        ph_file_entry copy = *entry; /* the retry rewrites the history */
+        if (retry_history_file(a, &copy, false)) {
+            PH_LOGI("send: continuing %s (%llu bytes) now the iPhone is back", copy.name,
+                    (unsigned long long)copy.bytes);
+            resumed++;
+            i = (size_t)-1; /* the history changed: start over (the retried one is queued now) */
+        }
+    }
+}
+
 static void save_window_prefs(app *a)
 {
     bool ok = ph_config_write_line("ctrl-command",
@@ -4438,6 +4469,7 @@ int ph_app_run(const ph_app_options *opt)
         if (capture_notice)
             ph_window_set_detail(a.win, capture_notice);
         track_push(&a);
+        resume_interrupted_sends(&a);
         sync_clipboard(&a);
         follow_pull(&a);
         ph_transfer_card_set_theme(a.card, ph_workspace_dark(ph_window_workspace(a.win)));

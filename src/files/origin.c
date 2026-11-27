@@ -904,11 +904,15 @@ static ph_origin_send_state push_ticket(ph_origin_send *send, FILE *file,
     return PH_SEND_NONE;
 }
 /* Only the matching transfer can extend a receipt deadline or commit its ticket. */
-static bool push_response(ph_origin *o, int fd, const char *ticket, char *line, size_t cap)
+/* `size` is the file's: the iPhone checks and saves a large file before it
+ * answers (saying PENDING meanwhile), so the overall wait grows with it. */
+static bool push_response(ph_origin *o, int fd, const char *ticket, char *line, size_t cap,
+                          unsigned long long size)
 {
     char pending[48];
     snprintf(pending, sizeof pending, "PENDING %s", ticket);
-    double deadline = now_ms() + 15000, limit = now_ms() + 300000;
+    double grace = 300000 + (double)size / 20e6 * 1000;
+    double deadline = now_ms() + 15000, limit = now_ms() + (grace < 3600000 ? grace : 3600000);
     while (now_ms() < limit) {
         struct pollfd pollfd = {.fd = fd, .events = POLLIN};
         int remaining = (int)(deadline - now_ms());
@@ -1013,7 +1017,7 @@ static bool send_push(ph_origin *o, int fd)
     if (resumable) {
         char answer[256], extra, id[33];
         unsigned long long offset;
-        if (!push_response(o, fd, ticket, answer, sizeof answer)) {
+        if (!push_response(o, fd, ticket, answer, sizeof answer, (unsigned long long)size)) {
             fclose(file);
             push_result(o, PH_SEND_FAILED, &job);
             return false;
@@ -1073,7 +1077,8 @@ static bool send_push(ph_origin *o, int fd)
         return false;
     }
     char receipt[128];
-    if (push_response(o, fd, ticket, receipt, sizeof receipt) && !strcmp(receipt, saved_receipt)) {
+    if (push_response(o, fd, ticket, receipt, sizeof receipt, (unsigned long long)size) &&
+        !strcmp(receipt, saved_receipt)) {
         finish_ticket(job.resume_key);
         push_result(o, PH_SEND_STORED, &job);
         return true;
@@ -1523,6 +1528,16 @@ static void take_local_send(ph_origin *o)
         send(fd, queued ? "OK\n" : "NO\n", 3, MSG_NOSIGNAL);
     }
     ph_sock_close(fd);
+}
+
+bool ph_origin_resume_ready(ph_origin *o)
+{
+    if (!o)
+        return false;
+    pthread_mutex_lock(&o->lock);
+    bool ready = o->files_ok && o->resumable;
+    pthread_mutex_unlock(&o->lock);
+    return ready;
 }
 
 static bool queue_file(ph_origin *o, const char *path, const ph_origin_send *previous,

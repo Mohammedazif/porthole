@@ -92,6 +92,8 @@ typedef enum ph_origin_send_state {
 /* Retry uses the same transfer identity and wire filename even when Locate
  * selected a different path. Restart intentionally uses a fresh wire ID. */
 bool ph_origin_retry_file(ph_origin *origin, const ph_origin_send *previous, bool restart);
+/* The iPhone now linked takes files and continues interrupted ones. */
+bool ph_origin_resume_ready(ph_origin *origin);
 ph_origin_send_state ph_origin_take_send(ph_origin *origin, ph_origin_send *send);
 
 /* True while a file is queued or still moving. name receives the file name. */
