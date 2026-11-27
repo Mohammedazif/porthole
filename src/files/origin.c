@@ -1384,7 +1384,9 @@ static void serve_client(ph_origin *o, int fd)
         answer_at = now_ms();
         if (strncmp(line, "MISS", 4) == 0 && (line[4] == '\0' || line[4] == ' ')) {
             PH_LOGI("photo pull: iPhone searched %.1f s", (answer_at - sent_at) / 1000);
-            PH_LOGI("photo pull: no original was exported");
+            /* The iPhone says why, or how close its best photo came. */
+            PH_LOGI("photo pull: no original was exported%s%.120s%s", line[4] ? " (iPhone: " : "",
+                    line[4] ? line + 5 : "", line[4] ? ")" : "");
             pthread_mutex_lock(&o->lock);
             o->ready = PH_ORIGIN_MISS;
             o->ready_id = id;

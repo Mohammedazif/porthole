@@ -265,6 +265,8 @@ typedef struct app {
     ph_transfer_card *card;
     ph_wintray *tray;
     char notified_file[1024];
+    /* The batch arriving from the iPhone's Share Sheet or Send. */
+    int inbox_done, inbox_total, inbox_saved;
     int place_x, place_y;
     Uint64 place_at;
     _Atomic(ph_origin *) origin;
@@ -2892,12 +2894,17 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
         int done = 0, total = 0;
         const char *text = e->user.data1;
 
-        if (text && sscanf(text, "Receiving %d of %d", &done, &total) == 2)
+        if (text && sscanf(text, "Receiving %d of %d", &done, &total) == 2) {
             ph_window_set_receiving(a->win, done, total);
-        else
+            if (done == 0)
+                a->inbox_saved = 0;
+            a->inbox_done = done;
+            a->inbox_total = total;
+        } else {
             ph_window_set_receiving(a->win, 0, 0);
-        if (total > 0 && a->card && !a->tray && done < total)
-            ph_transfer_card_show(a->card, NULL, done, total, false, SDL_GetTicks64());
+        }
+        if (total > 0 && a->card && done < total && ph_workspace_notifications(ph_window_workspace(a->win)))
+            ph_transfer_card_receiving(a->card, NULL, 0, 0, done, total, SDL_GetTicks64());
         ph_window_set_detail(a->win, text);
         free(e->user.data1);
         break;
@@ -2910,6 +2917,9 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
             sync_pairing_history(a);
             bool active = item->state == PH_INBOX_RECEIVING;
             ph_window_set_incoming(a->win, active ? item->name : "", item->bytes, item->total);
+            if (active && a->card && ph_workspace_notifications(ph_window_workspace(a->win)))
+                ph_transfer_card_receiving(a->card, item->name, item->bytes, item->total, a->inbox_saved,
+                                           SDL_max(a->inbox_total, a->inbox_saved + 1), SDL_GetTicks64());
             ph_transfer_state state = active                           ? PH_TRANSFER_ACTIVE
                                       : item->state == PH_INBOX_STORED ? PH_TRANSFER_COMPLETE
                                                                        : PH_TRANSFER_PAUSED;
@@ -2963,10 +2973,16 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
             char label[128] = "", note[128];
             ph_place_save_label(label, sizeof label);
             ph_window_note_received(a->win, 1);
-            bool notified = tray_notice(a, path, 1, label);
-            if (!notified && a->card && ph_workspace_notifications(ph_window_workspace(a->win))) {
+            /* One summary for the batch: Windows' notice once at the end,
+             * the card counting up as each item is saved. */
+            int saved = ++a->inbox_saved;
+            bool last = a->inbox_total <= 0 || saved >= a->inbox_total;
+            bool notified = last && tray_notice(a, path, saved, label);
+            if (notified && a->card)
+                ph_transfer_card_dismiss(a->card, SDL_GetTicks64());
+            else if (a->card && ph_workspace_notifications(ph_window_workspace(a->win))) {
                 ph_transfer_card_place(a->card, label[0] ? label : NULL);
-                ph_transfer_card_show(a->card, path, 1, 1, true, SDL_GetTicks64());
+                ph_transfer_card_saved(a->card, path, SDL_max(a->inbox_total, saved), true, SDL_GetTicks64());
             }
             snprintf(note, sizeof note, "Received %.100s", ph_path_base(path));
             ph_window_note_transfer(a->win, note);

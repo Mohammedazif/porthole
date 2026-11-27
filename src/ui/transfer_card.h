@@ -18,6 +18,13 @@ void ph_transfer_card_set_theme(ph_transfer_card *c, bool dark);
  * can_show adds the button that opens the folder the file landed in. */
 void ph_transfer_card_show(ph_transfer_card *c, const char *path, int done, int total,
                            bool can_show, Uint64 now);
+/* A batch from the iPhone, live: the item arriving now (name, bytes of size),
+ * with done of total items already saved. */
+void ph_transfer_card_receiving(ph_transfer_card *c, const char *name, unsigned long long bytes,
+                                unsigned long long size, int done, int total, Uint64 now);
+/* One item of the batch saved at path. The card sums the batch up when the
+ * last of `total` arrives: one file to open, or several in a list. */
+void ph_transfer_card_saved(ph_transfer_card *c, const char *path, int total, bool can_show, Uint64 now);
 /* Folder name under the file. NULL clears it. */
 void ph_transfer_card_place(ph_transfer_card *c, const char *place);
 void ph_transfer_card_dismiss(ph_transfer_card *c, Uint64 now);
