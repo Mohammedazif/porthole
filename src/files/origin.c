@@ -962,6 +962,21 @@ static void finish_ticket(const char *key)
         ph_remove(path);
 }
 
+/* While the screen is shared, a file to the iPhone goes no faster than this,
+ * so the picture and the controls keep their share of the Wi-Fi. */
+#define PUSH_SHARED_BYTES_PER_S 12e6
+
+static void pause_ms(int ms)
+{
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
+    struct timespec pause = {0, ms * 1000000L};
+    while (nanosleep(&pause, &pause) < 0 && errno == EINTR) {
+    }
+#endif
+}
+
 static bool send_push(ph_origin *o, int fd)
 {
     ph_origin_send job;
@@ -969,7 +984,8 @@ static bool send_push(ph_origin *o, int fd)
     FILE *file = NULL;
     long long size;
     int hdr_len;
-    bool ok = true, cancel = false, ready, resumable, chunked;
+    bool ok = true, cancel = false, yield = false, ready, resumable, chunked;
+    double pace_start = 0, paced = 0;
     unsigned long long left;
 
     pthread_mutex_lock(&o->lock);
@@ -1071,9 +1087,25 @@ static bool send_push(ph_origin *o, int fd)
 
         pthread_mutex_lock(&o->lock);
         cancel = o->push_cancel;
+        /* A drag waits for this link: pause the file and let the drag through. */
+        yield = !cancel && chunked && resumable && o->ask;
+        bool live = o->screen_live;
         pthread_mutex_unlock(&o->lock);
-        if (cancel)
+        if (cancel || yield)
             break;
+        if (live) {
+            double now = now_ms();
+            if (!pace_start || now - pace_start > 2000) {
+                pace_start = now;
+                paced = 0;
+            }
+            double due = paced / PUSH_SHARED_BYTES_PER_S * 1000 - (now - pace_start);
+            if (due > 1)
+                pause_ms(due > 100 ? 100 : (int)due);
+            paced += (double)n;
+        } else {
+            pace_start = 0;
+        }
         if (n == 0) {
             ok = false;
             break;
@@ -1093,6 +1125,25 @@ static bool send_push(ph_origin *o, int fd)
                  send_clip_ask(o, fd) && send_outgoing(o, fd);
     }
     fclose(file);
+    if (yield && ok) {
+        /* The iPhone keeps what arrived; the file goes first in the queue and
+         * continues from there (OFFSET) as soon as the drag is done. */
+        char paused[64];
+        int length = snprintf(paused, sizeof paused, "PAUSEPUSH %s\n", ticket);
+        job.confirmed = (unsigned long long)size - left;
+        PH_LOGI("send: %s paused for a drag at %llu of %lld bytes; it continues right after", job.name,
+                (unsigned long long)job.confirmed, size);
+        pthread_mutex_lock(&o->lock);
+        if (o->push_count < PH_PUSH_QUEUE) {
+            memmove(o->push_queue + 1, o->push_queue, sizeof o->push_queue[0] * (size_t)o->push_count);
+            o->push_queue[0] = job;
+            o->push_count++;
+        }
+        o->active_push_key[0] = 0;
+        o->active_push_id[0] = 0;
+        pthread_mutex_unlock(&o->lock);
+        return send_all(fd, paused, (size_t)length);
+    }
     pthread_mutex_lock(&o->lock);
     bool phone_stopped = o->push_stopped_by_phone;
     pthread_mutex_unlock(&o->lock);

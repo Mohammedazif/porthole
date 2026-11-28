@@ -472,6 +472,66 @@ static void test_chunked_stop(ph_origin *origin, int fd, const char *path)
     expect_result(origin, PH_SEND_CANCELED);
 }
 
+/* A drag while a file goes to the iPhone: the file pauses (PAUSEPUSH), the
+ * drag goes through, and the file continues from where it stopped. */
+static void test_chunked_yield(ph_origin *origin, int fd, const char *path, const char *dir)
+{
+    char reply[256], transfer[33], again[33], command[128];
+    CHECK(ph_origin_put_file(origin, path));
+    line(fd, reply, sizeof reply);
+    CHECK(sscanf(reply, "PUSH3 %32s", transfer) == 1);
+    snprintf(command, sizeof command, "OFFSET %s 0\n", transfer);
+    say(fd, command);
+    unsigned long long got = 0;
+    bool asked = false, paused = false;
+    while (!paused) {
+        line(fd, reply, sizeof reply);
+        if (!strncmp(reply, "PAUSEPUSH ", 10)) {
+            CHECK(asked && !strcmp(reply + 10, transfer));
+            paused = true;
+            break;
+        }
+        int length;
+        CHECK(sscanf(reply, "CHUNK %d", &length) == 1 && length > 0);
+        char chunk[4096];
+        while (length > 0) {
+            int n = (int)read_peer(fd, chunk, length < (int)sizeof chunk ? length : (int)sizeof chunk, 0);
+            CHECK(n > 0);
+            length -= n;
+            got += (unsigned long long)n;
+        }
+        if (!asked) {
+            CHECK(ph_origin_ask(origin, 0x4321, 1.0, NULL, NULL, NULL, dir));
+            asked = true;
+        }
+    }
+    line(fd, reply, sizeof reply);
+    CHECK(!strncmp(reply, "PULL ", 5));
+    say(fd, "MISS\n");
+    line(fd, reply, sizeof reply);
+    CHECK(sscanf(reply, "PUSH3 %32s", again) == 1 && !strcmp(again, transfer));
+    snprintf(command, sizeof command, "OFFSET %s %llu\n", transfer, got);
+    say(fd, command);
+    while (got < 300000) {
+        line(fd, reply, sizeof reply);
+        int length;
+        CHECK(sscanf(reply, "CHUNK %d", &length) == 1 && length > 0);
+        char chunk[4096];
+        while (length > 0) {
+            int n = (int)read_peer(fd, chunk, length < (int)sizeof chunk ? length : (int)sizeof chunk, 0);
+            CHECK(n > 0);
+            length -= n;
+            got += (unsigned long long)n;
+        }
+    }
+    CHECK(got == 300000);
+    snprintf(command, sizeof command, "SAVED %s\n", transfer);
+    say(fd, command);
+    expect_result(origin, 1);
+    char path_out[256];
+    CHECK(ph_origin_take(origin, path_out, sizeof path_out) == PH_ORIGIN_MISS);
+}
+
 static bool receive_profile(void *user, const char *credential, char out[65])
 {
     return ph_origin_receive_profile(user, credential, out);
@@ -977,6 +1037,7 @@ int main(int argc, char **argv)
     test_screen_channel(o);
     test_chunked_send(o, phone, path_a);
     test_chunked_stop(o, phone, path_a);
+    test_chunked_yield(o, phone, path_a, dir);
     CHECK(ph_origin_ask(o, 0x1234, 1.0, NULL, NULL, NULL, dir));
     char original[256];
     line(phone, original, sizeof original);
