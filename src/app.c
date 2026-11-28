@@ -2933,9 +2933,10 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
             if (active && a->card && ph_workspace_notifications(ph_window_workspace(a->win)))
                 ph_transfer_card_receiving(a->card, item->name, item->bytes, item->total, a->inbox_saved,
                                            SDL_max(a->inbox_total, a->inbox_saved + 1), SDL_GetTicks64());
-            ph_transfer_state state = active                           ? PH_TRANSFER_ACTIVE
-                                      : item->state == PH_INBOX_STORED ? PH_TRANSFER_COMPLETE
-                                                                       : PH_TRANSFER_PAUSED;
+            ph_transfer_state state = active                             ? PH_TRANSFER_ACTIVE
+                                      : item->state == PH_INBOX_STORED   ? PH_TRANSFER_COMPLETE
+                                      : item->state == PH_INBOX_CANCELED ? PH_TRANSFER_CANCELED
+                                                                         : PH_TRANSFER_PAUSED;
             const ph_file_entry *existing = NULL;
             for (size_t i = 0; i < ph_history_file_count(a->history); i++) {
                 const ph_file_entry *entry = ph_history_file(a->history, i);
@@ -2968,7 +2969,7 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
                 ph_origin_phone_name(a->origin, entry.device, sizeof entry.device);
                 ph_history_add_file(a->history, &entry);
             }
-            if (item->state == PH_INBOX_INTERRUPTED) {
+            if (item->state == PH_INBOX_INTERRUPTED || item->state == PH_INBOX_CANCELED) {
                 ph_window_set_receiving(a->win, 0, 0);
                 ph_transfer_card_stop_receiving(a->card, SDL_GetTicks64());
             }
@@ -4086,7 +4087,7 @@ static void apply_window_action(app *a, bool *running)
             if (f->id != id)
                 continue;
             if (action == PH_WORKSPACE_RESTART || action == PH_WORKSPACE_RETRY) {
-                if (!retry_history_file(a, f, action == PH_WORKSPACE_RESTART))
+                if (!retry_history_file(a, f, action == PH_WORKSPACE_RESTART || f->state == PH_TRANSFER_CANCELED))
                     ph_window_set_detail(
                         a->win,
                         "Unable to resume the transfer. Check the connection and source file.");

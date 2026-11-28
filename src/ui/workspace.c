@@ -869,9 +869,12 @@ static void draw_file_detail(ph_workspace *u, SDL_Rect b)
         (f->state == PH_TRANSFER_CHANGED || f->state == PH_TRANSFER_FAILED ||
          f->state == PH_TRANSFER_PAUSED || f->state == PH_TRANSFER_CANCELED)) {
         y += 48;
+        /* A cancelled send kept nothing: Send again starts it over. */
+        bool fresh = f->state == PH_TRANSFER_CHANGED;
         button(u, (SDL_Rect){x, y, width < 230 ? width : 180, 32},
-               f->state == PH_TRANSFER_CHANGED ? "Restart transfer" : "Retry transfer",
-               f->state == PH_TRANSFER_CHANGED ? PH_WORKSPACE_RESTART : PH_WORKSPACE_RETRY, f->id,
+               f->state == PH_TRANSFER_CHANGED ? "Restart transfer"
+               : f->state == PH_TRANSFER_CANCELED ? "Send again" : "Retry transfer",
+               fresh ? PH_WORKSPACE_RESTART : PH_WORKSPACE_RETRY, f->id,
                true, u->live.connected);
     }
     button(u, (SDL_Rect){x, y + 48, width < 230 ? width : 180, 32}, "Remove from history",

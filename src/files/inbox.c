@@ -318,8 +318,54 @@ static bool file_matches(ph_inbox *in, const char *path, const char *hash, uint6
 /* version 3 names the checksum before the bytes; version 4 sends it after
  * them ("SUM <hex>"), so the iPhone starts at once instead of reading the
  * whole file first. On a resume it first reads again what the PC kept. */
+/* Version 4: "DROP <id>", for a file cancelled on the iPhone. What arrived
+ * of it is deleted, so nothing continues it later. */
+static bool drop_partial(ph_inbox *in, int fd, const char *line)
+{
+    char id[33], prefix[65], base[640], path[660], meta[256], name[96] = "";
+    unsigned long long size = 0;
+    if (strlen(line) != 37)
+        return false;
+    memcpy(id, line + 5, 33);
+    if (strspn(id, "0123456789abcdef") != 32)
+        return false;
+    if (!in->cb.profile || !in->cb.profile(in->cb.user, ph_tls_ticket(), prefix) ||
+        strlen(prefix) != 64 || strspn(prefix, "0123456789abcdef") != 64)
+        return false;
+    snprintf(base, sizeof base, "%s/transfer-%s-%s", in->dir, prefix, id);
+    snprintf(path, sizeof path, "%s.saved", base);
+    bool saved = ph_path_exists(path);
+    snprintf(path, sizeof path, "%s.info", base);
+    /* "<digest> <size> <name>"; version 4 leaves the digest empty. */
+    if (read_line_file(path, meta, sizeof meta)) {
+        const char *rest = meta[0] == ' ' ? meta + 1 : strchr(meta, ' ');
+        if (rest && *rest == ' ')
+            rest++;
+        if (rest)
+            sscanf(rest, "%llu %95[^\n]", &size, name);
+    }
+    if (!saved) {
+        static const char *const ends[] = {".part", ".info", ".target"};
+        for (size_t i = 0; i < sizeof ends / sizeof ends[0]; i++) {
+            snprintf(path, sizeof path, "%s%s", base, ends[i]);
+            ph_remove(path);
+        }
+        if (name[0]) {
+            PH_LOGI("share: %s: cancelled on the iPhone; what arrived was deleted", name);
+            in->item = (ph_inbox_item){.total = size, .state = PH_INBOX_CANCELED};
+            memcpy(in->item.id, id, sizeof id);
+            snprintf(in->item.name, sizeof in->item.name, "%s", name);
+            if (in->cb.item)
+                in->cb.item(in->cb.user, &in->item);
+        }
+    }
+    return send_text(fd, "DROPPED\n");
+}
+
 static bool receive_resumable(ph_inbox *in, int fd, const char *header, int version)
 {
+    if (version >= 4 && !strncmp(header, "DROP ", 5))
+        return drop_partial(in, fd, header);
     bool verify_digest = version == 3, sum_after = version >= 4;
     char id[33], name[96], meta[256], info[256], location[1024], digest[65] = "";
     char prefix[65], file_header[256];

@@ -569,6 +569,27 @@ static void test_resume_receive_sum_after(const char *dir, ph_origin *origin, co
     close_peer(fd);
     snprintf(path, sizeof path, "%s/wrong.txt", dir);
     CHECK(!ph_path_exists(path));
+    /* Cancelled on the iPhone: DROP deletes what arrived, so it starts over. */
+    const char *dropped = "PSHR 4 1\nITEM 00112233445566778899aabbccddeef1 FILE 10 dropped.txt\n";
+    fd = authenticated_channel(PH_INBOX_PORT, key);
+    say(fd, dropped);
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "OFFSET 0"));
+    say(fd, "abcd");
+    close_peer(fd);
+    fd = authenticated_channel(PH_INBOX_PORT, key);
+    say(fd, "PSHR 4 1\nDROP 00112233445566778899aabbccddeef1\n");
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "DROPPED"));
+    say(fd, "DONE\n");
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "BYE"));
+    close_peer(fd);
+    fd = authenticated_channel(PH_INBOX_PORT, key);
+    say(fd, dropped);
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "OFFSET 0"));
+    close_peer(fd);
     ph_inbox_stop(inbox);
 }
 

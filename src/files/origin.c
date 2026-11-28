@@ -1090,16 +1090,19 @@ static bool send_push(ph_origin *o, int fd)
     pthread_mutex_lock(&o->lock);
     bool phone_stopped = o->push_stopped_by_phone;
     pthread_mutex_unlock(&o->lock);
-    if (cancel && phone_stopped && chunked) {
-        /* Cancelled on the iPhone: say so between segments, and the link
-         * stays up. It isn't continued by itself later. */
+    if (cancel && chunked) {
+        /* Cancelled here or on the iPhone: say so between segments, and the
+         * link stays up. The iPhone deletes what arrived, and the ticket goes,
+         * so nothing continues it later. Only a failure can be continued. */
         char ended[64];
         int length = snprintf(ended, sizeof ended, "ENDPUSH %s\n", ticket);
-        PH_LOGI("send: %s cancelled on the iPhone", job.name);
+        PH_LOGI("send: %s cancelled%s", job.name, phone_stopped ? " on the iPhone" : "");
+        finish_ticket(job.resume_key);
         push_result(o, PH_SEND_CANCELED, &job);
         return send_all(fd, ended, (size_t)length);
     }
     if (cancel) {
+        finish_ticket(job.resume_key);
         push_result(o, PH_SEND_CANCELED, &job);
         shutdown(fd, SHUT_RDWR);
         return false;
@@ -1121,6 +1124,7 @@ static bool send_push(ph_origin *o, int fd)
     if (phone_stopped) {
         /* Cancelled on the iPhone just as the last bytes went. */
         PH_LOGI("send: %s cancelled on the iPhone", job.name);
+        finish_ticket(job.resume_key);
         push_result(o, PH_SEND_CANCELED, &job);
         return true;
     }

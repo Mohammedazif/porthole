@@ -21,7 +21,8 @@ typedef struct ph_inbox_item {
     char id[33], name[96], path[1024], message[128];
     char digest[65];
     uint64_t bytes, total;
-    enum { PH_INBOX_RECEIVING, PH_INBOX_INTERRUPTED, PH_INBOX_STORED } state;
+    /* CANCELED: the person cancelled it on the iPhone; what arrived is gone. */
+    enum { PH_INBOX_RECEIVING, PH_INBOX_INTERRUPTED, PH_INBOX_STORED, PH_INBOX_CANCELED } state;
 } ph_inbox_item;
 
 typedef struct ph_inbox_callbacks {
