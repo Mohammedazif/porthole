@@ -755,7 +755,9 @@ static void draw_file_rows(ph_workspace *u, SDL_Rect b, bool full)
             snprintf(sub, sizeof sub, "%s · %s %.128s", size, f->incoming ? "From" : "To", who);
             int right = b.w > 420 ? 120 : 86;
             file_badge(u, (SDL_Rect){b.x + 2, cy + 13, 34, 40}, f->name);
-            fitted_label(u, f->name, b.x + 50, cy + 12, b.w - right - 58, 13, true, u->ink);
+            bool cancellable = !f->incoming && f->state == PH_TRANSFER_ACTIVE && u->live.active_file[0];
+            fitted_label(u, f->name, b.x + 50, cy + 12, b.w - right - 58 - (cancellable ? 34 : 0), 13, true,
+                         u->ink);
             ph_icon_draw(u->renderer, f->incoming ? PH_ICON_RECEIVE : PH_ICON_SEND,
                          (SDL_Rect){b.x + 50, cy + 35, 13, 13}, u->muted);
             fitted_label(u, sub, b.x + 68, cy + 35, b.w - right - 76, 10, false, u->muted);
@@ -780,6 +782,11 @@ static void draw_file_rows(ph_workspace *u, SDL_Rect b, bool full)
             fitted_label(u, detail, edge - SDL_min(detail_width, right - 10), cy + 35,
                          right - 10, 10, false, u->muted);
             hit(u, row, UI_SELECT, f->id, f->name);
+            /* The file going to the iPhone now can be stopped from its row,
+             * however it started (sent, retried, or continued by itself). */
+            if (cancellable)
+                close_button(u, edge - SDL_min(state_width, right - 10) - 34, cy + 6,
+                             PH_WORKSPACE_CANCEL_SEND);
             line(u, b.x + 12, cy + 65, b.w - 24);
         }
         cy += 66;
@@ -853,6 +860,11 @@ static void draw_file_detail(ph_workspace *u, SDL_Rect b)
                   can_locate ? "Locate file…" : "Show in folder",
                   can_locate ? PH_WORKSPACE_LOCATE : PH_WORKSPACE_REVEAL, f->id, false,
                   can_locate || state == PH_FILE_PRESENT, true, PH_ICON_FOLDER);
+    if (!f->incoming && f->state == PH_TRANSFER_ACTIVE && u->live.active_file[0]) {
+        y += 48;
+        button(u, (SDL_Rect){x, y, width < 230 ? width : 180, 32}, "Cancel transfer",
+               PH_WORKSPACE_CANCEL_SEND, f->id, false, true);
+    }
     if (!f->incoming && state == PH_FILE_PRESENT &&
         (f->state == PH_TRANSFER_CHANGED || f->state == PH_TRANSFER_FAILED ||
          f->state == PH_TRANSFER_PAUSED || f->state == PH_TRANSFER_CANCELED)) {
