@@ -590,6 +590,26 @@ static void test_resume_receive_sum_after(const char *dir, ph_origin *origin, co
     line(fd, response, sizeof response);
     CHECK(!strcmp(response, "OFFSET 0"));
     close_peer(fd);
+    /* Cancelled on the PC mid-file: the iPhone hears CANCELLED, and a retry
+     * of the same file is refused rather than started again. */
+    const char *stopped = "PSHR 4 1\nITEM 00112233445566778899aabbccddeef2 FILE 10 stopped.txt\n";
+    fd = authenticated_channel(PH_INBOX_PORT, key);
+    say(fd, stopped);
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "OFFSET 0"));
+    say(fd, "abc");
+    nap(200);
+    ph_inbox_cancel(inbox);
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "CANCELLED"));
+    close_peer(fd);
+    fd = authenticated_channel(PH_INBOX_PORT, key);
+    say(fd, stopped);
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "CANCELLED"));
+    close_peer(fd);
+    snprintf(path, sizeof path, "%s/stopped.txt", dir);
+    CHECK(!ph_path_exists(path));
     ph_inbox_stop(inbox);
 }
 

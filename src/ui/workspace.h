@@ -66,7 +66,8 @@ typedef enum ph_workspace_action {
     PH_WORKSPACE_ADD_PHONE,
     PH_WORKSPACE_RETRY_PAIRING,
     PH_WORKSPACE_ALWAYS_ON_TOP,
-    PH_WORKSPACE_SOUND_MODE /* item: 0 PC, 1 Both, 2 iPhone */
+    PH_WORKSPACE_SOUND_MODE, /* item: 0 PC, 1 Both, 2 iPhone */
+    PH_WORKSPACE_CANCEL_RECEIVE /* stop the batch arriving from the iPhone */
 } ph_workspace_action;
 typedef struct ph_workspace_live {
     char bluetooth_peer[128];
@@ -126,5 +127,7 @@ const char *ph_workspace_value(const ph_workspace *ui);
 void ph_workspace_open_section(ph_workspace *ui, int section);
 void ph_workspace_open_history(ph_workspace *ui, bool received);
 bool ph_workspace_target(ph_workspace *ui, ph_workspace_action action, int *x, int *y);
+/* The confirm button of the question showing now (Cancel sending?, …). */
+bool ph_workspace_confirm_target(ph_workspace *u, int *x, int *y);
 
 #endif

@@ -513,6 +513,12 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
     uint8_t *body;
 
     *consumed = false;
+    /* A line for this log about what the iPhone did. */
+    if (!strncmp(line, "LOG ", 4)) {
+        *consumed = true;
+        PH_LOGI("iPhone: %.300s", line + 4);
+        return true;
+    }
     /* The person cancelled the arriving file on the iPhone. */
     if (!strncmp(line, "STOP ", 5)) {
         *consumed = true;

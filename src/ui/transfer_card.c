@@ -88,6 +88,9 @@ struct ph_transfer_card {
     char place[64]; /* folder name shown under the file, such as Downloads */
     char phone[129]; /* the iPhone's own name */
     int partial_of;   /* the batch stopped: item_count of this many arrived */
+    /* While receiving: Cancel, then Stop receiving / Keep to confirm. */
+    SDL_Rect cancel_r, keep_r;
+    bool hot_cancel, hot_keep, confirming, cancel_requested;
     SDL_Rect open_r, show_r, close_r;
 };
 
@@ -273,8 +276,18 @@ static int list_rows(const ph_transfer_card *c)
     return SDL_min(c->item_count, MAX_ROWS) + (c->item_count > MAX_ROWS ? 1 : 0);
 }
 
+/* Receiving gets a row for Cancel under the progress. */
+#define CANCEL_ROW 40
+
+static bool can_cancel(const ph_transfer_card *c)
+{
+    return c->batch && !c->received && c->total > 0;
+}
+
 static int wanted_height(const ph_transfer_card *c)
 {
+    if (can_cancel(c))
+        return CARD_H + CANCEL_ROW;
     int rows = list_rows(c);
     return rows ? CARD_H + rows * ROW_H + 6 : CARD_H;
 }
@@ -282,6 +295,13 @@ static int wanted_height(const ph_transfer_card *c)
 static void layout_buttons(ph_transfer_card *c)
 {
     c->close_r = (SDL_Rect){CARD_W - PAD - 26, 12, 28, 28};
+    c->cancel_r = c->keep_r = (SDL_Rect){0};
+    if (can_cancel(c)) {
+        int row = CARD_H + CANCEL_ROW - PAD - 30;
+        c->cancel_r = (SDL_Rect){PAD, row, c->confirming ? 140 : 90, 30};
+        if (c->confirming)
+            c->keep_r = (SDL_Rect){PAD + 148, row, 80, 30};
+    }
     int y = CARD_H - PAD - 33;
     if (c->received && several(c)) {
         /* Several items: the list opens instead of one file. */
@@ -483,6 +503,15 @@ static void paint(ph_transfer_card *c, Uint64 now)
             snprintf(line, sizeof line, "%d%%", (int)(fraction * 100));
             int lw = ph_text_width(line, secondary_font);
             ph_text_draw(r, line, PAD + track - lw, 132, lw + 2, secondary_font, muted);
+        }
+    }
+    if (can_cancel(c)) {
+        SDL_Color stop = c->dark ? (SDL_Color){255, 140, 128, 255} : (SDL_Color){180, 35, 24, 255};
+        if (c->confirming) {
+            draw_button(r, c->cancel_r, "Stop receiving?", (ph_control_icon)-1, c->hot_cancel ? hover : tile, stop);
+            draw_button(r, c->keep_r, "Keep", (ph_control_icon)-1, c->hot_keep ? hover : tile, ink);
+        } else {
+            draw_button(r, c->cancel_r, "Cancel", (ph_control_icon)-1, c->hot_cancel ? hover : tile, stop);
         }
     }
     if (c->received) {
@@ -760,6 +789,7 @@ void ph_transfer_card_receiving(ph_transfer_card *c, const char *name, unsigned 
         /* A new batch. */
         c->item_count = 0;
         c->partial_of = 0;
+        c->confirming = false;
         c->batch = true;
         c->received = false;
         c->expanded = false;
@@ -806,6 +836,7 @@ void ph_transfer_card_saved(ph_transfer_card *c, const char *path, int total, bo
     c->action_failed = false;
     c->received = c->done >= c->total;
     if (c->received) {
+        c->confirming = false;
         c->check_at = now;
         if (c->item_count > 1)
             PH_LOGI("transfer: received %d items", c->item_count);
@@ -838,10 +869,21 @@ void ph_transfer_card_stop_receiving(ph_transfer_card *c, Uint64 now)
     c->total = c->done = c->item_count;
     c->item_bytes = c->item_size = 0;
     c->received = true;
+    c->confirming = false;
     c->check_at = now;
     c->touch = now;
     c->dirty = true;
+    fit_height(c);
+    paint(c, now);
     PH_LOGI("transfer: received %d of %d items; the iPhone stopped", c->item_count, c->partial_of);
+}
+
+bool ph_transfer_card_take_cancel(ph_transfer_card *c)
+{
+    if (!c || !c->cancel_requested)
+        return false;
+    c->cancel_requested = false;
+    return true;
 }
 
 void ph_transfer_card_tick(ph_transfer_card *c, Uint64 now)
@@ -954,25 +996,36 @@ bool ph_transfer_card_event(ph_transfer_card *c, const SDL_Event *event, Uint64 
     show = hit(c->show_r, x, y);
     close = hit(c->close_r, x, y);
     bool more = hit(c->more_r, x, y);
+    bool cancel = hit(c->cancel_r, x, y), keep = hit(c->keep_r, x, y);
     int row = -1;
     for (int i = 0, rows = list_rows(c); i < rows; i++)
         if (hit(row_rect(i), x, y))
             row = i;
     changed = open != c->hot_open || show != c->hot_show || close != c->hot_close || more != c->hot_more ||
-              row != c->hot_row;
+              row != c->hot_row || cancel != c->hot_cancel || keep != c->hot_keep;
+    c->hot_cancel = cancel;
+    c->hot_keep = keep;
     c->hot_open = open;
     c->hot_show = show;
     c->hot_close = close;
     c->hot_more = more;
     c->hot_row = row;
     if (c->hand && c->arrow)
-        SDL_SetCursor((open || show || close || more || row >= 0) ? c->hand : c->arrow);
+        SDL_SetCursor((open || show || close || more || cancel || keep || row >= 0) ? c->hand : c->arrow);
     if (changed) {
         c->dirty = true;
         paint(c, now);
     }
     if (event->type == SDL_MOUSEBUTTONDOWN && event->button.button == SDL_BUTTON_LEFT) {
-        if (close) {
+        if (cancel || keep) {
+            /* Cancel asks first; Stop receiving? confirms. */
+            if (cancel && c->confirming)
+                c->cancel_requested = true;
+            c->confirming = cancel && !c->confirming;
+            c->dirty = true;
+            paint(c, now);
+            c->touch = now;
+        } else if (close) {
             ph_transfer_card_dismiss(c, now);
         } else if (open) {
             open_external(c->path);

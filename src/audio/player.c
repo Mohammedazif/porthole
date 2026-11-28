@@ -537,7 +537,7 @@ int ph_audio_push_broadcast_timed(ph_audio *a, const uint8_t *pcm, size_t len, u
         SDL_UnlockMutex(a->lock);
         return -1;
     }
-    if (!had_output || !a->playing)
+    if (!had_output)
         PH_LOGI("audio ready: broadcast PCM, PC speakers");
     int result;
     if (!pts_ns) {

@@ -40,6 +40,8 @@ typedef struct ph_inbox_callbacks {
 
 /* Saves batches under dir, each in its own folder. */
 ph_inbox *ph_inbox_start(const char *dir, const ph_inbox_callbacks *callbacks);
+/* Stops the batch arriving now, as the person asked: what arrived is deleted. */
+void ph_inbox_cancel(ph_inbox *inbox);
 void ph_inbox_disconnect(ph_inbox *inbox);
 void ph_inbox_stop(ph_inbox *inbox);
 

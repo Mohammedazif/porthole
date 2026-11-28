@@ -4081,6 +4081,8 @@ static void apply_window_action(app *a, bool *running)
                     "Unable to send. Check the connection and clipboard settings on both devices.");
             break;
         }
+    } else if (action == PH_WORKSPACE_CANCEL_RECEIVE) {
+        ph_inbox_cancel(a->inbox);
     } else if (action == PH_WORKSPACE_REVEAL && !id) {
         if (!ph_place_save_dir(path, sizeof path) || !ph_place_reveal(path, false))
             ph_window_set_detail(a->win,
@@ -4493,6 +4495,8 @@ int ph_app_run(const ph_app_options *opt)
         follow_pull(&a);
         ph_transfer_card_set_theme(a.card, ph_workspace_dark(ph_window_workspace(a.win)));
         ph_transfer_card_tick(a.card, SDL_GetTicks64());
+        if (ph_transfer_card_take_cancel(a.card))
+            ph_inbox_cancel(a.inbox);
         if (a.keyboard_lift_at && SDL_GetTicks64() >= a.keyboard_lift_at) {
             a.keyboard_lift_at = 0;
             send_consumer(&a, 0);

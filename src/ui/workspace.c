@@ -253,7 +253,9 @@ static void close_button(ph_workspace *u, int x, int y, int action)
 {
     SDL_Rect b = {x, y, 28, 28};
     ph_icon_draw(u->renderer, PH_ICON_CLOSE, (SDL_Rect){x + 5, y + 5, 18, 18}, u->muted);
-    hit(u, b, action, 0, action == PH_WORKSPACE_CANCEL_SEND ? "Cancel send" : "Close");
+    hit(u, b, action, 0, action == PH_WORKSPACE_CANCEL_SEND      ? "Cancel send"
+                         : action == PH_WORKSPACE_CANCEL_RECEIVE ? "Stop receiving"
+                                                                 : "Close");
 }
 static void status_dot(ph_workspace *u, int x, int y, bool good)
 {
@@ -755,7 +757,8 @@ static void draw_file_rows(ph_workspace *u, SDL_Rect b, bool full)
             snprintf(sub, sizeof sub, "%s · %s %.128s", size, f->incoming ? "From" : "To", who);
             int right = b.w > 420 ? 120 : 86;
             file_badge(u, (SDL_Rect){b.x + 2, cy + 13, 34, 40}, f->name);
-            bool cancellable = !f->incoming && f->state == PH_TRANSFER_ACTIVE && u->live.active_file[0];
+            bool cancellable = f->state == PH_TRANSFER_ACTIVE &&
+                               (f->incoming ? u->live.incoming_file[0] != 0 : u->live.active_file[0] != 0);
             fitted_label(u, f->name, b.x + 50, cy + 12, b.w - right - 58 - (cancellable ? 34 : 0), 13, true,
                          u->ink);
             ph_icon_draw(u->renderer, f->incoming ? PH_ICON_RECEIVE : PH_ICON_SEND,
@@ -786,7 +789,7 @@ static void draw_file_rows(ph_workspace *u, SDL_Rect b, bool full)
              * however it started (sent, retried, or continued by itself). */
             if (cancellable)
                 close_button(u, edge - SDL_min(state_width, right - 10) - 34, cy + 6,
-                             PH_WORKSPACE_CANCEL_SEND);
+                             f->incoming ? PH_WORKSPACE_CANCEL_RECEIVE : PH_WORKSPACE_CANCEL_SEND);
             line(u, b.x + 12, cy + 65, b.w - 24);
         }
         cy += 66;
@@ -860,10 +863,11 @@ static void draw_file_detail(ph_workspace *u, SDL_Rect b)
                   can_locate ? "Locate file…" : "Show in folder",
                   can_locate ? PH_WORKSPACE_LOCATE : PH_WORKSPACE_REVEAL, f->id, false,
                   can_locate || state == PH_FILE_PRESENT, true, PH_ICON_FOLDER);
-    if (!f->incoming && f->state == PH_TRANSFER_ACTIVE && u->live.active_file[0]) {
+    if (f->state == PH_TRANSFER_ACTIVE && (f->incoming ? u->live.incoming_file[0] : u->live.active_file[0])) {
         y += 48;
-        button(u, (SDL_Rect){x, y, width < 230 ? width : 180, 32}, "Cancel transfer",
-               PH_WORKSPACE_CANCEL_SEND, f->id, false, true);
+        button(u, (SDL_Rect){x, y, width < 230 ? width : 180, 32},
+               f->incoming ? "Stop receiving" : "Cancel transfer",
+               f->incoming ? PH_WORKSPACE_CANCEL_RECEIVE : PH_WORKSPACE_CANCEL_SEND, f->id, false, true);
     }
     if (!f->incoming && state == PH_FILE_PRESENT &&
         (f->state == PH_TRANSFER_CHANGED || f->state == PH_TRANSFER_FAILED ||
@@ -1122,7 +1126,8 @@ static int incoming_progress(ph_workspace *u, int x, int y, int width)
     size_text(u->live.incoming_bytes, done);
     size_text(u->live.incoming_size, total);
     ph_icon_draw(u->renderer, PH_ICON_RECEIVE, (SDL_Rect){x, y + 4, 21, 21}, u->positive);
-    fitted_label(u, u->live.incoming_file, x + 32, y, width - 32, 13, true, u->ink);
+    fitted_label(u, u->live.incoming_file, x + 32, y, width - 68, 13, true, u->ink);
+    close_button(u, x + width - 28, y - 4, PH_WORKSPACE_CANCEL_RECEIVE);
     snprintf(label, sizeof label, "Receiving · %s of %s", done, total);
     text(u, label, x + 32, y + 21, width - 32, 11, false, u->muted);
     rounded(u, (SDL_Rect){x, y + 43, width, 4}, 2, u->border);
@@ -2480,6 +2485,17 @@ static void confirmation(ph_workspace *u)
                UI_CONFIRM, 0, true, true);
         return;
     }
+    if (u->confirm == 13 || u->confirm == 14) {
+        bool sending = u->confirm == 13;
+        text(u, sending ? "Cancel sending?" : "Stop receiving?", box.x + 22, box.y + 25, box.w - 70, 21,
+             true, u->ink);
+        text(u, sending ? "What reached the iPhone is deleted. You can send it again any time."
+                        : "What has arrived on this PC is deleted. Files already saved are kept.",
+             box.x + 22, box.y + 69, box.w - 44, 13, false, u->muted);
+        button(u, (SDL_Rect){box.x + 22, box.y + 153, 164, 34}, sending ? "Cancel sending" : "Stop receiving",
+               UI_CONFIRM, 0, true, true);
+        return;
+    }
     if (u->confirm == 11) {
         text(u, "Certificate fingerprint", box.x + 20, box.y + 20, box.w - 70, 19, true, u->ink);
         text(u, "SHA-256", box.x + 20, box.y + 52, box.w - 40, 12, false, u->muted);
@@ -2643,6 +2659,16 @@ static void activate(ph_workspace *u, ui_hit h)
     int a = h.action;
     bool had_error = u->error[0];
     u->error[0] = 0;
+    /* Cancelling asks first. */
+    if (a == PH_WORKSPACE_CANCEL_SEND || a == PH_WORKSPACE_CANCEL_RECEIVE) {
+        u->confirm = a == PH_WORKSPACE_CANCEL_SEND ? 13 : 14;
+        return;
+    }
+    if (a == UI_CONFIRM && (u->confirm == 13 || u->confirm == 14)) {
+        queue(u, u->confirm == 13 ? PH_WORKSPACE_CANCEL_SEND : PH_WORKSPACE_CANCEL_RECEIVE, 0);
+        u->confirm = 0;
+        return;
+    }
     if (a == UI_COPY_CODE && u->confirm == 11) {
         SDL_SetClipboardText(ph_tls_fingerprint());
         return;
@@ -3165,6 +3191,17 @@ ph_workspace_action ph_workspace_take_action(ph_workspace *u, uint64_t *id)
         *id = u->action_id;
     return a;
 }
+bool ph_workspace_confirm_target(ph_workspace *u, int *x, int *y)
+{
+    for (int i = 0; u && u->confirm && i < u->hits_n; i++)
+        if (u->hits[i].action == UI_CONFIRM) {
+            *x = u->hits[i].box.x + u->hits[i].box.w / 2;
+            *y = u->hits[i].box.y + u->hits[i].box.h / 2;
+            return true;
+        }
+    return false;
+}
+
 bool ph_workspace_target(ph_workspace *u, ph_workspace_action action, int *x, int *y)
 {
     if (!u)

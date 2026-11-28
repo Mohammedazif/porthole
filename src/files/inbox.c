@@ -56,12 +56,13 @@ struct ph_inbox {
     pthread_t thread;
     pthread_mutex_t client_lock;
     atomic_bool stop, disconnect;
+    atomic_bool cancel; /* the person cancelled the batch arriving now */
     ph_inbox_item item;
 };
 
 static bool wait_readable(ph_inbox *in, int fd, uint64_t deadline)
 {
-    while (!atomic_load(&in->stop) && !atomic_load(&in->disconnect)) {
+    while (!atomic_load(&in->stop) && !atomic_load(&in->disconnect) && !atomic_load(&in->cancel)) {
         uint64_t now = ph_metrics_now_ms();
         if (now >= deadline || !ph_tls_authorized())
             break;
@@ -128,7 +129,9 @@ static bool receive_file(ph_inbox *in, int fd, const char *path, unsigned long l
         size_t want = size < sizeof chunk ? (size_t)size : sizeof chunk;
         int got;
 
-        if (!wait_readable(in, fd, ph_metrics_now_ms() + idle))
+        if (atomic_load(&in->cancel))
+            ok = false;
+        else if (!wait_readable(in, fd, ph_metrics_now_ms() + idle))
             ok = false;
         else if ((got = (int)ph_tls_read(fd, chunk, (int)want)) <= 0)
             ok = false;
@@ -318,6 +321,34 @@ static bool file_matches(ph_inbox *in, const char *path, const char *hash, uint6
 /* version 3 names the checksum before the bytes; version 4 sends it after
  * them ("SUM <hex>"), so the iPhone starts at once instead of reading the
  * whole file first. On a resume it first reads again what the PC kept. */
+/* Cancelled here: the iPhone hears CANCELLED (read while it still sends,
+ * so the line isn't lost to a reset), and what arrived is deleted. A marker
+ * keeps a later retry of the same file from starting it again. */
+static void cancel_here(ph_inbox *in, int fd, const char *base, const char *name)
+{
+    char path[700], scratch[1 << 14];
+    send_text(fd, "CANCELLED\n");
+    uint64_t until = ph_metrics_now_ms() + 2000;
+    while (ph_metrics_now_ms() < until) {
+        struct pollfd p = {.fd = fd, .events = POLLIN};
+        int n = ph_tls_pending(fd) ? 1 : ph_poll(&p, 1, 100);
+        if (n < 0 || (n > 0 && ph_tls_read(fd, scratch, (int)sizeof scratch) <= 0))
+            break;
+    }
+    static const char *const ends[] = {".part", ".info", ".target"};
+    for (size_t i = 0; i < sizeof ends / sizeof ends[0]; i++) {
+        snprintf(path, sizeof path, "%s%s", base, ends[i]);
+        ph_remove(path);
+    }
+    snprintf(path, sizeof path, "%s.cancelled", base);
+    write_line_file(path, "cancelled");
+    PH_LOGI("share: %s: cancelled here; what arrived was deleted", name);
+    in->item.state = PH_INBOX_CANCELED;
+    in->item.bytes = 0;
+    if (in->cb.item)
+        in->cb.item(in->cb.user, &in->item);
+}
+
 /* Version 4: "DROP <id>", for a file cancelled on the iPhone. What arrived
  * of it is deleted, so nothing continues it later. */
 static bool drop_partial(ph_inbox *in, int fd, const char *line)
@@ -404,6 +435,16 @@ static bool receive_resumable(ph_inbox *in, int fd, const char *header, int vers
     memcpy(in->item.id, id, sizeof id);
     memcpy(in->item.digest, digest, sizeof digest);
     snprintf(in->item.name, sizeof in->item.name, "%s", name);
+    {
+        char cancelled[700];
+        snprintf(cancelled, sizeof cancelled, "%s.cancelled", base);
+        if (ph_path_exists(cancelled)) {
+            /* Cancelled here before: the iPhone stops offering it. */
+            in->item.state = PH_INBOX_CANCELED;
+            send_text(fd, "CANCELLED\n");
+            return false;
+        }
+    }
     bool described = ph_path_exists(descriptor);
     if (described) {
         if (!read_line_file(descriptor, info, sizeof info) || strcmp(info, meta))
@@ -468,6 +509,10 @@ static bool receive_resumable(ph_inbox *in, int fd, const char *header, int vers
         first_wait = 3600000;
     if (!send_text(fd, info) || !receive_file(in, fd, part, size - offset, true, hash, first_wait)) {
         EVP_MD_CTX_free(hash);
+        if (atomic_load(&in->cancel)) {
+            cancel_here(in, fd, base, name);
+            return false;
+        }
         long long kept = ph_file_size(part);
         PH_LOGW("share: %s: the iPhone stopped sending at %lld of %llu bytes (kept, it continues from there)",
                 name, kept, size);
@@ -588,6 +633,7 @@ static void serve(ph_inbox *in, int fd, const char *address)
     int total, done = 0;
     unsigned long long size;
 
+    atomic_store(&in->cancel, false);
     if (!read_line(in, fd, line, sizeof line) || (total = ph_inbox_parse_hello(line)) < 0) {
         PH_LOGW("share: %s did not say hello", address);
         return;
@@ -609,7 +655,7 @@ static void serve(ph_inbox *in, int fd, const char *address)
         if (done == total && read_line(in, fd, line, sizeof line) && !strcmp(line, "DONE"))
             send_text(fd, "BYE\n");
         if (done < total) {
-            if (in->item.id[0] && in->item.state != PH_INBOX_STORED) {
+            if (in->item.id[0] && in->item.state != PH_INBOX_STORED && in->item.state != PH_INBOX_CANCELED) {
                 in->item.state = PH_INBOX_INTERRUPTED;
                 if (!in->item.message[0])
                     snprintf(in->item.message, sizeof in->item.message, "%s",
@@ -767,6 +813,12 @@ void ph_inbox_stop(ph_inbox *in)
     ph_sock_close(in->listen_fd);
     pthread_mutex_destroy(&in->client_lock);
     free(in);
+}
+
+void ph_inbox_cancel(ph_inbox *in)
+{
+    if (in)
+        atomic_store(&in->cancel, true);
 }
 
 void ph_inbox_disconnect(ph_inbox *in)

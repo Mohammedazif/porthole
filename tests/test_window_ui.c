@@ -897,6 +897,10 @@ int main(int argc, char **argv)
         CHECK(ph_workspace_target(workspace, PH_WORKSPACE_REVEAL, &tx, &ty));
         CHECK(ph_workspace_target(workspace, PH_WORKSPACE_CANCEL_SEND, &tx, &ty));
         click_at(w, tx, ty);
+        CHECK(!ph_window_take_cancel(w)); /* it asks first */
+        ph_window_redraw(w);
+        CHECK(ph_workspace_confirm_target(workspace, &tx, &ty));
+        click_at(w, tx, ty);
         CHECK(ph_window_take_cancel(w));
     }
     SDL_SetWindowSize(native, 960, 720);
