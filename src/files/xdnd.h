@@ -23,5 +23,8 @@ void ph_xdnd_syswm(const void *msg);
 bool ph_xdnd_place(SDL_Window *window, int root_x, int root_y, char *buf, size_t n);
 /* A window that follows the cursor and must not hide the drop target. */
 void ph_xdnd_skip(SDL_Window *window);
+/* Puts the files (one per line) on the clipboard as files, to paste into any
+ * app with Ctrl+V. Windows only; false elsewhere. */
+bool ph_xdnd_copy_files(const char *paths);
 
 #endif

@@ -1533,8 +1533,13 @@ static void end_pull(app *a)
     snprintf(saved, sizeof saved, "%s", a->pull_path);
     if (ph_xdnd_busy())
         placed = ph_xdnd_drop();
-    if (saved[0] && note == 3 && !placed)
+    bool copied = false;
+    if (saved[0] && note == 3 && !placed) {
         landed = desktop_copy_all(saved, shown, sizeof shown) > 0;
+        /* Let go before the file was here (or inside Porthole): it's on the
+         * Desktop, and on the clipboard as a file to paste into any app. */
+        copied = ph_xdnd_copy_files(landed ? shown : saved);
+    }
     if (note == 3 && landed)
         offer = shown;
     else if (note == 3 && saved[0])
@@ -1558,8 +1563,9 @@ static void end_pull(app *a)
     }
     if (note == 3)
         ph_window_set_detail(a->win, placed ? "Original file offered to the drop destination."
-                                            : landed ? "Original file saved to Desktop."
-                                                     : "Original available in File history. Could not save to Desktop.");
+                                     : landed && copied ? "Saved to the Desktop and copied. Press Ctrl+V to paste it anywhere."
+                                     : landed ? "Original file saved to Desktop."
+                                              : "Original available in File history. Could not save to Desktop.");
     else if (note == 4)
         ph_window_set_detail(a->win, "Not a photo or video from this iPhone's library");
     else if (note == 1)

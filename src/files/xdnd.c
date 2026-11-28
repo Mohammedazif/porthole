@@ -470,6 +470,232 @@ void ph_xdnd_syswm(const void *msg_ptr)
     }
 }
 
+#elif defined(_WIN32)
+
+/* Windows: a real shell drag, so the original can be dropped into any app
+ * that takes files (File Explorer, a terminal, a browser, chat apps). It
+ * starts once the file is here and the pointer has left Porthole with the
+ * button still held; Windows then runs the drag until the button goes up. */
+#include <windows.h>
+#include <ole2.h>
+#include <shlobj.h>
+#include <shobjidl.h>
+#include <wchar.h>
+#include <SDL_syswm.h>
+
+static const GUID ph_bhid_data_object = {0xb8c0bd9f, 0xed24, 0x455c, {0x83, 0xe6, 0xd5, 0x39, 0x0c, 0x4f, 0xe8, 0xc4}};
+static const IID ph_iid_data_object = {0x0000010e, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+
+static char drag_paths[1 << 15];
+static bool pending, ran, dropped;
+static HWND owner, skip_window;
+
+static HWND window_handle(SDL_Window *window)
+{
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (!window || !SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_WINDOWS)
+        return NULL;
+    return info.info.win.window;
+}
+
+static bool wide(const char *utf8, wchar_t *out, int cap)
+{
+    return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, out, cap) > 0;
+}
+
+/* The files, one per line, as the shell's own data object (what File
+ * Explorer itself offers when a file is dragged). */
+static IDataObject *shell_data(void)
+{
+    PIDLIST_ABSOLUTE items[64];
+    UINT count = 0;
+    char copy[sizeof drag_paths];
+    snprintf(copy, sizeof copy, "%s", drag_paths);
+    for (char *line = copy, *next; line && *line && count < 64; line = next) {
+        next = strchr(line, '\n');
+        if (next)
+            *next++ = 0;
+        wchar_t path[MAX_PATH * 4];
+        if (wide(line, path, (int)(sizeof path / sizeof path[0])) &&
+            SUCCEEDED(SHParseDisplayName(path, NULL, &items[count], 0, NULL)))
+            count++;
+    }
+    IDataObject *data = NULL;
+    IShellItemArray *array = NULL;
+    if (count && SUCCEEDED(SHCreateShellItemArrayFromIDLists(count, (PCIDLIST_ABSOLUTE_ARRAY)items, &array))) {
+        if (FAILED(array->lpVtbl->BindToHandler(array, NULL, &ph_bhid_data_object, &ph_iid_data_object,
+                                                (void **)&data)))
+            data = NULL;
+        array->lpVtbl->Release(array);
+    }
+    for (UINT i = 0; i < count; i++)
+        CoTaskMemFree(items[i]);
+    return data;
+}
+
+static bool over_porthole(int x, int y)
+{
+    POINT point = {x, y};
+    HWND under = WindowFromPoint(point);
+    HWND root = under ? GetAncestor(under, GA_ROOT) : NULL;
+    return root && (root == owner || root == skip_window);
+}
+
+static void run_drag(void)
+{
+    ran = true;
+    HRESULT init = OleInitialize(NULL);
+    IDataObject *data = shell_data();
+    if (!data) {
+        PH_LOGW("photo pull: Windows could not offer the file for dragging");
+    } else {
+        DWORD effect = DROPEFFECT_NONE;
+        SDL_CaptureMouse(SDL_FALSE);
+        ReleaseCapture();
+        HRESULT hr = SHDoDragDrop(owner, data, NULL, DROPEFFECT_COPY | DROPEFFECT_LINK, &effect);
+        dropped = hr == DRAGDROP_S_DROP && effect != DROPEFFECT_NONE;
+        PH_LOGI("photo pull: dragged out of Porthole, %s", dropped ? "dropped into another app" : "not dropped");
+        data->lpVtbl->Release(data);
+    }
+    if (SUCCEEDED(init))
+        OleUninitialize();
+}
+
+bool ph_xdnd_begin(SDL_Window *window, const char *path)
+{
+    if (!path || !path[0] || strlen(path) >= sizeof drag_paths)
+        return false;
+    owner = window_handle(window);
+    if (!owner)
+        return false;
+    snprintf(drag_paths, sizeof drag_paths, "%s", path);
+    pending = true;
+    ran = dropped = false;
+    return true;
+}
+
+void ph_xdnd_set_path(const char *path)
+{
+    if (pending && path && strlen(path) < sizeof drag_paths)
+        snprintf(drag_paths, sizeof drag_paths, "%s", path);
+}
+
+void ph_xdnd_motion(int root_x, int root_y)
+{
+    /* Only with the button still down: after it went up there is nothing
+     * left to drag, and the file lands where it was let go. */
+    if (!pending || ran || !(GetAsyncKeyState(VK_LBUTTON) & 0x8000) || over_porthole(root_x, root_y))
+        return;
+    run_drag();
+}
+
+bool ph_xdnd_drop(void)
+{
+    bool result = pending && ran && dropped;
+    pending = ran = dropped = false;
+    drag_paths[0] = 0;
+    return result;
+}
+
+void ph_xdnd_cancel(void)
+{
+    pending = ran = dropped = false;
+    drag_paths[0] = 0;
+}
+
+bool ph_xdnd_busy(void)
+{
+    return pending;
+}
+
+void ph_xdnd_syswm(const void *msg)
+{
+    (void)msg;
+}
+
+bool ph_xdnd_place(SDL_Window *window, int root_x, int root_y, char *buf, size_t n)
+{
+    if (!buf || !n)
+        return false;
+    buf[0] = 0;
+    if (!owner)
+        owner = window_handle(window);
+    POINT point = {root_x, root_y};
+    HWND under = WindowFromPoint(point);
+    HWND root = under ? GetAncestor(under, GA_ROOT) : NULL;
+    if (!root || root == owner || root == skip_window)
+        return false;
+    wchar_t title[256] = L"", kind[64] = L"";
+    GetClassNameW(root, kind, (int)(sizeof kind / sizeof kind[0]));
+    if (!wcscmp(kind, L"Progman") || !wcscmp(kind, L"WorkerW")) {
+        snprintf(buf, n, "Desktop");
+        return true;
+    }
+    if (GetWindowTextW(root, title, (int)(sizeof title / sizeof title[0])) <= 0 ||
+        !WideCharToMultiByte(CP_UTF8, 0, title, -1, buf, (int)n, NULL, NULL)) {
+        snprintf(buf, n, "this window");
+        return true;
+    }
+    buf[n - 1] = 0;
+    return true;
+}
+
+void ph_xdnd_skip(SDL_Window *window)
+{
+    skip_window = window_handle(window);
+}
+
+bool ph_xdnd_copy_files(const char *paths)
+{
+    if (!paths || !paths[0])
+        return false;
+    /* CF_HDROP: a DROPFILES header, then each path in UTF-16, then an extra 0. */
+    size_t chars = 0;
+    char copy[1 << 15];
+    snprintf(copy, sizeof copy, "%s", paths);
+    wchar_t list[1 << 15];
+    for (char *line = copy, *next; line && *line; line = next) {
+        next = strchr(line, '\n');
+        if (next)
+            *next++ = 0;
+        int got = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, line, -1, list + chars,
+                                      (int)(sizeof list / sizeof list[0] - chars - 1));
+        if (got <= 0)
+            return false;
+        chars += (size_t)got;
+    }
+    list[chars++] = 0;
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(DROPFILES) + chars * sizeof(wchar_t));
+    if (!memory)
+        return false;
+    DROPFILES *drop = GlobalLock(memory);
+    drop->pFiles = sizeof(DROPFILES);
+    drop->fWide = TRUE;
+    memcpy((char *)drop + sizeof(DROPFILES), list, chars * sizeof(wchar_t));
+    GlobalUnlock(memory);
+    HGLOBAL effect = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
+    if (effect) {
+        *(DWORD *)GlobalLock(effect) = DROPEFFECT_COPY;
+        GlobalUnlock(effect);
+    }
+    if (!OpenClipboard(owner)) {
+        GlobalFree(memory);
+        if (effect)
+            GlobalFree(effect);
+        return false;
+    }
+    EmptyClipboard();
+    bool ok = SetClipboardData(CF_HDROP, memory) != NULL;
+    if (!ok)
+        GlobalFree(memory);
+    UINT preferred = RegisterClipboardFormatW(L"Preferred DropEffect");
+    if (effect && (!preferred || !SetClipboardData(preferred, effect)))
+        GlobalFree(effect);
+    CloseClipboard();
+    return ok;
+}
+
 #else
 
 bool ph_xdnd_begin(SDL_Window *window, const char *path)
@@ -524,4 +750,12 @@ void ph_xdnd_skip(SDL_Window *window)
     (void)window;
 }
 
+#endif
+
+#if !defined(_WIN32)
+bool ph_xdnd_copy_files(const char *paths)
+{
+    (void)paths;
+    return false;
+}
 #endif
