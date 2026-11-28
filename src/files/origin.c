@@ -628,6 +628,11 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
         *consumed = true;
         return send_all(fd, "INBOX 3\n", 8);
     }
+    /* Asked only by iPhones that send the checksum after the file. */
+    if (!strcmp(line, "INBOX? 4")) {
+        *consumed = true;
+        return send_all(fd, "INBOX 4\n", 8);
+    }
     if (!strcmp(line, "SHARE?") || !strcmp(line, "SCREEN? 2") || !strcmp(line, "SCREEN? 3") ||
         !strcmp(line, "SCREEN? 4")) {
         bool sharing = strcmp(line, "SHARE?") != 0;

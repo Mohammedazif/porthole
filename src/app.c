@@ -2908,6 +2908,8 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
             a->inbox_total = total;
         } else {
             ph_window_set_receiving(a->win, 0, 0);
+            if (done < 0 || (text && !strncmp(text, "Transfer interrupted", 20)))
+                ph_transfer_card_stop_receiving(a->card, SDL_GetTicks64());
         }
         if (a->card) {
             char phone[129];
@@ -2966,8 +2968,10 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
                 ph_origin_phone_name(a->origin, entry.device, sizeof entry.device);
                 ph_history_add_file(a->history, &entry);
             }
-            if (item->state == PH_INBOX_INTERRUPTED)
+            if (item->state == PH_INBOX_INTERRUPTED) {
                 ph_window_set_receiving(a->win, 0, 0);
+                ph_transfer_card_stop_receiving(a->card, SDL_GetTicks64());
+            }
             if (item->message[0])
                 ph_window_set_detail(a->win, item->message);
         }

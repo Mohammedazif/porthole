@@ -820,6 +820,13 @@ void ph_transfer_card_dismiss(ph_transfer_card *c, Uint64 now)
     c->phase_at = now;
 }
 
+void ph_transfer_card_stop_receiving(ph_transfer_card *c, Uint64 now)
+{
+    /* Items already saved in this batch stay on the card. */
+    if (c && !c->received && c->item_count == 0)
+        ph_transfer_card_dismiss(c, now);
+}
+
 void ph_transfer_card_tick(ph_transfer_card *c, Uint64 now)
 {
     float t;

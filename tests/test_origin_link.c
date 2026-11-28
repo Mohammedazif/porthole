@@ -489,6 +489,54 @@ static void test_resume_receive(const char *dir, ph_origin *origin, const char *
     ph_inbox_stop(inbox);
 }
 
+/* Version 4: the checksum comes after the bytes, also after a resume. */
+static void test_resume_receive_sum_after(const char *dir, ph_origin *origin, const char *key)
+{
+    const char *header = "PSHR 4 1\nITEM 00112233445566778899aabbccddeeff FILE 10 after.txt\n";
+    const char *sum = "SUM 72399361da6a7754fec986dca5b7cbaf1c810a28ded4abaf56b2106d06cb78b0\n";
+    CHECK(ph_place_set_save_dir(dir));
+    ph_inbox_callbacks callbacks = {
+        .user = origin, .authorize = verify_inbox_key, .profile = receive_profile};
+    ph_inbox *inbox = ph_inbox_start(dir, &callbacks);
+    CHECK(inbox);
+    char response[100], path[1200];
+    int fd = authenticated_channel(PH_INBOX_PORT, key);
+    say(fd, header);
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "OFFSET 0"));
+    say(fd, "abcd");
+    close_peer(fd);
+    fd = authenticated_channel(PH_INBOX_PORT, key);
+    say(fd, header);
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "OFFSET 4"));
+    say(fd, "efghij");
+    say(fd, sum);
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "OK"));
+    say(fd, "DONE\n");
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "BYE"));
+    close_peer(fd);
+    snprintf(path, sizeof path, "%s/after.txt", dir);
+    FILE *f = ph_fopen(path, "rb");
+    CHECK(f && fread(response, 1, 10, f) == 10 && !memcmp(response, "abcdefghij", 10));
+    fclose(f);
+    /* A wrong checksum is refused, and nothing is saved. */
+    fd = authenticated_channel(PH_INBOX_PORT, key);
+    say(fd, "PSHR 4 1\nITEM 00112233445566778899aabbccddeef0 FILE 10 wrong.txt\n");
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "OFFSET 0"));
+    say(fd, "abcdefghiX");
+    say(fd, sum);
+    line(fd, response, sizeof response);
+    CHECK(!strcmp(response, "ERROR"));
+    close_peer(fd);
+    snprintf(path, sizeof path, "%s/wrong.txt", dir);
+    CHECK(!ph_path_exists(path));
+    ph_inbox_stop(inbox);
+}
+
 static void expect_rejected_credential(const char *credential, const char *reason)
 {
     char hello[64], reply[32];
@@ -526,6 +574,7 @@ static void test_extension_keys(const char *dir, ph_origin *origin, const char *
     CHECK(ph_origin_receive_profile(origin, share, profile));
     CHECK(!ph_origin_generation(origin, share) && !ph_origin_receive_profile(origin, screen, profile));
     test_resume_receive(dir, origin, share);
+    test_resume_receive_sum_after(dir, origin, share);
     ph_screen_callbacks callbacks = {.user = origin, .authorize = verify_broadcast_key};
     ph_screen *server = ph_screen_start(&callbacks);
     CHECK(server);

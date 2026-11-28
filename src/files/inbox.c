@@ -15,7 +15,7 @@ int ph_inbox_parse_hello(const char *line)
     char extra;
 
     if (!line || strncmp(line, "PSHR ", 5) || strlen(line) < 8 || line[5] < '1' ||
-        line[5] > '3' || line[6] != ' ' || sscanf(line + 7, "%d%c", &count, &extra) != 1 ||
+        line[5] > '4' || line[6] != ' ' || sscanf(line + 7, "%d%c", &count, &extra) != 1 ||
         count < 1 || count > PH_INBOX_MAX_FILES)
         return -1;
     return count;
@@ -117,17 +117,18 @@ static bool free_path(const char *folder, const char *name, char *out, size_t le
 /* `hash`, when given, takes every byte as it arrives: a large file is not
  * read a second time to check it. */
 static bool receive_file(ph_inbox *in, int fd, const char *path, unsigned long long size,
-                         bool resume, EVP_MD_CTX *hash)
+                         bool resume, EVP_MD_CTX *hash, uint64_t first_wait_ms)
 {
     char chunk[1 << 16];
     FILE *out = ph_fopen(path, resume ? "ab" : "wbx");
     bool ok = out != NULL;
     double next_update = ph_metrics_now_ms() + 200;
+    uint64_t idle = first_wait_ms > INBOX_IDLE_MS ? first_wait_ms : INBOX_IDLE_MS;
     while (ok && size > 0) {
         size_t want = size < sizeof chunk ? (size_t)size : sizeof chunk;
         int got;
 
-        if (!wait_readable(in, fd, ph_metrics_now_ms() + INBOX_IDLE_MS))
+        if (!wait_readable(in, fd, ph_metrics_now_ms() + idle))
             ok = false;
         else if ((got = (int)ph_tls_read(fd, chunk, (int)want)) <= 0)
             ok = false;
@@ -136,6 +137,7 @@ static bool receive_file(ph_inbox *in, int fd, const char *path, unsigned long l
         else if (hash && EVP_DigestUpdate(hash, chunk, (size_t)got) != 1)
             ok = false;
         else {
+            idle = INBOX_IDLE_MS;
             size -= (unsigned long long)got;
             if (resume) {
                 in->item.bytes = in->item.total - size;
@@ -313,8 +315,12 @@ static bool file_matches(ph_inbox *in, const char *path, const char *hash, uint6
     return ok;
 }
 
-static bool receive_resumable(ph_inbox *in, int fd, const char *header, bool verify_digest)
+/* version 3 names the checksum before the bytes; version 4 sends it after
+ * them ("SUM <hex>"), so the iPhone starts at once instead of reading the
+ * whole file first. On a resume it first reads again what the PC kept. */
+static bool receive_resumable(ph_inbox *in, int fd, const char *header, int version)
 {
+    bool verify_digest = version == 3, sum_after = version >= 4;
     char id[33], name[96], meta[256], info[256], location[1024], digest[65] = "";
     char prefix[65], file_header[256];
     const char *file_info = header + 38;
@@ -382,8 +388,8 @@ static bool receive_resumable(ph_inbox *in, int fd, const char *header, bool ver
         return false;
     /* The checksum runs as the bytes arrive; on a resume it first takes in
      * what was kept, read once. */
-    EVP_MD_CTX *hash = verify_digest ? EVP_MD_CTX_new() : NULL;
-    bool hashing = !verify_digest || (hash && EVP_DigestInit_ex(hash, EVP_sha256(), NULL) == 1);
+    EVP_MD_CTX *hash = verify_digest || sum_after ? EVP_MD_CTX_new() : NULL;
+    bool hashing = !(verify_digest || sum_after) || (hash && EVP_DigestInit_ex(hash, EVP_sha256(), NULL) == 1);
     if (hashing && hash && offset) {
         FILE *kept = ph_fopen(part, "rb");
         char chunk[1 << 16];
@@ -409,12 +415,29 @@ static bool receive_resumable(ph_inbox *in, int fd, const char *header, bool ver
     in->item.bytes = offset;
     if (in->cb.item)
         in->cb.item(in->cb.user, &in->item);
-    if (!send_text(fd, info) || !receive_file(in, fd, part, size - offset, true, hash)) {
+    /* Version 4: the iPhone reads again what the PC kept before it sends on;
+     * from Photos or iCloud that can take a while. */
+    uint64_t first_wait = sum_after && offset ? 60000 + offset / 5000 : 0;
+    if (first_wait > 3600000)
+        first_wait = 3600000;
+    if (!send_text(fd, info) || !receive_file(in, fd, part, size - offset, true, hash, first_wait)) {
         EVP_MD_CTX_free(hash);
         long long kept = ph_file_size(part);
         PH_LOGW("share: %s: the iPhone stopped sending at %lld of %llu bytes (kept, it continues from there)",
                 name, kept, size);
         return false;
+    }
+    if (sum_after) {
+        char said[80];
+        if (!read_line(in, fd, said, sizeof said) || strncmp(said, "SUM ", 4) || strlen(said) != 68 ||
+            strspn(said + 4, "0123456789abcdef") != 64) {
+            EVP_MD_CTX_free(hash);
+            PH_LOGW("share: %s: the iPhone didn't send its checksum (kept, it continues from there)", name);
+            return false;
+        }
+        memcpy(digest, said + 4, 65);
+        memcpy(in->item.digest, digest, sizeof digest);
+        verify_digest = true;
     }
     if (verify_digest) {
         unsigned char sum[EVP_MAX_MD_SIZE];
@@ -525,13 +548,13 @@ static void serve(ph_inbox *in, int fd, const char *address)
     }
     if (ph_mkdir(in->dir) != 0 && errno != EEXIST)
         return;
-    if (line[5] == '2' || line[5] == '3') {
-        bool verify_digest = line[5] == '3';
+    if (line[5] >= '2' && line[5] <= '4') {
+        int version = line[5] - '0';
         memset(&in->item, 0, sizeof in->item);
         if (in->cb.progress)
             in->cb.progress(in->cb.user, 0, total);
         while (done < total && read_line(in, fd, line, sizeof line) &&
-               receive_resumable(in, fd, line, verify_digest)) {
+               receive_resumable(in, fd, line, version)) {
             done++;
             memset(&in->item, 0, sizeof in->item);
             if (in->cb.progress)
@@ -574,7 +597,7 @@ static void serve(ph_inbox *in, int fd, const char *address)
             snprintf(item.id + i * 2, 3, "%02x", nonce[i]);
         char staged[640];
         snprintf(staged, sizeof staged, "%s/transfer-%s.part", in->dir, item.id);
-        if (!receive_file(in, fd, staged, size, false, NULL))
+        if (!receive_file(in, fd, staged, size, false, NULL, 0))
             break;
         bool saved = ph_tls_authorized() &&
                      ph_place_copy_unique(staged, folder, name, path, sizeof path);

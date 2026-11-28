@@ -30,6 +30,8 @@ void ph_transfer_card_set_phone(ph_transfer_card *c, const char *name);
 /* Folder name under the file. NULL clears it. */
 void ph_transfer_card_place(ph_transfer_card *c, const char *place);
 void ph_transfer_card_dismiss(ph_transfer_card *c, Uint64 now);
+/* The iPhone stopped before the batch finished: a card still waiting goes. */
+void ph_transfer_card_stop_receiving(ph_transfer_card *c, Uint64 now);
 void ph_transfer_card_tick(ph_transfer_card *c, Uint64 now);
 bool ph_transfer_card_animating(const ph_transfer_card *c);
 
