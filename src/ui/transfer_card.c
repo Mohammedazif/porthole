@@ -87,6 +87,7 @@ struct ph_transfer_card {
     char name[160];
     char place[64]; /* folder name shown under the file, such as Downloads */
     char phone[129]; /* the iPhone's own name */
+    int partial_of;   /* the batch stopped: item_count of this many arrived */
     SDL_Rect open_r, show_r, close_r;
 };
 
@@ -444,7 +445,9 @@ static void paint(ph_transfer_card *c, Uint64 now)
         else
             snprintf(sub, sizeof sub, "%d of %d", c->done, c->total);
     } else {
-        if (several(c))
+        if (c->partial_of > c->item_count)
+            snprintf(heading, sizeof heading, "%d of %d received", c->item_count, c->partial_of);
+        else if (several(c))
             snprintf(heading, sizeof heading, "%d items received", c->item_count);
         else if (c->total > 1)
             snprintf(heading, sizeof heading, "%d files received", c->total);
@@ -756,6 +759,7 @@ void ph_transfer_card_receiving(ph_transfer_card *c, const char *name, unsigned 
     if (!c->batch || c->received || (done == 0 && (!name || !name[0]))) {
         /* A new batch. */
         c->item_count = 0;
+        c->partial_of = 0;
         c->batch = true;
         c->received = false;
         c->expanded = false;
@@ -780,6 +784,7 @@ void ph_transfer_card_saved(ph_transfer_card *c, const char *path, int total, bo
         return;
     if (!c->batch || c->received) {
         c->item_count = 0;
+        c->partial_of = 0;
         c->batch = true;
         c->expanded = false;
     }
@@ -822,9 +827,21 @@ void ph_transfer_card_dismiss(ph_transfer_card *c, Uint64 now)
 
 void ph_transfer_card_stop_receiving(ph_transfer_card *c, Uint64 now)
 {
-    /* Items already saved in this batch stay on the card. */
-    if (c && !c->received && c->item_count == 0)
+    if (!c || c->received)
+        return;
+    if (c->item_count == 0) {
         ph_transfer_card_dismiss(c, now);
+        return;
+    }
+    /* Part of the batch arrived: the card sums up what did, to open. */
+    c->partial_of = c->total;
+    c->total = c->done = c->item_count;
+    c->item_bytes = c->item_size = 0;
+    c->received = true;
+    c->check_at = now;
+    c->touch = now;
+    c->dirty = true;
+    PH_LOGI("transfer: received %d of %d items; the iPhone stopped", c->item_count, c->partial_of);
 }
 
 void ph_transfer_card_tick(ph_transfer_card *c, Uint64 now)
