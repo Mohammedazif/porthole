@@ -437,6 +437,41 @@ static void test_chunked_send(ph_origin *origin, int fd, const char *path)
     expect_result(origin, 1);
 }
 
+/* Cancelled on the iPhone partway: the PC says ENDPUSH between segments,
+ * keeps the link, and records it as cancelled (not continued later). */
+static void test_chunked_stop(ph_origin *origin, int fd, const char *path)
+{
+    char reply[256], transfer[33], command[128];
+    CHECK(ph_origin_put_file(origin, path));
+    line(fd, reply, sizeof reply);
+    CHECK(sscanf(reply, "PUSH3 %32s", transfer) == 1);
+    snprintf(command, sizeof command, "OFFSET %s 0\n", transfer);
+    say(fd, command);
+    bool stopped = false, ended = false;
+    while (!ended) {
+        line(fd, reply, sizeof reply);
+        if (!strncmp(reply, "ENDPUSH ", 8)) {
+            CHECK(stopped && !strcmp(reply + 8, transfer));
+            ended = true;
+            continue;
+        }
+        int length;
+        CHECK(sscanf(reply, "CHUNK %d", &length) == 1 && length > 0 && length <= 65536);
+        char chunk[4096];
+        while (length > 0) {
+            int got = (int)read_peer(fd, chunk, length < (int)sizeof chunk ? length : (int)sizeof chunk, 0);
+            CHECK(got > 0);
+            length -= got;
+        }
+        if (!stopped) {
+            snprintf(command, sizeof command, "STOP %s\n", transfer);
+            say(fd, command);
+            stopped = true;
+        }
+    }
+    expect_result(origin, PH_SEND_CANCELED);
+}
+
 static bool receive_profile(void *user, const char *credential, char out[65])
 {
     return ph_origin_receive_profile(user, credential, out);
@@ -900,6 +935,7 @@ int main(int argc, char **argv)
     CHECK(!strcmp(capability, "IV READY"));
     test_screen_channel(o);
     test_chunked_send(o, phone, path_a);
+    test_chunked_stop(o, phone, path_a);
     CHECK(ph_origin_ask(o, 0x1234, 1.0, NULL, NULL, NULL, dir));
     char original[256];
     line(phone, original, sizeof original);

@@ -100,8 +100,10 @@ struct ph_origin {
     int push_fd;
     ph_origin_send push_queue[PH_PUSH_QUEUE]; /* files waiting, oldest first */
     char active_push_key[80];
+    char active_push_id[33]; /* the file going to the iPhone now */
     int push_count;
     bool push_cancel;
+    bool push_stopped_by_phone; /* the person cancelled it on the iPhone */
     struct transfer_result *results, *last_result;
     bool files_ok, resumable, chunked;
     bool push_busy;
@@ -511,6 +513,17 @@ static bool accept_clip_line(ph_origin *o, int fd, const char *line, bool *consu
     uint8_t *body;
 
     *consumed = false;
+    /* The person cancelled the arriving file on the iPhone. */
+    if (!strncmp(line, "STOP ", 5)) {
+        *consumed = true;
+        pthread_mutex_lock(&o->lock);
+        if (o->push_busy && o->active_push_id[0] && !strcmp(line + 5, o->active_push_id)) {
+            o->push_cancel = true;
+            o->push_stopped_by_phone = true;
+        }
+        pthread_mutex_unlock(&o->lock);
+        return true;
+    }
     if (!strcmp(line, "IV?") || !strncmp(line, "IV ", 3)) {
         *consumed = true;
         return verify_input_line(o, fd, line);
@@ -964,6 +977,8 @@ static bool send_push(ph_origin *o, int fd)
     o->push_count--;
     /* Cancel empties the queue, so a file taken from it starts uncancelled. */
     o->push_cancel = false;
+    o->push_stopped_by_phone = false;
+    snprintf(o->active_push_id, sizeof o->active_push_id, "%s", job.id);
     ready = o->files_ok;
     resumable = o->resumable;
     chunked = o->chunked;
@@ -1072,6 +1087,18 @@ static bool send_push(ph_origin *o, int fd)
                  send_clip_ask(o, fd) && send_outgoing(o, fd);
     }
     fclose(file);
+    pthread_mutex_lock(&o->lock);
+    bool phone_stopped = o->push_stopped_by_phone;
+    pthread_mutex_unlock(&o->lock);
+    if (cancel && phone_stopped && chunked) {
+        /* Cancelled on the iPhone: say so between segments, and the link
+         * stays up. It isn't continued by itself later. */
+        char ended[64];
+        int length = snprintf(ended, sizeof ended, "ENDPUSH %s\n", ticket);
+        PH_LOGI("send: %s cancelled on the iPhone", job.name);
+        push_result(o, PH_SEND_CANCELED, &job);
+        return send_all(fd, ended, (size_t)length);
+    }
     if (cancel) {
         push_result(o, PH_SEND_CANCELED, &job);
         shutdown(fd, SHUT_RDWR);
@@ -1086,6 +1113,15 @@ static bool send_push(ph_origin *o, int fd)
         !strcmp(receipt, saved_receipt)) {
         finish_ticket(job.resume_key);
         push_result(o, PH_SEND_STORED, &job);
+        return true;
+    }
+    pthread_mutex_lock(&o->lock);
+    phone_stopped = o->push_stopped_by_phone;
+    pthread_mutex_unlock(&o->lock);
+    if (phone_stopped) {
+        /* Cancelled on the iPhone just as the last bytes went. */
+        PH_LOGI("send: %s cancelled on the iPhone", job.name);
+        push_result(o, PH_SEND_CANCELED, &job);
         return true;
     }
     PH_LOGW("send: the iPhone did not accept %s", job.name);
