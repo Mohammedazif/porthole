@@ -1785,7 +1785,9 @@ static void mouse_motion(app *a, const SDL_MouseMotionEvent *event)
 {
     if (file_pull_ready(a, event->x, event->y))
         begin_pull(a);
-    if (a->pull.pulling) {
+    /* Once dropped, the pointer is the iPhone's again while the file is found:
+     * the iPhone may ask which photo, and that is answered on it. */
+    if (a->pull.pulling && !a->pull_hold) {
         track_pull(a);
         return;
     }
@@ -1826,11 +1828,14 @@ static void mouse_button(app *a, const SDL_MouseButtonEvent *event)
     uint8_t button = ph_mouse_input_button(event->button);
     if (!button)
         return;
-    if (a->pull_hold)
+    /* Dropped and still being found: clicks go to the phone (to answer it), and a
+     * second Ctrl+drag waits until this one has landed. */
+    if (a->pull_hold && event->button == SDL_BUTTON_LEFT && event->type == SDL_MOUSEBUTTONDOWN &&
+        (SDL_GetModState() & KMOD_CTRL))
         return;
     /* Plain clicks and drags always control the phone. Ctrl+drag takes the original
      * file of whatever is under the pointer, and that press never reaches the phone. */
-    if (event->button == SDL_BUTTON_LEFT) {
+    if (event->button == SDL_BUTTON_LEFT && !a->pull_hold) {
         if (event->type == SDL_MOUSEBUTTONDOWN) {
             bool lift = (SDL_GetModState() & KMOD_CTRL) && !a->setup.visible
                         && !ph_window_help_visible(a->win);
