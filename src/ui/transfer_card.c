@@ -86,6 +86,7 @@ struct ph_transfer_card {
     char path[4096];
     char name[160];
     char place[64]; /* folder name shown under the file, such as Downloads */
+    char phone[129]; /* the iPhone's own name */
     SDL_Rect open_r, show_r, close_r;
 };
 
@@ -435,7 +436,7 @@ static void paint(ph_transfer_card *c, Uint64 now)
     }
     char heading[180], sub[200], shown[200];
     if (!c->received) {
-        snprintf(heading, sizeof heading, "Receiving from iPhone");
+        snprintf(heading, sizeof heading, "Receiving from %.150s", c->phone[0] ? c->phone : "iPhone");
         if (c->batch && c->current[0] && c->total > 1)
             snprintf(sub, sizeof sub, "%d of %d · %.150s", SDL_min(c->done + 1, c->total), c->total, c->current);
         else if (c->batch && c->current[0])
@@ -454,7 +455,7 @@ static void paint(ph_transfer_card *c, Uint64 now)
         else if (c->place[0])
             snprintf(sub, sizeof sub, "Saved in %s", c->place);
         else
-            snprintf(sub, sizeof sub, "Received from iPhone");
+            snprintf(sub, sizeof sub, "Received from %.150s", c->phone[0] ? c->phone : "iPhone");
     }
     int text_x = file.x + file.w + 13, text_width = CARD_W - text_x - PAD;
     fit_name(shown, sizeof shown, heading, text_width, title_font);
@@ -662,6 +663,14 @@ void ph_transfer_card_set_theme(ph_transfer_card *c, bool dark)
         c->dark = dark;
         c->dirty = true;
     }
+}
+
+void ph_transfer_card_set_phone(ph_transfer_card *c, const char *name)
+{
+    if (!c || !strcmp(c->phone, name ? name : ""))
+        return;
+    snprintf(c->phone, sizeof c->phone, "%s", name ? name : "");
+    c->dirty = true;
 }
 
 void ph_transfer_card_place(ph_transfer_card *c, const char *place)

@@ -748,10 +748,11 @@ static void draw_file_rows(ph_workspace *u, SDL_Rect b, bool full)
             SDL_Rect row = {b.x, cy, b.w, 66};
             if (u->selected == f->id)
                 rounded(u, row, 6, u->selected_bg);
-            char when[40], size[40], sub[128];
+            char when[40], size[40], sub[200];
             timestamp(f->time, when);
             size_text(f->bytes, size);
-            snprintf(sub, sizeof sub, "%s · %s", size, f->incoming ? "From iPhone" : "To iPhone");
+            const char *who = f->device[0] ? f->device : u->live.phone[0] ? u->live.phone : "iPhone";
+            snprintf(sub, sizeof sub, "%s · %s %.128s", size, f->incoming ? "From" : "To", who);
             int right = b.w > 420 ? 120 : 86;
             file_badge(u, (SDL_Rect){b.x + 2, cy + 13, 34, 40}, f->name);
             fitted_label(u, f->name, b.x + 50, cy + 12, b.w - right - 58, 13, true, u->ink);
@@ -1136,9 +1137,9 @@ static int transfer_progress(ph_workspace *u, int x, int y, int width)
     if (u->live.incoming_file[0])
         return incoming_progress(u, x, y, width);
     if (u->live.receiving_total > 0) {
-        char label[96];
-        snprintf(label, sizeof label, "Receiving from iPhone · %d of %d saved",
-                 u->live.receiving_done, u->live.receiving_total);
+        char label[160];
+        snprintf(label, sizeof label, "Receiving from %.64s · %d of %d saved",
+                 u->live.phone[0] ? u->live.phone : "iPhone", u->live.receiving_done, u->live.receiving_total);
         fitted_label(u, label, x, y, width, 12, true, u->ink);
         y += 28;
     }

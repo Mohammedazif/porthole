@@ -1489,7 +1489,7 @@ static void record_transfer(app *a, const char *path, bool incoming, ph_transfer
  * and the card shows instead. where is "Downloads" or "the Desktop". */
 static bool tray_notice(app *a, const char *path, int count, const char *where)
 {
-    char title[128], text[256], shown[96];
+    char title[200], text[256], shown[96];
     const char *name = path ? ph_path_base(path) : "";
     size_t i = 0;
     SDL_Window *window = SDL_GetWindowFromID(ph_window_id(a->win));
@@ -1500,11 +1500,15 @@ static bool tray_notice(app *a, const char *path, int count, const char *where)
     for (; name[i] && i + 1 < sizeof shown; i++)
         shown[i] = name[i];
     shown[i] = '\0';
+    char phone[64];
+    ph_origin_phone_name(a->origin, phone, sizeof phone);
+    if (!phone[0])
+        snprintf(phone, sizeof phone, "iPhone");
     if (count > 1) {
-        snprintf(title, sizeof title, "%d files received from iPhone", count);
+        snprintf(title, sizeof title, "%d files received from %s", count, phone);
         snprintf(text, sizeof text, "%s and %d more, in %.40s", shown, count - 1, where ? where : "");
     } else {
-        snprintf(title, sizeof title, "%s received from iPhone", shown);
+        snprintf(title, sizeof title, "%.60s received from %s", shown, phone);
         snprintf(text, sizeof text, "Saved to %.40s. Show in folder.", where ? where : "Downloads");
     }
     if (!ph_wintray_notify(a->tray, title, text))
@@ -2904,6 +2908,11 @@ static void handle_app_event(app *a, const SDL_Event *e, AVFrame *frame, uint64_
             a->inbox_total = total;
         } else {
             ph_window_set_receiving(a->win, 0, 0);
+        }
+        if (a->card) {
+            char phone[129];
+            ph_origin_phone_name(a->origin, phone, sizeof phone);
+            ph_transfer_card_set_phone(a->card, phone);
         }
         if (total > 0 && a->card && done < total && ph_workspace_notifications(ph_window_workspace(a->win)))
             ph_transfer_card_receiving(a->card, NULL, 0, 0, done, total, SDL_GetTicks64());

@@ -2959,11 +2959,18 @@ typedef struct transfer_row {
     SDL_Color sub_color;
 } transfer_row;
 
-static transfer_row read_transfer(const char *line)
+static transfer_row read_transfer(const char *line, const char *phone)
 {
     transfer_row row = {line, "", color_muted};
+    static char sent[96];
 
-    if (!strncmp(line, "Sent ", 5)) { row.title = line + 5; row.sub = "Sent to iPhone"; }
+    if (!phone || !phone[0])
+        phone = "iPhone";
+    if (!strncmp(line, "Sent ", 5)) {
+        row.title = line + 5;
+        snprintf(sent, sizeof sent, "Sent to %.80s", phone);
+        row.sub = sent;
+    }
     else if (!strncmp(line, "Cancelled ", 10)) { row.title = line + 10; row.sub = "Cancelled"; }
     else if (!strncmp(line, "Could not send ", 15)) {
         row.title = line + 15;
@@ -2976,7 +2983,7 @@ static transfer_row read_transfer(const char *line)
         row.title = line + 9;
         if (!ph_place_save_label(label, sizeof label))
             snprintf(label, sizeof label, "Downloads");
-        snprintf(sub, sizeof sub, "From iPhone, in %s", label);
+        snprintf(sub, sizeof sub, "From %.24s, in %.48s", phone, label);
         row.sub = sub;
     }
     return row;
@@ -3078,15 +3085,16 @@ static void draw_transfers(ph_window *w, int width, int height)
         int track = t.card.w - 28, seg = track / 3;
         int pos = (int)((now / 6) % (Uint64)(track + seg)) - seg;
         int a = pos < 0 ? 0 : pos, b = pos + seg > track ? track : pos + seg;
-        char status[48];
+        char status[112];
+        const char *phone = w->phone_label[0] ? w->phone_label : "iPhone";
 
         /* A known share fills the bar; otherwise a short piece travels along it. */
         if (w->transfer_percent >= 0) {
             a = 0;
             b = track * (w->transfer_percent > 100 ? 100 : w->transfer_percent) / 100;
-            snprintf(status, sizeof status, "Sending to iPhone, %d%%", w->transfer_percent);
+            snprintf(status, sizeof status, "Sending to %.64s, %d%%", phone, w->transfer_percent);
         } else {
-            snprintf(status, sizeof status, "Sending to iPhone");
+            snprintf(status, sizeof status, "Sending to %.64s", phone);
         }
 
         surface_card(r, t.card);
@@ -3132,7 +3140,7 @@ static void draw_transfers(ph_window *w, int width, int height)
             draw_text(r, heads[g], t.x + 16, y, inner, 1, color_muted);
             y += 22;
             for (int n = 0; n < counts[g] && y + 44 <= list_end; n++) {
-                transfer_row row = read_transfer(w->transfer_lines[groups[g][n]]);
+                transfer_row row = read_transfer(w->transfer_lines[groups[g][n]], w->phone_label);
                 file_tile(r, t.x + 18, y + 4, row.title);
                 draw_line_fit(r, row.title, t.x + 56, y + 2, inner - 44, 1, color_text);
                 draw_text(r, row.sub, t.x + 56, y + 21, inner - 44, 1, row.sub_color);
